@@ -32,7 +32,7 @@ impl NetNode {
         Self {
             ofdm_gain: 1.0,
             station,
-            rx: audio::Receivers::new(),
+            rx: audio::Receivers::without_lifeline(),
             bursts: Vec::new(),
             lead: (lead_s * FS) as usize,
             on_air: false,

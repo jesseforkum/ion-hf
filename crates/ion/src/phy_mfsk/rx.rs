@@ -230,6 +230,8 @@ pub struct MfskRx {
     spans: VecDeque<(i64, i64)>,
     stats: RxStats,
     track_drift: bool,
+    /// The modes whose headers are tried (R0, R1).
+    modes: [bool; 2],
     expect: Option<Expect>,
     /// Impulse blanker on the audio, and how many of the audio samples
     /// around each baseband sample it zeroed (ring like `ring`).
@@ -276,6 +278,7 @@ impl MfskRx {
             spans: VecDeque::new(),
             stats: RxStats::default(),
             track_drift: true,
+            modes: [true; 2],
             expect: None,
             blanker: Blanker::new(center_hz),
             blanked: vec![0; RING],
@@ -287,6 +290,12 @@ impl MfskRx {
     #[doc(hidden)]
     pub fn set_drift_tracking(&mut self, on: bool) {
         self.track_drift = on;
+    }
+
+    /// Try only the headers of `modes` (both by default): a candidate that
+    /// is none of them is given up as soon as their headers fail.
+    pub fn set_modes(&mut self, modes: &[MfskMode]) {
+        self.modes = [modes.contains(&MfskMode::R0), modes.contains(&MfskMode::R1)];
     }
 
     /// Impulse blanker ([`crate::blanker`]) on (the default) or off.

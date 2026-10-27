@@ -3,7 +3,7 @@
 
 use crate::fec::{self, Rate};
 use crate::phy::{Constellation, Pilots};
-use crate::phy_mfsk::MfskMode;
+use crate::phy_mfsk::{MfskLayout, MfskMode};
 
 /// OFDM shape: guard interval and width. Normal (4 ms) and long (10 ms,
 /// NVIS-type echoes) fill the band; slice is Normal's spacing and guard on
@@ -20,7 +20,16 @@ pub enum Guard {
 pub enum Wave {
     Mfsk(MfskMode),
     Ofdm(Guard),
+    /// [`LIFELINE_MODE`] in [`LIFELINE_LAYOUT`] on the link's centre: not a
+    /// level, the link's lifeline below the floor (`docs/link.md`,
+    /// Lifeline).
+    Lifeline,
 }
+
+/// The lifeline's waveform: MFSK R1 stretched 7 times, 32 tones 10.2 Hz
+/// apart in 337 Hz, about 6 dB under R0 (`docs/mfsk.md`, Below the floor).
+pub const LIFELINE_LAYOUT: MfskLayout = MfskLayout::scaled(7);
+pub const LIFELINE_MODE: MfskMode = MfskMode::R1;
 
 /// Codeword size of a level's data frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

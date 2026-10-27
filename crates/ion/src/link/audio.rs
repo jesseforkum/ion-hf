@@ -1,16 +1,16 @@
 //! Bursts to audio and back: frames through the LDPC codec and the right
-//! PHY (MFSK floor, slice, long-guard or normal OFDM), and every receiver
-//! listening at once. Tiny messages are header-only bursts.
+//! PHY (MFSK floor, slice, long-guard or normal OFDM, the lifeline), and
+//! every receiver listening at once. Tiny messages are header-only bursts.
 
 use ion_dsp::channel::{Channel, Profile, add_awgn};
 use ion_dsp::dsp::{AUDIO_RATE, NoiseGen, noise_sigma};
 use ion_dsp::ionos::{self, Ionos};
 
 use super::harq::Soft;
-use super::sim::{Medium, ModelAir};
-use super::station::{Air, CONTROL, Config, Incoming, Outgoing, TINY, frame_bits, user_code};
+use super::sim::{Medium, ModelAir, scheduled};
+use super::station::{Air, CONTROL, Config, Incoming, Outgoing, TINY, frame_bits, user_code, user_session};
 use crate::fec;
-use crate::level::{FrameSize, Guard, LADDER, Wave};
+use crate::level::{FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
 use crate::phy::{self, Constellation, Numerology, PhyRx, Pilots, TxOptions};
 use crate::phy_mfsk::{self, MfskBurst, MfskRx};
 use crate::slots::{OFFSETS_HZ, SLOTS, SlotMeter};
@@ -80,6 +80,9 @@ impl Air for PhyAir {
             Wave::Ofdm(g) => phy::burst_samples_with(numerology(g), p, c, bits),
             // GF(32) short frames: 205 tones each (`fec::nb`).
             Wave::Mfsk(m) => phy_mfsk::burst_samples(m, 5 * mfsk_symbols(code, bits)),
+            Wave::Lifeline => {
+                phy_mfsk::burst_samples_with(LIFELINE_LAYOUT, LIFELINE_MODE, 5 * mfsk_symbols(code, bits))
+            }
         };
         if samples == 0 {
             // A PHY not built yet: use the model's numbers.
@@ -93,6 +96,7 @@ impl Air for PhyAir {
         match wave {
             Wave::Ofdm(g) => phy::capacity_bits_with(numerology(g), p, c, phy::MAX_DATA_SYMBOLS),
             Wave::Mfsk(m) => phy_mfsk::max_bits(m),
+            Wave::Lifeline => phy_mfsk::max_bits(LIFELINE_MODE),
         }
     }
 }
@@ -214,6 +218,11 @@ pub fn transmit(b: &Outgoing) -> Vec<f32> {
         Wave::Mfsk(m) => {
             debug_assert!(!is_long(b.code), "long frames on MFSK");
             phy_mfsk::modulate_symbols(m, b.user, b.extra, &encode_frames_nb(b), CENTER_HZ)
+        }
+        Wave::Lifeline => {
+            debug_assert!(!is_long(b.code), "long frames on the lifeline");
+            let syms = encode_frames_nb(b);
+            phy_mfsk::modulate_symbols_with(LIFELINE_LAYOUT, LIFELINE_MODE, b.user, b.extra, &syms, CENTER_HZ)
         }
         Wave::Ofdm(g) => {
             let (c, _) = shape(b.code);
@@ -342,6 +351,14 @@ pub fn decode_mfsk(b: &MfskBurst) -> Incoming {
     }
 }
 
+/// A burst the lifeline's receiver heard, as the link sees it.
+pub fn decode_lifeline(b: &MfskBurst) -> Incoming {
+    Incoming {
+        wave: Wave::Lifeline,
+        ..decode_mfsk(b)
+    }
+}
+
 /// One received burst with what a net receiver needs beyond
 /// [`Incoming`]: where it sat in the audio, and (MFSK) the burst itself,
 /// for decoding again with a priori knowledge.
@@ -360,6 +377,38 @@ fn mfsk_len(b: &MfskBurst) -> u64 {
     phy_mfsk::burst_samples(b.mode, b.llrs.len()) as u64
 }
 
+/// Audio samples of a burst the lifeline's receiver heard.
+fn lifeline_len(b: &MfskBurst) -> u64 {
+    phy_mfsk::burst_samples_with(LIFELINE_LAYOUT, b.mode, b.llrs.len()) as u64
+}
+
+/// The lifeline's receiver: R1/7 on the link's centre, moved to the
+/// frequency offset the peer's last bursts came in at, since its pull-in
+/// (±35 Hz) is half R0's. It tries R1's headers only, so a false start
+/// (which keeps it busy until every header it tries has failed) ends
+/// after R1's.
+struct LifelineRx {
+    rx: MfskRx,
+    /// Its centre less [`CENTER_HZ`], Hz.
+    offset_hz: f32,
+    /// The receivers' audio sample `rx` started at.
+    base: u64,
+}
+
+/// The lifeline's receiver moves once the offset heard is this far from
+/// its own, Hz: well inside its pull-in.
+const LIFELINE_RETUNE_HZ: f32 = 8.0;
+
+fn lifeline_rx(offset_hz: f32) -> MfskRx {
+    let mut rx = MfskRx::with_layout(LIFELINE_LAYOUT, CENTER_HZ + offset_hz);
+    rx.set_modes(&[LIFELINE_MODE]);
+    rx
+}
+
+/// Audio samples the lifeline's receiver takes at a time (0.1 s), so it
+/// can move between bursts within one long stretch of audio.
+const LIFELINE_BLOCK: usize = 4800;
+
 /// Audio samples of a received OFDM burst.
 fn ofdm_len(b: &phy::RxBurst) -> u64 {
     let pilots = if b.header_only { Pilots::Robust } else { b.pilots };
@@ -368,17 +417,23 @@ fn ofdm_len(b: &phy::RxBurst) -> u64 {
 
 /// Every receiver at once, on the same audio: the full-band OFDM guards,
 /// the slice in each of the three thirds of the passband
-/// ([`crate::slots`]), MFSK, and the slot meter.
+/// ([`crate::slots`]), MFSK, the lifeline, and the slot meter.
 pub struct Receivers {
     ofdm: PhyRx,
     ofdm_long: PhyRx,
     ofdm_slice: [PhyRx; SLOTS],
     mfsk: MfskRx,
+    lifeline: Option<LifelineRx>,
     ofdm_out: Vec<phy::RxBurst>,
     /// Per entry of `ofdm_out`: the slot of the slice receiver that heard
     /// it, or none (a full-band burst).
     ofdm_slot: Vec<Option<usize>>,
     mfsk_out: Vec<MfskBurst>,
+    lifeline_out: Vec<MfskBurst>,
+    /// Frequency offset of the last burst heard of session `follow` (of
+    /// any, if none), Hz.
+    offset_hz: f32,
+    follow: Option<u8>,
     meter: SlotMeter,
     /// The meter's pick, stamped on every burst heard.
     slot: u8,
@@ -398,11 +453,27 @@ impl Receivers {
                 PhyRx::with_numerology(numerology(Guard::Slice), CENTER_HZ + OFFSETS_HZ[k])
             }),
             mfsk: MfskRx::new(CENTER_HZ),
+            lifeline: Some(LifelineRx {
+                rx: lifeline_rx(0.0),
+                offset_hz: 0.0,
+                base: 0,
+            }),
             ofdm_out: Vec::new(),
             ofdm_slot: Vec::new(),
             mfsk_out: Vec::new(),
+            lifeline_out: Vec::new(),
+            offset_hz: 0.0,
+            follow: None,
             meter: SlotMeter::new(CENTER_HZ, AUDIO_RATE, METER_LAG_S),
             slot: 0,
+        }
+    }
+
+    /// Without the lifeline's receiver.
+    pub fn without_lifeline() -> Self {
+        Self {
+            lifeline: None,
+            ..Self::new()
         }
     }
 
@@ -413,6 +484,7 @@ impl Receivers {
         self.ofdm_out.clear();
         self.ofdm_slot.clear();
         self.mfsk_out.clear();
+        self.lifeline_out.clear();
         let from = self.meter.samples();
         self.meter.push(samples);
         let to = self.meter.samples();
@@ -424,12 +496,32 @@ impl Receivers {
             self.ofdm_slot.resize(self.ofdm_out.len(), Some(k));
         }
         self.mfsk.process(samples, &mut self.mfsk_out);
-        // Bursts heard: out of the thirds they covered (all, full-band).
+        let follow = |user: u16| self.follow.is_none_or(|s| s == user_session(user));
+        let full = self
+            .ofdm_out
+            .iter()
+            .filter(|b| follow(b.user))
+            .map(|b| b.freq_offset_hz);
+        let mfsk = self
+            .mfsk_out
+            .iter()
+            .filter(|b| follow(b.user))
+            .map(|b| b.freq_offset_hz);
+        if let Some(off) = full.chain(mfsk).last() {
+            self.offset_hz = off;
+        }
+        self.run_lifeline(samples, from);
+        // Bursts heard: out of the thirds they covered (all, full-band;
+        // the lifeline sits in the centre's).
         for (b, slot) in self.ofdm_out.iter().zip(&self.ofdm_slot) {
             self.meter.mask(b.start_sample, b.start_sample + ofdm_len(b), *slot);
         }
         for b in &self.mfsk_out {
             self.meter.mask(b.start_sample, b.start_sample + mfsk_len(b), None);
+        }
+        for b in &self.lifeline_out {
+            self.meter
+                .mask(b.start_sample, b.start_sample + lifeline_len(b), Some(0));
         }
         // Bursts under way.
         if self.ofdm.busy() || self.ofdm_long.busy() || self.mfsk.busy() {
@@ -443,12 +535,58 @@ impl Receivers {
         self.slot = self.meter.best() as u8;
     }
 
+    /// The lifeline's receiver over `samples` (the first is audio sample
+    /// `from`), a block at a time: it moves to the offset last heard once
+    /// that is [`LIFELINE_RETUNE_HZ`] from its own (a burst of the peer's
+    /// has just ended, so none of its is under way), and its own bursts
+    /// move that offset (drift over a hold).
+    fn run_lifeline(&mut self, samples: &[f32], from: u64) {
+        let Some(l) = self.lifeline.as_mut() else {
+            return;
+        };
+        let mut at = from;
+        for block in samples.chunks(LIFELINE_BLOCK) {
+            if (self.offset_hz - l.offset_hz).abs() > LIFELINE_RETUNE_HZ {
+                *l = LifelineRx {
+                    rx: lifeline_rx(self.offset_hz),
+                    offset_hz: self.offset_hz,
+                    base: at,
+                };
+            }
+            let n = self.lifeline_out.len();
+            l.rx.process(block, &mut self.lifeline_out);
+            for b in &mut self.lifeline_out[n..] {
+                b.start_sample += l.base;
+                if self.follow.is_none_or(|s| s == user_session(b.user)) {
+                    self.offset_hz = l.offset_hz + b.freq_offset_hz;
+                }
+            }
+            at += block.len() as u64;
+        }
+    }
+
+    /// Follow the frequency offset of session `s`'s bursts only (`None`:
+    /// of every burst).
+    pub fn follow(&mut self, s: Option<u8>) {
+        self.follow = s;
+    }
+
+    /// The frequency offset of the last burst heard, Hz, and where the
+    /// lifeline's receiver listens (offset from [`CENTER_HZ`]).
+    pub fn offsets_hz(&self) -> (f32, Option<f32>) {
+        (self.offset_hz, self.lifeline.as_ref().map(|l| l.offset_hz))
+    }
+
     /// Feeds 48 kHz audio; appends every burst completed in it.
     pub fn process(&mut self, samples: &[f32], out: &mut Vec<Incoming>) {
         self.run(samples);
         let slot = self.slot;
         out.extend(self.ofdm_out.iter().map(|b| Incoming { slot, ..decode(b) }));
         out.extend(self.mfsk_out.iter().map(|b| Incoming { slot, ..decode_mfsk(b) }));
+        out.extend(self.lifeline_out.iter().map(|b| Incoming {
+            slot,
+            ..decode_lifeline(b)
+        }));
     }
 
     /// [`Receivers::process`], with each burst's place in the audio and
@@ -471,6 +609,15 @@ impl Receivers {
             end_sample: b.start_sample + mfsk_len(&b),
             mfsk: Some(b),
         }));
+        out.extend(self.lifeline_out.drain(..).map(|b| Heard {
+            inc: Incoming {
+                slot,
+                ..decode_lifeline(&b)
+            },
+            start_sample: b.start_sample,
+            end_sample: b.start_sample + lifeline_len(&b),
+            mfsk: Some(b),
+        }));
     }
 
     /// The slot meter's pick (0 the centre) and each third's score.
@@ -488,8 +635,17 @@ impl Receivers {
         self.mfsk.stats()
     }
 
+    /// A burst of the ladder's waveforms is coming in.
     pub fn busy(&self) -> bool {
         self.ofdm.busy() || self.ofdm_long.busy() || self.ofdm_slice.iter().any(PhyRx::busy) || self.mfsk.busy()
+    }
+
+    /// A lifeline burst may be coming in. Apart from [`Self::busy`]: the
+    /// lifeline's receiver starts on other signals in its 400 Hz now and
+    /// then and takes up to 6 s to give them up, which only a link in a
+    /// hold should wait for.
+    pub fn lifeline_busy(&self) -> bool {
+        self.lifeline.as_ref().is_some_and(|l| l.rx.busy())
     }
 }
 
@@ -518,6 +674,11 @@ pub struct AudioMedium {
     /// peak power sends them; on IONOS, in 3 kHz against the
     /// [`ionos::Reference`] given.
     pub snr_db: f32,
+    /// (from, SNR): from each time on, `snr_db` is its value instead
+    /// (times ascending).
+    pub schedule: Vec<(f64, f32)>,
+    /// Added to the SNR of what each station sends, dB: a lopsided link.
+    pub dir_db: [f32; 2],
     pep: bool,
     paths: Paths,
     receivers: [Receivers; 2],
@@ -536,6 +697,8 @@ impl AudioMedium {
             receivers: [Receivers::new(), Receivers::new()],
             noise: NoiseGen::new(seed ^ 0xA5A5),
             heard: Vec::new(),
+            schedule: Vec::new(),
+            dir_db: [0.0; 2],
             pep: false,
         }
     }
@@ -559,6 +722,8 @@ impl AudioMedium {
             receivers: [Receivers::new(), Receivers::new()],
             noise: NoiseGen::new(seed ^ 0xA5A5),
             heard: Vec::new(),
+            schedule: Vec::new(),
+            dir_db: [0.0; 2],
             pep: false,
         }
     }
@@ -571,10 +736,32 @@ impl AudioMedium {
         self.pep = on;
         self
     }
+
+    /// Watterson paths only: both directions arrive `offset_hz` off.
+    pub fn with_offset(mut self, offset_hz: f32) -> Self {
+        if let Paths::Watterson(ch) = &mut self.paths {
+            let [a, b] = std::mem::replace(
+                &mut **ch,
+                [
+                    Channel::from_profile(Profile::Awgn, 0),
+                    Channel::from_profile(Profile::Awgn, 0),
+                ],
+            );
+            **ch = [a.with_offset(offset_hz, 0.0), b.with_offset(offset_hz, 0.0)];
+        }
+        self
+    }
+
+    /// Without the lifeline's receivers.
+    pub fn without_lifeline(mut self) -> Self {
+        self.receivers = [Receivers::without_lifeline(), Receivers::without_lifeline()];
+        self
+    }
 }
 
 impl Medium for AudioMedium {
-    fn carry(&mut self, from: usize, burst: &Outgoing, _start: f64, _end: f64) -> Option<Incoming> {
+    fn carry(&mut self, from: usize, burst: &Outgoing, start: f64, _end: f64) -> Option<Incoming> {
+        let snr_db = scheduled(&self.schedule, start).unwrap_or(self.snr_db) + self.dir_db[from];
         let on_air = matches!(self.paths, Paths::Ionos(_, ionos::Reference::Peak));
         let tx = if on_air {
             transmit_with(burst, ofdm_gain(OFDM_AIR_GAIN_DB))
@@ -590,19 +777,29 @@ impl Medium for AudioMedium {
             tx.iter().map(|x| x * x).sum::<f32>() / tx.len() as f32
         };
         // Lead-in and tail of noise around the burst, and the channel delay.
-        let lead = (0.1 * AUDIO_RATE) as usize;
+        // The lifeline's receiver runs k = 7 times slower: its detector and
+        // its last symbols want as much more.
+        let (lead_s, tail_s) = match burst.wave {
+            Wave::Lifeline => {
+                let k = LIFELINE_LAYOUT.k as f32;
+                (0.5 * k, 0.6 * k)
+            }
+            _ => (0.1, 0.1),
+        };
+        let lead = (lead_s * AUDIO_RATE) as usize;
+        let tail = (tail_s * AUDIO_RATE) as usize;
         let latency = match &self.paths {
             Paths::Watterson(ch) => ch[from].latency(),
             Paths::Ionos(ch, _) => ch[from].latency(),
         };
         let mut input = vec![0.0; lead];
         input.extend_from_slice(&tx);
-        input.resize(input.len() + latency + lead, 0.0);
+        input.resize(input.len() + latency + tail, 0.0);
         let mut out = vec![0.0; input.len()];
         match &mut self.paths {
             Paths::Watterson(ch) => {
                 ch[from].process(&input, &mut out);
-                let sigma = noise_sigma(power, self.snr_db, 2400.0, AUDIO_RATE);
+                let sigma = noise_sigma(power, snr_db, 2400.0, AUDIO_RATE);
                 add_awgn(&mut out, sigma, &mut self.noise);
             }
             Paths::Ionos(ch, reference) => {
@@ -613,7 +810,7 @@ impl Medium for AudioMedium {
                     ionos::Reference::Peak => ion_dsp::ionos::reference_power(&tx, ionos::Reference::Peak),
                     ionos::Reference::Mean => power,
                 };
-                ch[from].process(&input, Some((p, self.snr_db)), &mut out);
+                ch[from].process(&input, Some((p, snr_db)), &mut out);
             }
         }
         self.heard.clear();

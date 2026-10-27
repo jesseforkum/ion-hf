@@ -16,7 +16,7 @@ const SUCCESS_WEIGHT: f32 = 0.3;
 /// OFDM channel failures compare guards).
 fn guard_ms(w: Wave) -> f32 {
     match w {
-        Wave::Mfsk(_) => 0.0,
+        Wave::Mfsk(_) | Wave::Lifeline => 0.0,
         Wave::Ofdm(Guard::Long) => 10.0,
         Wave::Ofdm(_) => 4.0,
     }
@@ -279,7 +279,7 @@ impl Station {
         }
         let c = self.peer_class;
         match LADDER[l].wave {
-            Wave::Mfsk(_) => true,
+            Wave::Mfsk(_) | Wave::Lifeline => true,
             Wave::Ofdm(Guard::Long) => !c.doppler,
             Wave::Ofdm(_) => !c.doppler && !c.echo,
         }

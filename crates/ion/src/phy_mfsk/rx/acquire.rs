@@ -121,7 +121,7 @@ impl MfskRx {
         let dmax = *c.d.iter().max().unwrap() as i64;
         let mut pending = false;
         for (hi, &(mode, kind)) in HYPS.iter().enumerate() {
-            if c.tried[hi] {
+            if c.tried[hi] || !self.modes[gi(mode)] {
                 continue;
             }
             let hs = frame::header_symbols(mode, kind);
@@ -242,7 +242,7 @@ impl MfskRx {
             }
             debug_assert_eq!(steps, nbits);
             let bits = conv::decode(steps, |j, l| lam[frame::header_slot(fmt, kind, j) * vals + l]);
-            if let Some((user, extra, nb, sym)) = frame::parse_header(mode, kind, &bits) {
+            if let Some((user, extra, nb, sym)) = frame::parse_header(self.layout.k, mode, kind, &bits) {
                 return Some(self.start_burst(c, mode, kind, user, extra, (nb, sym), &bits));
             }
         }
@@ -281,8 +281,9 @@ impl MfskRx {
         let fmt = g.fmt;
         // The length field as sent: a symbol-mapped burst flags it.
         let field = h.nbits | if h.symbols && h.nbits > 0 { frame::SYM_FLAG } else { 0 };
+        let k = self.layout.k;
         let values_of = |user: u16, extra: u16| {
-            frame::header_values(mode, kind, &frame::header_bits(mode, kind, user, extra, field))
+            frame::header_values(mode, kind, &frame::header_bits(k, mode, kind, user, extra, field))
         };
         let cand_values: Vec<Vec<[u16; 3]>> = cands.iter().map(|&(u, x)| values_of(u, x)).collect();
         let hs = cand_values[0].len();
@@ -360,7 +361,7 @@ impl MfskRx {
             return None;
         }
         self.stats.known_headers += 1;
-        let info = frame::header_bits(mode, kind, bu, bx, field);
+        let info = frame::header_bits(self.layout.k, mode, kind, bu, bx, field);
         Some(self.start_burst(c, mode, kind, bu, bx, (h.nbits, h.symbols && h.nbits > 0), &info))
     }
 

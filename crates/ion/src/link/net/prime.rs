@@ -101,7 +101,7 @@ impl NetStation {
                     0,
                     frame_bits(CTRL_CODE, 1),
                 )),
-                Wave::Ofdm(_) => None,
+                Wave::Ofdm(_) | Wave::Lifeline => None,
             };
             return Some(NetExpect {
                 start_s: s0 + cal + k as f64 * len,

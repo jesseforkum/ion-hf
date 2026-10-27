@@ -33,6 +33,9 @@ pub struct ModelAir {
     /// Raw (coded) bit/s and preamble+header seconds, MFSK R0 and R1.
     pub mfsk_bps: [f64; 2],
     pub mfsk_overhead_s: [f64; 2],
+    /// The same for the lifeline (R1/7; its header-only burst is 7.85 s).
+    pub lifeline_bps: f64,
+    pub lifeline_overhead_s: f64,
 }
 
 impl Default for ModelAir {
@@ -45,6 +48,8 @@ impl Default for ModelAir {
             slice_factor: 4.4,
             mfsk_bps: [150.0, 450.0],
             mfsk_overhead_s: [0.6, 0.5],
+            lifeline_bps: 51.0,
+            lifeline_overhead_s: 7.85,
         }
     }
 }
@@ -69,6 +74,7 @@ impl Air for ModelAir {
                 let symbols = (coded_bits as f64 / (self.ofdm_carriers * bits_per_sym) as f64).ceil();
                 f * (self.ofdm_overhead_s + symbols * self.ofdm_symbol_s)
             }
+            Wave::Lifeline => self.lifeline_overhead_s + coded_bits as f64 / self.lifeline_bps,
         }
     }
 }
@@ -82,6 +88,8 @@ pub fn control_threshold_db(wave: Wave) -> f32 {
         Wave::Ofdm(Guard::Slice) => -6.0,
         Wave::Ofdm(Guard::Long) => -4.0,
         Wave::Ofdm(Guard::Normal) => -3.0,
+        // Header-only R1/7 at 90% from -20 dB on AWGN, -18 on CCIR poor.
+        Wave::Lifeline => -18.0,
     }
 }
 
@@ -103,6 +111,9 @@ pub struct ModelMedium {
     pub dir_db: [f32; 2],
     /// From this time on, the mean SNR is this instead: a band that dies.
     pub drop_at: Option<(f64, f32)>,
+    /// (from, SNR): from each time on, the mean SNR is its value (after
+    /// `drop_at`; times ascending). A fade that comes back.
+    pub schedule: Vec<(f64, f32)>,
     /// Delay span (ms) and Doppler spread (Hz) the receivers measure on
     /// every burst with data (`None`: nothing measured).
     pub spreads: Option<(f32, f32)>,
@@ -122,6 +133,7 @@ impl ModelMedium {
             deaf: None,
             dir_db: [0.0; 2],
             drop_at: None,
+            schedule: Vec::new(),
             spreads: None,
             noise: NoiseGen::new(seed),
             fade: 0.0,
@@ -141,6 +153,7 @@ impl ModelMedium {
             Some((at, snr)) if t >= at => snr,
             _ => self.snr_db,
         };
+        let mean = scheduled(&self.schedule, t).unwrap_or(mean);
         mean + self.fade
     }
 
@@ -239,6 +252,11 @@ impl Medium for ModelMedium {
             slot: 0,
         })
     }
+}
+
+/// The value of the last `(from, value)` step at or before `t`.
+pub fn scheduled(schedule: &[(f64, f32)], t: f64) -> Option<f32> {
+    schedule.iter().rev().find(|s| t >= s.0).map(|s| s.1)
 }
 
 /// What the model's channel costs against AWGN: its effective SNR is the
@@ -378,6 +396,7 @@ pub fn level_name(l: usize) -> String {
         Wave::Ofdm(Guard::Slice) => format!("slice {r}"),
         Wave::Ofdm(Guard::Long) => format!("long {r}"),
         Wave::Ofdm(Guard::Normal) => format!("{:?} {r}", lv.constellation),
+        Wave::Lifeline => "R1/7".into(),
     }
 }
 

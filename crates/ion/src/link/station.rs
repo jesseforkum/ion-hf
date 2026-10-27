@@ -73,20 +73,23 @@ const SPEAK_UP_AGAIN_S: f64 = 10.0;
 /// Waveforms from the most robust up.
 fn wave_rank(w: Wave) -> usize {
     match w {
-        Wave::Mfsk(MfskMode::R0) => 0,
-        Wave::Mfsk(MfskMode::R1) => 1,
-        Wave::Ofdm(Guard::Slice) => 2,
-        Wave::Ofdm(Guard::Long) => 3,
-        Wave::Ofdm(Guard::Normal) => 4,
+        Wave::Lifeline => 0,
+        Wave::Mfsk(MfskMode::R0) => 1,
+        Wave::Mfsk(MfskMode::R1) => 2,
+        Wave::Ofdm(Guard::Slice) => 3,
+        Wave::Ofdm(Guard::Long) => 4,
+        Wave::Ofdm(Guard::Normal) => 5,
     }
 }
 
 /// The next more robust waveform for a tiny or control burst (not the
-/// slice: only the receivers of one third of the band hear it).
+/// slice: only the receivers of one third of the band hear it). Never the
+/// lifeline: only a hold sends in it.
 fn wave_down(w: Wave) -> Wave {
     match w {
         Wave::Ofdm(Guard::Normal) => Wave::Ofdm(Guard::Long),
         Wave::Ofdm(_) => Wave::Mfsk(MfskMode::R1),
+        Wave::Lifeline => Wave::Lifeline,
         _ => FLOOR_WAVE,
     }
 }

@@ -136,14 +136,27 @@ pub fn header_symbols(mode: MfskMode, kind: Kind) -> usize {
     header_steps(fmt, kind) / fmt.tones
 }
 
-/// The CRC's initial value carries the mode and the header type, so a
-/// header decoded under the wrong hypothesis fails its check.
-fn crc_init(mode: MfskMode, kind: Kind) -> u16 {
-    match (mode, kind) {
+/// The CRC's initial value carries the mode, the header type and the
+/// layout's time scale `k`, so a header decoded under the wrong hypothesis,
+/// or by a receiver of another layout, fails its check. The full band
+/// (k = 1) keeps the values it always had.
+fn crc_init(k: usize, mode: MfskMode, kind: Kind) -> u16 {
+    let base = match (mode, kind) {
         (MfskMode::R0, Kind::HeaderOnly) => 0xFFFF,
         (MfskMode::R0, Kind::Data) => 0x1D0F,
         (MfskMode::R1, Kind::HeaderOnly) => 0xB4C8,
         (MfskMode::R1, Kind::Data) => 0x6A39,
+    };
+    base ^ layout_mask(k)
+}
+
+/// What a layout of time scale `k` adds to the CRC's initial value: none
+/// for the full band, never none for a scaled layout.
+fn layout_mask(k: usize) -> u16 {
+    if k == 1 {
+        0
+    } else {
+        mix64(0x4C41_594F_5554 ^ k as u64) as u16 | 1
     }
 }
 
@@ -153,25 +166,25 @@ fn crc_init(mode: MfskMode, kind: Kind) -> u16 {
 pub const SYM_FLAG: usize = 1 << 15;
 
 /// Header information bits: user, extra, [nbits, with [`SYM_FLAG`] for a
-/// symbol-mapped burst], CRC-16.
-pub fn header_bits(mode: MfskMode, kind: Kind, user: u16, extra: u16, nbits: usize) -> Vec<u8> {
+/// symbol-mapped burst], CRC-16, for a burst in a layout of time scale `k`.
+pub fn header_bits(k: usize, mode: MfskMode, kind: Kind, user: u16, extra: u16, nbits: usize) -> Vec<u8> {
     let mut b = Vec::with_capacity(64);
     push_bits(&mut b, user as u32, 16);
     push_bits(&mut b, extra as u32, 16);
     if kind == Kind::Data {
         push_bits(&mut b, nbits as u32, 16);
     }
-    let crc = crc16(&b, crc_init(mode, kind));
+    let crc = crc16(&b, crc_init(k, mode, kind));
     push_bits(&mut b, crc as u32, 16);
     b
 }
 
-/// Checks the CRC and the fields; returns (user, extra, nbits, symbol
-/// mapped).
-pub fn parse_header(mode: MfskMode, kind: Kind, b: &[u8]) -> Option<(u16, u16, usize, bool)> {
+/// Checks the CRC (layout of time scale `k`) and the fields; returns
+/// (user, extra, nbits, symbol mapped).
+pub fn parse_header(k: usize, mode: MfskMode, kind: Kind, b: &[u8]) -> Option<(u16, u16, usize, bool)> {
     let n = header_info_bits(kind) - 16;
     let crc = read_bits(&b[n..], 16) as u16;
-    if crc16(&b[..n], crc_init(mode, kind)) != crc {
+    if crc16(&b[..n], crc_init(k, mode, kind)) != crc {
         return None;
     }
     let user = read_bits(b, 16) as u16;
@@ -334,15 +347,22 @@ mod tests {
 
     #[test]
     fn header_round_trip_fields() {
-        for (mode, kind) in HYPS {
-            let b = header_bits(mode, kind, 0xBEEF, 0x1234, 777);
-            let got = parse_header(mode, kind, &b).unwrap();
-            assert_eq!((got.0, got.1), (0xBEEF, 0x1234));
-            for (m2, k2) in HYPS {
-                if (m2, k2) != (mode, kind) && header_info_bits(k2) == b.len() {
-                    assert!(parse_header(m2, k2, &b).is_none());
+        for k in [1, 2, 7, 8] {
+            for (mode, kind) in HYPS {
+                let b = header_bits(k, mode, kind, 0xBEEF, 0x1234, 777);
+                let got = parse_header(k, mode, kind, &b).unwrap();
+                assert_eq!((got.0, got.1), (0xBEEF, 0x1234));
+                for k2 in [1, 2, 7, 8] {
+                    for (m2, kind2) in HYPS {
+                        if (k2, m2, kind2) != (k, mode, kind) && header_info_bits(kind2) == b.len() {
+                            assert!(parse_header(k2, m2, kind2, &b).is_none(), "k {k} as {k2}");
+                        }
+                    }
                 }
             }
         }
+        // The full band's checks are what they always were.
+        assert_eq!(crc_init(1, MfskMode::R0, Kind::HeaderOnly), 0xFFFF);
+        assert_eq!(crc_init(1, MfskMode::R1, Kind::Data), 0x6A39);
     }
 }

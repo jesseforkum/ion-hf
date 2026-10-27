@@ -240,7 +240,7 @@ fn build(
     let k = layout.k as f32;
     let nbits = nbits_field & !frame::SYM_FLAG;
     let kind = if nbits == 0 { Kind::HeaderOnly } else { Kind::Data };
-    let info = frame::header_bits(mode, kind, user, extra, nbits_field);
+    let info = frame::header_bits(layout.k, mode, kind, user, extra, nbits_field);
     let mut values = frame::header_values(mode, kind, &info);
     values.extend(data);
 
