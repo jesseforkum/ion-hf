@@ -15,6 +15,7 @@ use crate::fec;
 use crate::level::{FLOOR, FLOOR_WAVE, Guard, LADDER, Wave};
 use crate::phy_mfsk::MfskMode;
 
+mod clean;
 mod config;
 mod gear;
 mod lifeline;
@@ -23,6 +24,7 @@ mod sender;
 
 use lifeline::Hold;
 
+pub use clean::{Clean, Settled};
 pub use config::Config;
 pub use receiver::cheap_ack_waves;
 
@@ -134,6 +136,8 @@ pub enum End {
     LinkLost,
     /// The lifeline's hold ran out: the path stayed too weak to resume.
     Weak { confirmed: bool },
+    /// Nothing moved either way for [`Config::idle_close_s`]: we ended it.
+    Idle { confirmed: bool },
 }
 
 impl End {
@@ -141,6 +145,7 @@ impl End {
         match self {
             End::Client { .. } => End::Client { confirmed: false },
             End::Weak { .. } => End::Weak { confirmed: false },
+            End::Idle { .. } => End::Idle { confirmed: false },
             e => e,
         }
     }
@@ -475,6 +480,14 @@ pub struct Station {
     unsent: Vec<Vec<u8>>,
     tx_codec: Option<StreamEncoder>,
     rx_codec: Option<StreamDecoder>,
+    /// Host bytes cut from the queue this link ([`Station::clean`]): a
+    /// stream position past the last cut is this much short of its host
+    /// offset.
+    cut: u64,
+    limbo: Option<clean::Limbo>,
+    settled: Option<Settled>,
+    /// Last time data moved or waited either way (for `idle_close_s`).
+    last_data: f64,
 }
 
 impl Station {
@@ -559,6 +572,10 @@ impl Station {
             unsent: Vec::new(),
             tx_codec: None,
             rx_codec: None,
+            cut: 0,
+            limbo: None,
+            settled: None,
+            last_data: 0.0,
         }
     }
 
@@ -593,6 +610,7 @@ impl Station {
 
     /// The link ends: `state` (Disconnected or Failed), for `why`.
     fn finish(&mut self, state: State, why: End) {
+        self.end_limbo();
         self.end_hold(self.last_heard.max(self.last_tx_end));
         self.state = state;
         self.end = Some(why);
@@ -747,14 +765,27 @@ impl Station {
     /// that does not answer gets [`Config::disc_retries`] tries, and the
     /// link closes anyway.
     pub fn disconnect(&mut self) {
+        self.disconnect_for(End::Client { confirmed: true });
+    }
+
+    /// Closes the link idle this long (from the next poll): nothing queued
+    /// or in flight either way, nothing delivered. `None`: never. Applies
+    /// to the link under way.
+    pub fn set_idle_close(&mut self, s: Option<f64>) {
+        self.cfg.idle_close_s = s;
+    }
+
+    /// [`Station::disconnect`], ending for `why`.
+    fn disconnect_for(&mut self, why: End) {
         self.want_disc = true;
         self.disc_by = None;
         match self.state {
             State::Connecting => {
                 self.clear_wait();
-                self.finish(State::Disconnected, End::Client { confirmed: false });
+                self.finish(State::Disconnected, why.unconfirmed());
             }
             State::Connected => {
+                self.end_limbo();
                 self.out.clear();
                 self.inflight.clear();
                 self.unsent.clear();
@@ -762,10 +793,10 @@ impl Station {
                 self.sends.clear();
                 self.reply = None;
                 if self.hold.is_some() {
-                    self.bye(End::Client { confirmed: true });
+                    self.bye(why);
                     return;
                 }
-                self.disc_why = End::Client { confirmed: true };
+                self.disc_why = why;
                 let wave = match self.role {
                     Role::Sender => self.cur_wave(),
                     Role::Receiver => LADDER[self.rx_level].wave,
@@ -814,6 +845,16 @@ impl Station {
                 self.link_t0 = Some(now);
             }
             return Some(self.note_tx(r));
+        }
+        if self.state == State::Connected {
+            // (`peer_wants_turn` is the peer's word only while we send.)
+            if self.has_data() || self.role == Role::Sender && self.peer_wants_turn {
+                self.last_data = now;
+            }
+            if !self.want_disc && self.cfg.idle_close_s.is_some_and(|s| now - self.last_data >= s) {
+                self.disconnect_for(End::Idle { confirmed: true });
+                return self.poll_tx(now);
+            }
         }
         if self.state == State::Connected && self.cfg.lifeline {
             if self.hold.is_none() && now - self.last_moved >= self.cfg.life_enter_s {
@@ -1096,6 +1137,7 @@ impl Station {
             self.last_heard = now;
             self.last_progress = now;
             self.last_moved = now;
+            self.last_data = now;
             self.answering = true;
             self.reset_data();
             self.agree(self.cfg.compress && f.flags & flags::COMPRESS != 0);
@@ -1176,6 +1218,8 @@ impl Station {
     }
 
     fn reset_data(&mut self) {
+        self.end_limbo();
+        self.cut = 0;
         self.inflight.clear();
         self.next_offset = 0;
         self.delivered = 0;

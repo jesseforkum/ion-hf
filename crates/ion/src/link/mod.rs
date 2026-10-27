@@ -15,4 +15,4 @@ pub mod sim;
 pub mod station;
 
 pub use node::Node;
-pub use station::{Air, Config, Incoming, Outgoing, Role, State, Station};
+pub use station::{Air, Clean, Config, Incoming, Outgoing, Role, Settled, State, Station};

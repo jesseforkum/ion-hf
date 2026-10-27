@@ -21,12 +21,19 @@
 //! `MODES` lists one mode, `ION` (Ion picks its levels itself), and
 //! `BCAST MODE n ...` is answered `OK` for an open port.
 //!
+//! `CLEANTXBUFFER` drops what has never been on air, as VARA's; what is
+//! on air unacknowledged (the limbo) still goes, and a VARA client's
+//! `BUFFER` leaves it out ([`ion::link::Clean`]).
+//!
 //! `DATA2G ON` (off again with `DATA2G OFF` or when the command client
-//! leaves): `DISCONNECTED` says why, as Data2G's host does (its
-//! `docs/arq.md` §9): `CLIENT`, `PEER`, `ABORT`, `LINK_LOST`,
-//! `LINK_FAILED weak path` (the lifeline's hold ran out), `NO_ANSWER`,
-//! with `unconfirmed` when our goodbye went unacknowledged. Data2G's other
-//! `DATA2G ON` extensions are not offered (`WRONG`, as before).
+//! leaves) turns on Data2G's host extensions (its `docs/arq.md` §9):
+//! `DISCONNECTED` says why (`CLIENT`, `IDLE`, `PEER`, `ABORT`,
+//! `LINK_LOST`, `LINK_FAILED weak path`, `NO_ANSWER`, with `unconfirmed`
+//! when our goodbye went unacknowledged); `CLEANTXBUFFER [n]` answers in
+//! host offsets, then `CLEANTXBUFFER SETTLED` (Data2G PR #118); data
+//! written before `CONNECTED` is dropped; `TIMEOUT [s]` gets or sets the
+//! link idle close and `TXPOWER [dB]` the output level below the
+//! operator's drive (Data2G PR #122; never above it).
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -35,11 +42,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use ion::link::State;
 use ion::link::station::End;
+use ion::link::{Clean, Settled, State};
 
 use crate::engine::UiEvent;
-use crate::ion_engine::{IonCmd, IonStatus};
+use crate::ion_engine::{IonCmd, IonStatus, TX_POWER_MIN_DB};
+
+/// What `TIMEOUT` says with no idle close set (Ion's default: a quiet link
+/// stays up); setting it or more turns the idle close off. Finite, as
+/// clients parse it as a number.
+const NO_IDLE_CLOSE_S: f64 = 1e9;
+/// Longest wait for the Ion worker's answer to a `CLEANTXBUFFER`.
+const CLEAN_WAIT: Duration = Duration::from_secs(5);
 
 /// Data2G's words for why a link ended (`DISCONNECTED reason [detail]
 /// [unconfirmed]`).
@@ -51,6 +65,7 @@ fn end_words(end: Option<End>, state: State) -> String {
         Some(End::NoAnswer) => "NO_ANSWER".into(),
         Some(End::LinkLost) => "LINK_LOST".into(),
         Some(End::Weak { confirmed }) => format!("LINK_FAILED weak path{}", unconfirmed(confirmed)),
+        Some(End::Idle { confirmed }) => format!("IDLE{}", unconfirmed(confirmed)),
         None if state == State::Failed => "LINK_LOST".into(),
         None => "ABORT".into(),
     }
@@ -71,6 +86,10 @@ pub enum HostIn {
     GroupDropped(u8, u32),
     /// Our frame with this ACKMODE tag has gone out.
     GroupSent(u16),
+    /// The answer to [`IonCmd::Clean`].
+    Clean(Clean),
+    /// A `CLEANTXBUFFER` limbo resolved.
+    Settled(Settled),
 }
 
 /// KISS framing.
@@ -212,8 +231,20 @@ struct Host {
     ports: std::collections::BTreeMap<u8, String>,
     /// The command client has sent a BCAST command: it gets the statuses.
     bcast_client: bool,
-    /// The command client sent `DATA2G ON`: DISCONNECTED says why.
+    /// The command client sent `DATA2G ON`.
     data2g: bool,
+    /// Lines for the command client, sent at the end of each service.
+    replies: Vec<String>,
+    /// A `CLEANTXBUFFER` waits for the worker's answer since then: later
+    /// commands wait too, so every answer goes in order.
+    waiting: Option<Instant>,
+    /// DATA2G ON: the limbo we reported (host offsets), until SETTLED; and
+    /// as the last status had it (from, first unacknowledged, to).
+    limbo: Option<(u64, u64)>,
+    status_limbo: Option<(u64, u64, u64)>,
+    /// The client's TIMEOUT and TXPOWER (dB).
+    timeout: Option<f64>,
+    tx_db: f32,
 }
 
 impl Host {
@@ -241,6 +272,12 @@ impl Host {
             ports: std::collections::BTreeMap::new(),
             bcast_client: false,
             data2g: false,
+            replies: Vec::new(),
+            waiting: None,
+            limbo: None,
+            status_limbo: None,
+            timeout: None,
+            tx_db: 0.0,
         }
     }
 
@@ -249,11 +286,70 @@ impl Host {
     }
 
     fn say(&mut self, line: &str) {
+        self.replies.push(line.to_string());
+    }
+
+    fn flush(&mut self) {
+        let lines = std::mem::take(&mut self.replies);
         if let Some(c) = self.cmd.as_mut() {
-            let mut b = line.as_bytes().to_vec();
-            b.push(b'\r');
-            if c.write_all(&b).is_err() {
+            let mut b = Vec::new();
+            for l in lines {
+                b.extend(l.into_bytes());
+                b.push(b'\r');
+            }
+            if !b.is_empty() && c.write_all(&b).is_err() {
                 self.cmd = None;
+                self.client_gone();
+            }
+        }
+    }
+
+    /// The command client has gone (or another took its place): what it
+    /// set goes with it. Its groups close ("KISS 0" stays with the KISS
+    /// client); its TIMEOUT and TXPOWER go back to Ion's own.
+    fn client_gone(&mut self) {
+        self.note("Winlink host disconnected".into());
+        self.bcast_client = false;
+        self.data2g = false;
+        self.line.clear();
+        self.waiting = None;
+        self.limbo = None;
+        let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
+        for p in open {
+            self.close_port(p);
+        }
+        if self.timeout.take().is_some() {
+            let _ = self.ion.send(IonCmd::IdleClose(None));
+        }
+        if self.tx_db != 0.0 {
+            self.tx_db = 0.0;
+            let _ = self.ion.send(IonCmd::TxPowerDb(0.0));
+        }
+    }
+
+    /// One read of the data port onto the link; whether anything came.
+    fn read_data(&mut self) -> bool {
+        let mut buf = [0u8; 1024];
+        let Some(d) = self.data.as_mut() else {
+            return false;
+        };
+        match d.read(&mut buf) {
+            Ok(0) => {
+                self.data = None;
+                false
+            }
+            Ok(n) => {
+                if self.data2g && self.connected.is_none() {
+                    log::info!("Winlink host: DATA2G: {n} B before CONNECTED dropped");
+                } else {
+                    let _ = self.ion.send(IonCmd::Send(buf[..n].to_vec()));
+                }
+                true
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => false,
+            Err(_) => {
+                self.data = None;
+                false
             }
         }
     }
@@ -269,6 +365,10 @@ impl Host {
         if let Ok((s, addr)) = cmd_l.accept() {
             let _ = s.set_nonblocking(true);
             let _ = s.set_nodelay(true);
+            if self.cmd.is_some() {
+                self.client_gone();
+            }
+            self.replies.clear();
             self.cmd = Some(s);
             self.line.clear();
             self.note(format!("Winlink host connected from {addr}"));
@@ -288,30 +388,19 @@ impl Host {
         let mut buf = [0u8; 1024];
         if let Some(c) = self.cmd.as_mut() {
             match c.read(&mut buf) {
-                Ok(0) => {
-                    self.cmd = None;
-                    self.note("Winlink host disconnected".into());
-                    // Its groups go with it ("KISS 0" stays with the KISS
-                    // client).
-                    self.bcast_client = false;
-                    self.data2g = false;
-                    let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
-                    for p in open {
-                        self.close_port(p);
-                    }
-                }
-                Ok(n) => self.line.extend_from_slice(&buf[..n]),
+                Ok(n) if n > 0 => self.line.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(_) => self.cmd = None,
+                _ => {
+                    self.cmd = None;
+                    self.client_gone();
+                }
             }
         }
-        while let Some(i) = self.line.iter().position(|&b| b == b'\r' || b == b'\n') {
-            let l: Vec<u8> = self.line.drain(..=i).collect();
-            let text = String::from_utf8_lossy(&l[..l.len() - 1]).trim().to_string();
-            if !text.is_empty() {
-                self.command(&text);
-            }
+        if self.waiting.is_some_and(|t| t.elapsed() >= CLEAN_WAIT) {
+            self.waiting = None;
+            self.say("CLEANTXBUFFER FAILED ");
         }
+        self.commands();
         let mut kiss_gone = false;
         if let Some(k) = self.kiss.as_mut() {
             match k.read(&mut buf) {
@@ -343,36 +432,9 @@ impl Host {
             }
         }
         // Data from the host goes onto the link.
-        if let Some(d) = self.data.as_mut() {
-            match d.read(&mut buf) {
-                Ok(0) => self.data = None,
-                Ok(n) => {
-                    let _ = self.ion.send(IonCmd::Send(buf[..n].to_vec()));
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(_) => self.data = None,
-            }
-        }
+        self.read_data();
         for m in rx.try_iter() {
-            match m {
-                HostIn::Received(b) => self.to_host.extend(b),
-                HostIn::Status(s) => self.status(&s),
-                HostIn::GroupFrame(p, b) if self.ports.contains_key(&p) => {
-                    self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &b));
-                }
-                HostIn::GroupSent(tag) => {
-                    // To the KISS client that tagged it; the port byte is
-                    // the group's, which a client keys on the tag alone.
-                    self.kiss_out.extend(kiss_frame(KISS_ACKMODE, &tag.to_be_bytes()));
-                }
-                HostIn::GroupHeard(p, call, snr) if self.bcast_client => {
-                    let who = call.map(|c| format!("{c} ")).unwrap_or_default();
-                    self.say(&format!("BCAST {p} HEARD {who}{snr:.1}"));
-                }
-                HostIn::GroupLost(p, k) if self.bcast_client => self.say(&format!("BCAST {p} LOST {k}")),
-                HostIn::GroupDropped(p, k) if self.bcast_client => self.say(&format!("BCAST {p} DROPPED {k}")),
-                _ => {}
-            }
+            self.ion_in(m);
         }
         if !self.kiss_out.is_empty()
             && let Some(k) = self.kiss.as_mut()
@@ -399,6 +461,76 @@ impl Host {
         if self.alive_at.elapsed() >= Duration::from_secs(60) {
             self.alive_at = Instant::now();
             self.say("IAMALIVE");
+        }
+        self.flush();
+    }
+
+    fn ion_in(&mut self, m: HostIn) {
+        match m {
+            HostIn::Received(b) => self.to_host.extend(b),
+            HostIn::Status(s) => self.status(&s),
+            HostIn::GroupFrame(p, b) if self.ports.contains_key(&p) => {
+                self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &b));
+            }
+            HostIn::GroupSent(tag) => {
+                // To the KISS client that tagged it; the port byte is
+                // the group's, which a client keys on the tag alone.
+                self.kiss_out.extend(kiss_frame(KISS_ACKMODE, &tag.to_be_bytes()));
+            }
+            HostIn::GroupHeard(p, call, snr) if self.bcast_client => {
+                let who = call.map(|c| format!("{c} ")).unwrap_or_default();
+                self.say(&format!("BCAST {p} HEARD {who}{snr:.1}"));
+            }
+            HostIn::GroupLost(p, k) if self.bcast_client => self.say(&format!("BCAST {p} LOST {k}")),
+            HostIn::GroupDropped(p, k) if self.bcast_client => self.say(&format!("BCAST {p} DROPPED {k}")),
+            HostIn::Clean(r) if self.waiting.take().is_some() => {
+                let line = match r {
+                    Clean::Empty => "CLEANTXBUFFER BUFFEREMPTY".to_string(),
+                    Clean::Failed => "CLEANTXBUFFER FAILED ".to_string(),
+                    Clean::Late => "CLEANTXBUFFER LATE".to_string(),
+                    Clean::Done { drop, limbo } if self.data2g => {
+                        if limbo.0 < limbo.1 && self.limbo.is_none() {
+                            self.limbo = Some(limbo);
+                        }
+                        format!("CLEANTXBUFFER OK {} {} {} {}", drop.0, drop.1, limbo.0, limbo.1)
+                    }
+                    Clean::Done { .. } => "CLEANTXBUFFER OK".to_string(),
+                };
+                self.say(&line);
+            }
+            HostIn::Settled(s) if self.data2g && self.limbo.is_some_and(|l| l.0 == s.from) => {
+                self.limbo = None;
+                let unknown = if s.unknown { " UNKNOWN" } else { "" };
+                self.say(&format!(
+                    "CLEANTXBUFFER SETTLED {} {} {}{unknown}",
+                    s.from, s.split, s.to
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// CLEANTXBUFFER [n]: what the client has written so far goes to the
+    /// link first, then the worker answers.
+    fn clean(&mut self, upto: Option<u64>) {
+        while self.read_data() {}
+        let _ = self.ion.send(IonCmd::Clean {
+            upto,
+            vara: !self.data2g,
+        });
+        self.waiting = Some(Instant::now());
+    }
+
+    /// The command lines in, in order (none while one waits for its answer).
+    fn commands(&mut self) {
+        while self.waiting.is_none()
+            && let Some(i) = self.line.iter().position(|&b| b == b'\r' || b == b'\n')
+        {
+            let l: Vec<u8> = self.line.drain(..=i).collect();
+            let text = String::from_utf8_lossy(&l[..l.len() - 1]).trim().to_string();
+            if !text.is_empty() {
+                self.command(&text);
+            }
         }
     }
 
@@ -449,6 +581,15 @@ impl Host {
             }
             ["ABORT"] => {
                 self.say("OK");
+                // Before its DISCONNECTED: the limbo as the last status had
+                // it (acknowledged before the split).
+                if let Some((from, to)) = self.limbo.take() {
+                    let split = self
+                        .status_limbo
+                        .filter(|l| l.0 == from)
+                        .map_or(from, |l| l.1.clamp(from, to));
+                    self.say(&format!("CLEANTXBUFFER SETTLED {from} {split} {to} UNKNOWN"));
+                }
                 let _ = self.ion.send(IonCmd::Stop);
                 self.calling = None;
                 if self.connected.take().is_some() {
@@ -460,6 +601,32 @@ impl Host {
                 self.data2g = *on == "ON";
                 self.say("OK");
             }
+            ["CLEANTXBUFFER"] => self.clean(None),
+            ["CLEANTXBUFFER", n] if self.data2g && n.len() <= 18 && n.bytes().all(|b| b.is_ascii_digit()) => {
+                self.clean(n.parse().ok());
+            }
+            ["TIMEOUT"] if self.data2g => {
+                let s = self.timeout.unwrap_or(NO_IDLE_CLOSE_S);
+                self.say(&format!("TIMEOUT {s:.1}"));
+            }
+            ["TIMEOUT", v] if self.data2g => match v.parse::<f64>() {
+                Ok(s) if s > 0.0 && s.is_finite() => {
+                    self.timeout = (s < NO_IDLE_CLOSE_S).then_some(s);
+                    let _ = self.ion.send(IonCmd::IdleClose(self.timeout));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
+            ["TXPOWER"] if self.data2g => self.say(&format!("TXPOWER {:.1}", self.tx_db)),
+            // Reduce-only: 0 is the operator's drive, and nothing above it.
+            ["TXPOWER", v] if self.data2g => match v.parse::<f32>() {
+                Ok(db) if (TX_POWER_MIN_DB..=0.0).contains(&db) => {
+                    self.tx_db = db + 0.0;
+                    let _ = self.ion.send(IonCmd::TxPowerDb(self.tx_db));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
             ["SN"] => match self.last_snr {
                 Some(s) => self.say(&format!("SN {s:.1}")),
                 None => self.say("WRONG"),
@@ -516,6 +683,7 @@ impl Host {
 
     /// DISCONNECTED, with `why` for a client that sent `DATA2G ON`.
     fn disconnected(&mut self, why: &str) {
+        self.limbo = None;
         if self.data2g {
             self.say(&format!("DISCONNECTED {why}"));
         } else {
@@ -544,6 +712,7 @@ impl Host {
         if s.snr_db.is_some() {
             self.last_snr = s.snr_db;
         }
+        self.status_limbo = s.limbo;
         let state = s.state;
         if self.last_state != Some(state) {
             self.last_state = Some(state);
@@ -572,9 +741,15 @@ impl Host {
                 _ => {}
             }
         }
-        if self.connected.is_some() && self.last_buffer != Some(s.pending) {
-            self.last_buffer = Some(s.pending);
-            self.say(&format!("BUFFER {}", s.pending));
+        // A VARA client sees a cleaned limbo gone at once.
+        let buffer = if self.data2g {
+            s.pending
+        } else {
+            s.pending - s.limbo_bytes
+        };
+        if self.connected.is_some() && self.last_buffer != Some(buffer) {
+            self.last_buffer = Some(buffer);
+            self.say(&format!("BUFFER {buffer}"));
         }
         if s.on_air != self.last_ptt {
             self.last_ptt = s.on_air;
@@ -584,5 +759,323 @@ impl Host {
             self.last_busy = s.busy;
             self.say(if s.busy { "BUSY ON" } else { "BUSY OFF" });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> (Host, Receiver<IonCmd>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (ui, _) = crossbeam_channel::bounded(1);
+        (Host::new(tx, ui), rx)
+    }
+
+    /// Command lines as the client sends them.
+    fn feed(h: &mut Host, ls: &[&str]) {
+        for l in ls {
+            h.line.extend(l.as_bytes());
+            h.line.push(b'\r');
+        }
+        h.commands();
+    }
+
+    /// What has come back since the last call.
+    fn take(h: &mut Host) -> Vec<String> {
+        h.commands();
+        std::mem::take(&mut h.replies)
+    }
+
+    fn lines(h: &mut Host, ls: &[&str]) -> Vec<String> {
+        feed(h, ls);
+        take(h)
+    }
+
+    fn status(state: State, pending: usize, limbo: Option<(u64, u64, u64)>, limbo_bytes: usize) -> IonStatus {
+        IonStatus {
+            state,
+            role: ion::link::Role::Sender,
+            peer: "LOOP".into(),
+            level: 0,
+            snr_db: None,
+            bytes_acked: 0,
+            bytes_received: 0,
+            text_acked: 0,
+            text_started: 0,
+            pending,
+            data_bursts: 0,
+            frames_resent: 0,
+            increments_sent: 0,
+            harq_recovered: 0,
+            codewords_failed: 0,
+            polls: 0,
+            on_air: false,
+            busy: false,
+            connected_s: 0.0,
+            target_level: 0,
+            frames_sent: 0,
+            control_bursts: 0,
+            airtime_s: 0.0,
+            bursts: Vec::new(),
+            slot_tx: 0,
+            slot_rx: 0,
+            band: [0.0; 3],
+            holding: false,
+            end: None,
+            limbo,
+            limbo_bytes,
+        }
+    }
+
+    fn sent_db(rx: &Receiver<IonCmd>) -> Vec<f32> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                IonCmd::TxPowerDb(db) => Some(db),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Data2G's test_txpower_gets_and_sets_the_output_volume, reduce-only:
+    /// anything over the operator's drive is WRONG, and nothing over 0 dB
+    /// ever reaches the worker. The client leaving puts it back to 0.
+    #[test]
+    fn txpower_reduces_only() {
+        let (mut h, rx) = host();
+        let said = lines(&mut h, &["TXPOWER", "DATA2G ON", "TXPOWER", "TXPOWER -1.2", "TXPOWER"]);
+        assert_eq!(said, ["WRONG", "OK", "TXPOWER 0.0", "OK", "TXPOWER -1.2"]);
+        for b in [
+            "-60.1", "20.5", "abc", "nan", "1 2", "0.1", "3", "20", "+0.05", "inf", "-inf", "1e9",
+        ] {
+            assert_eq!(lines(&mut h, &[&format!("TXPOWER {b}")]), ["WRONG"], "{b}");
+        }
+        assert_eq!(
+            lines(&mut h, &["TXPOWER", "TXPOWER -60", "TXPOWER -0", "TXPOWER"]),
+            ["TXPOWER -1.2", "OK", "OK", "TXPOWER 0.0"]
+        );
+        let db = sent_db(&rx);
+        assert_eq!(db, [-1.2, -60.0, 0.0]);
+        assert!(db.iter().all(|&d| d <= 0.0));
+        lines(&mut h, &["TXPOWER -6"]);
+        h.client_gone();
+        assert_eq!(sent_db(&rx), [-6.0, 0.0]);
+        assert_eq!(lines(&mut h, &["DATA2G ON", "TXPOWER"]), ["OK", "TXPOWER 0.0"]);
+    }
+
+    /// Data2G's test_timeout_sets_the_idle_close, with Ion's default (no
+    /// idle close) as a large number; setting that number turns it off.
+    #[test]
+    fn timeout_gets_sets_and_resets() {
+        let (mut h, rx) = host();
+        let said = lines(
+            &mut h,
+            &[
+                "TIMEOUT",
+                "DATA2G ON",
+                "TIMEOUT",
+                "TIMEOUT 0",
+                "TIMEOUT -5",
+                "TIMEOUT inf",
+                "TIMEOUT x",
+                "TIMEOUT 20",
+                "TIMEOUT",
+            ],
+        );
+        let mut want = vec!["WRONG", "OK", "TIMEOUT 1000000000.0"];
+        want.extend(["WRONG"; 4]);
+        want.extend(["OK", "TIMEOUT 20.0"]);
+        assert_eq!(said, want);
+        assert_eq!(lines(&mut h, &["TIMEOUT 86400", "TIMEOUT"]), ["OK", "TIMEOUT 86400.0"]);
+        assert_eq!(
+            lines(&mut h, &["TIMEOUT 1000000000.0", "TIMEOUT"]),
+            ["OK", "TIMEOUT 1000000000.0"]
+        );
+        lines(&mut h, &["TIMEOUT 20"]);
+        h.client_gone();
+        let set: Vec<Option<f64>> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                IonCmd::IdleClose(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(set, [Some(20.0), Some(86400.0), None, Some(20.0), None]);
+        assert_eq!(lines(&mut h, &["DATA2G ON", "TIMEOUT"]), ["OK", "TIMEOUT 1000000000.0"]);
+    }
+
+    fn clean_asked(rx: &Receiver<IonCmd>) -> Vec<(Option<u64>, bool)> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                IonCmd::Clean { upto, vara } => Some((upto, vara)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// VARA's CLEANTXBUFFER replies (FAILED with its trailing space); the
+    /// offset form is Data2G's only; a VARA client's BUFFER leaves the
+    /// limbo out; commands sent meanwhile are answered after it, in order.
+    #[test]
+    fn cleantxbuffer_as_vara() {
+        let (mut h, rx) = host();
+        assert!(lines(&mut h, &["CLEANTXBUFFER", "SN", "CLEANTXBUFFER 5"]).is_empty());
+        assert_eq!(clean_asked(&rx), [(None, true)]);
+        h.ion_in(HostIn::Clean(Clean::Empty));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER BUFFEREMPTY", "WRONG", "WRONG"]);
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Failed));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER FAILED "]);
+        h.connected = Some(("N0ABC".into(), "LOOP".into()));
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (900, 20_000),
+            limbo: (0, 900),
+        }));
+        h.ion_in(HostIn::Status(status(State::Connected, 400, Some((0, 500, 900)), 400)));
+        h.ion_in(HostIn::Settled(Settled {
+            from: 0,
+            split: 900,
+            to: 900,
+            unknown: false,
+        }));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER OK", "BUFFER 0"]);
+        // An answer nobody waits for (late) is dropped.
+        h.ion_in(HostIn::Clean(Clean::Empty));
+        assert!(take(&mut h).is_empty());
+    }
+
+    /// DATA2G ON: host offsets, LATE, SETTLED, a second clean repeating an
+    /// unsettled limbo, BUFFER counting the limbo, and ABORT with a limbo
+    /// unsettled (Data2G's test_cleantxbuffer_then_abort): the limbo
+    /// first, its fate unknown past what was acknowledged.
+    #[test]
+    fn cleantxbuffer_as_data2g() {
+        let (mut h, rx) = host();
+        feed(&mut h, &["MYCALL N0ABC", "DATA2G ON"]);
+        h.ion_in(HostIn::Status(status(State::Connected, 20_000, None, 0)));
+        assert_eq!(take(&mut h), ["OK", "OK", "CONNECTED LOOP N0ABC 2300", "BUFFER 20000"]);
+        feed(
+            &mut h,
+            &[
+                "CLEANTXBUFFER 0",
+                "CLEANTXBUFFER 19000",
+                "CLEANTXBUFFER",
+                "CLEANTXBUFFER 1x",
+                "CLEANTXBUFFER 1234567890123456789",
+            ],
+        );
+        h.ion_in(HostIn::Clean(Clean::Late));
+        h.commands();
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (1_800, 19_000),
+            limbo: (0, 1_800),
+        }));
+        h.ion_in(HostIn::Status(status(
+            State::Connected,
+            2_800,
+            Some((0, 600, 1_800)),
+            1_200,
+        )));
+        h.commands();
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (1_800, 1_800),
+            limbo: (0, 1_800),
+        }));
+        assert_eq!(
+            take(&mut h),
+            [
+                "CLEANTXBUFFER LATE",
+                "CLEANTXBUFFER OK 1800 19000 0 1800",
+                "BUFFER 2800",
+                "CLEANTXBUFFER OK 1800 1800 0 1800",
+                "WRONG",
+                "WRONG",
+            ]
+        );
+        assert_eq!(
+            clean_asked(&rx),
+            [(Some(0), false), (Some(19_000), false), (None, false)]
+        );
+        h.ion_in(HostIn::Settled(Settled {
+            from: 0,
+            split: 1_800,
+            to: 1_800,
+            unknown: false,
+        }));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER SETTLED 0 1800 1800"]);
+
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (5_000, 9_000),
+            limbo: (3_000, 5_000),
+        }));
+        h.ion_in(HostIn::Status(status(
+            State::Connected,
+            1_000,
+            Some((3_000, 4_000, 5_000)),
+            1_000,
+        )));
+        feed(&mut h, &["ABORT"]);
+        assert_eq!(
+            take(&mut h),
+            [
+                "CLEANTXBUFFER OK 5000 9000 3000 5000",
+                "BUFFER 1000",
+                "OK",
+                "CLEANTXBUFFER SETTLED 3000 4000 5000 UNKNOWN",
+                "DISCONNECTED ABORT",
+            ]
+        );
+        // The worker's own word on it comes too late: dropped.
+        h.ion_in(HostIn::Settled(Settled {
+            from: 3_000,
+            split: 3_000,
+            to: 5_000,
+            unknown: true,
+        }));
+        assert!(take(&mut h).is_empty());
+    }
+
+    /// DATA2G ON drops what the client writes before CONNECTED; a VARA
+    /// client's goes to the link (VARA queues it).
+    #[test]
+    fn data2g_drops_data_before_connected() {
+        for data2g in [false, true] {
+            let (mut h, rx) = host();
+            let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+            let (server, _) = l.accept().unwrap();
+            server.set_nonblocking(true).unwrap();
+            h.data = Some(server);
+            if data2g {
+                feed(&mut h, &["DATA2G ON"]);
+            }
+            client.write_all(b"early").unwrap();
+            while !h.read_data() {}
+            h.connected = Some(("N0ABC".into(), "LOOP".into()));
+            client.write_all(b"late").unwrap();
+            while !h.read_data() {}
+            let sent: Vec<u8> = rx
+                .try_iter()
+                .flat_map(|c| match c {
+                    IonCmd::Send(b) => b,
+                    _ => Vec::new(),
+                })
+                .collect();
+            assert_eq!(sent, if data2g { &b"late"[..] } else { b"earlylate" });
+        }
+    }
+
+    #[test]
+    fn idle_end_words() {
+        assert_eq!(
+            end_words(Some(End::Idle { confirmed: true }), State::Disconnected),
+            "IDLE"
+        );
+        assert_eq!(
+            end_words(Some(End::Idle { confirmed: false }), State::Disconnected),
+            "IDLE unconfirmed"
+        );
     }
 }

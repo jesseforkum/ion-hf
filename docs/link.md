@@ -307,6 +307,16 @@ lost whatever the SNR, and a slice can move clear of it.
   (10 s). No progress (nothing acknowledged, delivered or handed over) for
   `link_timeout_s` (120 s) ends the link; with the lifeline on (the
   default) the link holds well before that instead (Lifeline).
+- With `idle_close_s` set (a host's `TIMEOUT`; off by default), either
+  side with nothing queued or in flight, nothing heard of the peer's
+  data and no ask for the turn for that long says goodbye at once (End
+  `Idle`; the peer's is `Peer`); in a hold, in the lifeline.
+- `Station::clean` (a host's `CLEANTXBUFFER`) drops what has never been
+  on the air. Pieces on the air but unacknowledged (the limbo) keep going
+  until acknowledged: the receiver delivers one unbroken stream, so a
+  piece can only be given up with a change on the air. `take_settled`
+  reports the limbo once it is acknowledged, or, if the link ends first,
+  up to where it was.
 - Either side can ask to disconnect (a flag in the ACKs); once nothing is
   left in flight the sender sends DiscReq and the other side answers
   DiscAck. `Station::disconnect` drops what is still queued and sends
@@ -592,6 +602,7 @@ HF leaves compression off on links; nets compress direct messages
 | `lifeline`, `life_enter_s` | on, 45 s | Lifeline |
 | `life_probe_s`, `life_probe_max_s`, `life_knock_s` | 60 s, 120 s, 30 s | |
 | `life_silent_s`, `life_max_s`, `life_resume_db` | 300 s, 900 s, 1 dB | |
+| `idle_close_s` | off | a host's `TIMEOUT` |
 
 `tests/ionos.rs` switches some of these for comparisons (`ION_SMOOTH=0`,
 `ION_HOLD=0`, `ION_POWER=1`, `ION_START=floor`, `ION_LIFELINE=0`).

@@ -75,6 +75,44 @@ pub enum IonCmd {
     GroupSend(u8, Vec<u8>, Option<u16>),
     /// KISS persistence P for every group.
     GroupPersist(u8),
+    /// A host's CLEANTXBUFFER: drop what is queued (`upto`: only host
+    /// offsets before it); `vara`: the limbo counts as gone. Answered with
+    /// [`crate::host::HostIn::Clean`].
+    Clean {
+        upto: Option<u64>,
+        vara: bool,
+    },
+    /// A host's TIMEOUT: close the link after this long idle, this link and
+    /// later ones (`None`: never).
+    IdleClose(Option<f64>),
+    /// A host's TXPOWER: everything we transmit this many dB below the
+    /// operator's drive, from the next burst (see [`host_gain`]).
+    TxPowerDb(f32),
+}
+
+/// Most a host may take the transmit audio down, dB.
+pub const TX_POWER_MIN_DB: f32 = -60.0;
+
+/// Linear gain for a host's TXPOWER of `db`. Never above 1: a host can
+/// only lower Ion's output below what the operator set, never raise it.
+pub fn host_gain(db: f32) -> f32 {
+    let db = if db.is_nan() {
+        0.0
+    } else {
+        db.clamp(TX_POWER_MIN_DB, 0.0)
+    };
+    10f32.powf(db / 20.0).min(1.0)
+}
+
+/// Audio to the transmitter, at a host's TXPOWER of `db`.
+fn key(engine: &Sender<Msg>, db: f32, mut audio: Vec<f32>) {
+    let g = host_gain(db);
+    if g < 1.0 {
+        for x in &mut audio {
+            *x *= g;
+        }
+    }
+    let _ = engine.send(Msg::IonTx(audio));
 }
 
 /// The net as the UI shows it.
@@ -146,6 +184,11 @@ pub struct IonStatus {
     pub holding: bool,
     /// Why the link ended, once it has.
     pub end: Option<ion::link::station::End>,
+    /// A host's CLEANTXBUFFER limbo, unsettled: host offsets from, the
+    /// first byte not yet acknowledged, to; and its bytes unacknowledged
+    /// (in `pending`).
+    pub limbo: Option<(u64, u64, u64)>,
+    pub limbo_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -167,9 +210,10 @@ pub struct IonHandle {
 
 /// Our own station's node, with OFDM at the on-air level (the loopback test
 /// stations stay at 0 dB).
-fn on_air_settings(mut n: Node, ofdm_db: f32) -> Node {
+fn on_air_settings(mut n: Node, ofdm_db: f32, idle_close: Option<f64>) -> Node {
     n.set_ofdm_gain_db(ofdm_db);
     n.set_id_every(Some(ID_EVERY_S));
+    n.station_mut().set_idle_close(idle_close);
     n
 }
 
@@ -219,6 +263,10 @@ struct Worker {
     bcast_on_air: bool,
     /// When broadcast traffic last brought on a CW ID.
     bcast_id_at: f64,
+    /// The host's TIMEOUT, for every link.
+    idle_close: Option<f64>,
+    /// The host's TXPOWER, dB (0: the operator's drive).
+    tx_db: f32,
 }
 
 impl Worker {
@@ -228,6 +276,7 @@ impl Worker {
             node: on_air_settings(
                 Node::new(Node::config(&call), DEFAULT_LEAD_S),
                 ion::link::audio::OFDM_AIR_GAIN_DB,
+                None,
             ),
             net: None,
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
@@ -251,6 +300,8 @@ impl Worker {
             ports: BTreeMap::new(),
             bcast_on_air: false,
             bcast_id_at: f64::NEG_INFINITY,
+            idle_close: None,
+            tx_db: 0.0,
         }
     }
 
@@ -259,6 +310,13 @@ impl Worker {
             && h.send(m).is_err()
         {
             self.host = None;
+        }
+    }
+
+    /// A limbo the link has settled, for the host.
+    fn settled(&mut self) {
+        if let Some(s) = self.node.station_mut().take_settled() {
+            self.send_host(crate::host::HostIn::Settled(s));
         }
     }
 
@@ -329,7 +387,13 @@ impl Worker {
                 self.node.station().state(),
                 State::Idle | State::Listening | State::Disconnected | State::Failed
             );
-        self.node = on_air_settings(Node::new(Node::config(&self.call), DEFAULT_LEAD_S), self.ofdm_db);
+        self.node.station_mut().end_limbo();
+        self.settled();
+        self.node = on_air_settings(
+            Node::new(Node::config(&self.call), DEFAULT_LEAD_S),
+            self.ofdm_db,
+            self.idle_close,
+        );
         self.net = None;
         self.connected_at = None;
         self.closing = false;
@@ -483,6 +547,19 @@ impl Worker {
             }
             IonCmd::NetCaps(c) => self.net_caps = c,
             IonCmd::AttachHost(h) => self.host = h,
+            IonCmd::Clean { upto, vara } => {
+                let r = self.node.station_mut().clean(upto, vara);
+                self.send_host(crate::host::HostIn::Clean(r));
+                // BUFFER as it now stands, at once.
+                let s = self.status();
+                self.send_host(crate::host::HostIn::Status(s.clone()));
+                self.event(IonEvent::Status(s));
+            }
+            IonCmd::IdleClose(s) => {
+                self.idle_close = s;
+                self.node.station_mut().set_idle_close(s);
+            }
+            IonCmd::TxPowerDb(db) => self.tx_db = db,
             IonCmd::GroupOpen(port, name) => {
                 if let Some(old) = self.ports.remove(&port) {
                     self.bcast.close(old);
@@ -550,6 +627,8 @@ impl Worker {
             connected_s: self.connected_at.map_or(0.0, |t| self.now() - t),
             holding: s.holding(),
             end: s.end(),
+            limbo: s.limbo(),
+            limbo_bytes: s.limbo_bytes(),
         }
     }
 
@@ -616,14 +695,14 @@ impl Worker {
             {
                 self.id_due = None;
                 self.id_on_air = true;
-                let _ = self.engine.send(Msg::IonTx(self.id_audio()));
+                key(&self.engine, self.tx_db, self.id_audio());
                 self.note(format!("Ion: CW ID (DE {})", self.call));
             }
             let hold_tx = self.id_on_air;
             if let Some(n) = self.net.as_mut() {
                 if !hold_tx && let Some(burst) = n.poll(now) {
                     self.keyed_since_id = true;
-                    let _ = self.engine.send(Msg::IonTx(burst));
+                    key(&self.engine, self.tx_db, burst);
                 }
                 let events = n.station_mut().take_events();
                 for e in events {
@@ -655,15 +734,16 @@ impl Worker {
                 ));
                 self.bcast_on_air = true;
                 self.keyed_since_id = true;
-                let _ = self.engine.send(Msg::IonTx(audio));
+                key(&self.engine, self.tx_db, audio);
             }
             if !hold_tx
                 && !self.bcast_on_air
                 && let Some(burst) = self.node.poll(now)
             {
                 self.keyed_since_id = true;
-                let _ = self.engine.send(Msg::IonTx(burst));
+                key(&self.engine, self.tx_db, burst);
             }
+            self.settled();
             let got = self.node.station_mut().take_received();
             if !got.is_empty() {
                 match &self.host {
@@ -698,6 +778,7 @@ impl Worker {
                     (State::Connected, _) => format!("Ion: connected to {peer}"),
                     (_, Some(End::Weak { .. })) => format!("Ion: disconnected from {peer}, the path too weak"),
                     (_, Some(End::LinkLost)) => format!("Ion: link to {peer} lost"),
+                    (_, Some(End::Idle { .. })) => format!("Ion: link to {peer} closed, idle"),
                     (_, Some(End::NoAnswer)) => format!("Ion: no answer from {peer}"),
                     (State::Disconnected, _) => "Ion: disconnected".to_string(),
                     (State::Failed, _) => format!("Ion: link to {peer} failed"),
@@ -902,4 +983,67 @@ pub fn spawn_peer() -> PeerLink {
         })
         .expect("spawn ion peer");
     PeerLink { to_peer, from_peer }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No TXPOWER a host can send raises the output above the operator's
+    /// drive.
+    #[test]
+    fn host_gain_never_raises_the_output() {
+        let mut db = -80.0f32;
+        while db <= 40.0 {
+            assert!(host_gain(db) <= 1.0, "{db}");
+            db += 0.05;
+        }
+        for db in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN,
+            1e-9,
+            0.0,
+            -0.0,
+        ] {
+            let g = host_gain(db);
+            assert!((0.0..=1.0).contains(&g), "{db}: {g}");
+        }
+        assert_eq!(host_gain(0.0), 1.0);
+        assert!((host_gain(-6.0) - 0.501).abs() < 0.001);
+        assert!((host_gain(-60.0) - 0.001).abs() < 1e-5);
+        assert_eq!(host_gain(-100.0), host_gain(-60.0));
+    }
+
+    /// Peak of the worker's first burst (our call to LOOP), with this
+    /// TXPOWER sent to it first.
+    fn call_peak(db: Option<f32>) -> f32 {
+        let (engine, bursts) = crossbeam_channel::unbounded();
+        let (ui, _ui) = crossbeam_channel::unbounded();
+        let h = spawn("N0ABC".into(), engine, ui, Box::new(|| {}));
+        if let Some(db) = db {
+            h.cmds.send(IonCmd::TxPowerDb(db)).unwrap();
+        }
+        h.cmds.send(IonCmd::Connect("LOOP".into())).unwrap();
+        loop {
+            if let Msg::IonTx(a) = bursts.recv_timeout(Duration::from_secs(10)).expect("a burst") {
+                return a.iter().fold(0f32, |m, x| m.max(x.abs()));
+            }
+        }
+    }
+
+    /// TXPOWER scales the whole burst down from the next one, and the
+    /// worker itself holds anything over 0 dB at the operator's drive.
+    #[test]
+    fn txpower_scales_bursts_down_only() {
+        let full = call_peak(None);
+        assert!(full > 0.1);
+        let six = call_peak(Some(-6.0));
+        assert!((six / full - host_gain(-6.0)).abs() < 1e-4, "{six} of {full}");
+        for db in [0.0, 3.0, 20.0, f32::INFINITY, f32::NAN] {
+            assert!(call_peak(Some(db)) <= full, "{db}");
+        }
+    }
 }

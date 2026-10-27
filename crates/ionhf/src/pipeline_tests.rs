@@ -361,3 +361,215 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
         c.said
     );
 }
+
+/// 200 lines of 100 bytes: line `i` starts at offset `100 i`.
+fn numbered_lines() -> Vec<u8> {
+    (0..200)
+        .flat_map(|i| format!("{i:05} {}\n", "x".repeat(93)).into_bytes())
+        .collect()
+}
+
+/// What LOOP sends back for `sent`: each whole line, prefixed.
+fn loop_echo(sent: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for l in sent.split_inclusive(|&b| b == b'\n').filter(|l| l.ends_with(b"\n")) {
+        out.extend(b"LOOP copies: ");
+        out.extend(l);
+    }
+    out
+}
+
+/// Waits for a line starting with `head` said after line `from`.
+fn said_after(c: &HostClient, from: usize, head: &str) -> Option<String> {
+    c.said[from..].iter().find(|l| l.starts_with(head)).cloned()
+}
+
+/// Data2G's host extensions as Ragtime uses them, against LOOP: TIMEOUT
+/// and TXPOWER at start-up (TXPOWER only down), data written before
+/// CONNECTED dropped, and Data2G's mid-burst clean (its
+/// test_cleantxbuffer_mid_burst): LATE for an offset already on air, then a
+/// clean that keeps the last 1000 bytes. The burst on air settles
+/// delivered, and LOOP echoes exactly the bytes before the limbo's end and
+/// the kept tail.
+#[test]
+fn data2g_client_cleans_mid_burst() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let port = 18_910;
+    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let mut c = HostClient::connect(port);
+    for l in [
+        &format!("MYCALL {CALL}"),
+        "DATA2G ON",
+        "TIMEOUT",
+        "TIMEOUT 86400",
+        "TIMEOUT",
+        "TXPOWER",
+        "TXPOWER -3",
+        "TXPOWER 3",
+        "TXPOWER",
+        "TXPOWER 0",
+        "CLEANTXBUFFER",
+    ] {
+        c.send(l);
+    }
+    assert!(c.read_until(&mut rig, 5, |s| s.len() >= 11), "{:?}", c.said);
+    assert_eq!(
+        c.said[..11],
+        [
+            "OK",
+            "OK",
+            "TIMEOUT 1000000000.0",
+            "OK",
+            "TIMEOUT 86400.0",
+            "TXPOWER 0.0",
+            "OK",
+            "WRONG",
+            "TXPOWER -3.0",
+            "OK",
+            "CLEANTXBUFFER BUFFEREMPTY"
+        ]
+    );
+    c.data.write_all(b"early\n").unwrap();
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    let sent = numbered_lines();
+    c.data.write_all(&sent).unwrap();
+    let n0 = c.said.len();
+    assert!(
+        c.read_until(&mut rig, 30, |s| s[n0..].iter().any(|l| l == "PTT ON")),
+        "{:?}",
+        c.said
+    );
+    c.send("CLEANTXBUFFER 0");
+    c.send("CLEANTXBUFFER 19000");
+    let answered = |s: &[String]| s[n0..].iter().filter(|l| l.starts_with("CLEANTXBUFFER")).count() >= 2;
+    assert!(c.read_until(&mut rig, 5, answered), "{:?}", c.said);
+    let replies: Vec<&String> = c.said[n0..].iter().filter(|l| l.starts_with("CLEANTXBUFFER")).collect();
+    assert_eq!(replies[0], "CLEANTXBUFFER LATE");
+    let w: Vec<u64> = replies[1]
+        .strip_prefix("CLEANTXBUFFER OK ")
+        .unwrap_or_else(|| panic!("{:?}", c.said))
+        .split(' ')
+        .map(|x| x.parse().unwrap())
+        .collect();
+    let (drop_from, limbo_to) = (w[0], w[3]);
+    assert_eq!(w[1], 19_000);
+    assert!(w[2] < limbo_to && limbo_to == drop_from, "{w:?}");
+    let settled = format!("CLEANTXBUFFER SETTLED {} {limbo_to} {limbo_to}", w[2]);
+    assert!(c.read_until(&mut rig, 90, |s| s.contains(&settled)), "{:?}", c.said);
+    let kept = [&sent[..limbo_to as usize], &sent[19_000..]].concat();
+    let echo = loop_echo(&kept);
+    let got = c.data_until(&mut rig, 180, b"LOOP copies: 00199");
+    let got = [got, c.data_until(&mut rig, 1, b"\n")].concat();
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&echo),
+        "said {:?}",
+        c.said
+    );
+    assert!(c.read_until(&mut rig, 30, |s| last_is(s, "BUFFER 0")), "{:?}", c.said);
+    c.send("DISCONNECT");
+    assert!(
+        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED CLIENT")),
+        "{:?}",
+        c.said
+    );
+}
+
+/// A VARA client's CLEANTXBUFFER mid-burst: `CLEANTXBUFFER OK`, BUFFER 0
+/// at once (the burst on air still goes, but it counts as gone), no
+/// offsets and no SETTLED; LOOP echoes a prefix of what was written.
+#[test]
+fn vara_client_cleans_mid_burst() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let port = 18_920;
+    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let mut c = HostClient::connect(port);
+    c.send(&format!("MYCALL {CALL}"));
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    let sent = numbered_lines();
+    c.data.write_all(&sent).unwrap();
+    let n0 = c.said.len();
+    assert!(
+        c.read_until(&mut rig, 30, |s| s[n0..].iter().any(|l| l == "PTT ON")),
+        "{:?}",
+        c.said
+    );
+    let n1 = c.said.len();
+    c.send("CLEANTXBUFFER 5");
+    c.send("CLEANTXBUFFER");
+    let ok_at = |s: &[String]| s[n1..].iter().position(|l| l == "CLEANTXBUFFER OK").map(|i| n1 + i);
+    let answered = |s: &[String]| ok_at(s).is_some_and(|i| said_after_in(s, i, "BUFFER"));
+    assert!(c.read_until(&mut rig, 5, answered), "{:?}", c.said);
+    let i = ok_at(&c.said).unwrap();
+    assert!(c.said[n1..i].iter().any(|l| l == "WRONG"), "{:?}", c.said);
+    let buffer = c.said[i..].iter().find(|l| l.starts_with("BUFFER"));
+    assert_eq!(buffer.map(String::as_str), Some("BUFFER 0"), "{:?}", c.said);
+    let mut got = c.data_until(&mut rig, 120, b"\n");
+    loop {
+        let more = c.data_until(&mut rig, 15, b"\x00");
+        if more.is_empty() {
+            break;
+        }
+        got.extend(more);
+    }
+    let echo = loop_echo(&sent);
+    assert!(
+        !got.is_empty() && echo.starts_with(&got),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+    assert!(got.len() < echo.len());
+    assert!(said_after(&c, 0, "CLEANTXBUFFER SETTLED").is_none(), "{:?}", c.said);
+    c.send("DISCONNECT");
+    assert!(
+        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED")),
+        "{:?}",
+        c.said
+    );
+}
+
+fn said_after_in(s: &[String], from: usize, head: &str) -> bool {
+    s[from..].iter().any(|l| l.starts_with(head))
+}
+
+/// TIMEOUT 20: a quiet link closes about 20 s after the last data
+/// (`DISCONNECTED IDLE`); the setting goes when the client does.
+#[test]
+fn data2g_timeout_closes_an_idle_link() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let port = 18_930;
+    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let mut c = HostClient::connect(port);
+    for l in [&format!("MYCALL {CALL}"), "DATA2G ON", "TIMEOUT 20"] {
+        c.send(l);
+    }
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    assert_eq!(c.said[..4], ["OK", "OK", "OK", "OK"]);
+    c.data.write_all(b"hi\n").unwrap();
+    let got = c.data_until(&mut rig, 60, b"LOOP copies: hi\n");
+    assert!(got.ends_with(b"LOOP copies: hi\n"), "{:?}", c.said);
+    let quiet = Instant::now();
+    assert!(
+        c.read_until(&mut rig, 90, |s| s.iter().any(|l| l.starts_with("DISCONNECTED"))),
+        "{:?}",
+        c.said
+    );
+    assert_eq!(said_after(&c, 0, "DISCONNECTED").as_deref(), Some("DISCONNECTED IDLE"));
+    let t = quiet.elapsed().as_secs_f64();
+    assert!(t > 12.0 && t < 60.0, "closed {t:.0} s after the echo");
+    drop(c);
+    let mut c = HostClient::connect(port);
+    c.send("DATA2G ON");
+    c.send("TIMEOUT");
+    assert!(c.read_until(&mut rig, 5, |s| s.len() >= 2), "{:?}", c.said);
+    assert_eq!(c.said[..2], ["OK", "TIMEOUT 1000000000.0"]);
+}

@@ -38,6 +38,7 @@ impl Station {
             ));
             self.rx_level = inc.code;
             self.last_progress = now;
+            self.last_data = now;
             let long = LADDER[inc.code].frame == FrameSize::Long;
             let combined;
             let frames = match &inc.soft {

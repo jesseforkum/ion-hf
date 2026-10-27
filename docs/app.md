@@ -79,24 +79,87 @@ far end has not yet acknowledged (Pat waits for 0 before closing).
 gives the S/N of the last burst heard. `ABORT` also drops what broadcast
 frames are queued.
 
+`CLEANTXBUFFER` is VARA's: `CLEANTXBUFFER OK`, `CLEANTXBUFFER
+BUFFEREMPTY` with nothing unacknowledged, `CLEANTXBUFFER FAILED ` (with
+VARA's trailing space) with no link. What has never been on the air is
+dropped at once. What is on the air but not yet acknowledged (the limbo)
+still goes until the far end has it: Ion's receiver delivers one
+unbroken stream, and nothing on the air can tell it to skip a gap. `BUFFER`
+leaves the limbo out at once, as VARA has it. Commands sent after it are
+answered after it.
+
 `DATA2G ON` (answered `OK`; off with `DATA2G OFF` or when the command
 client leaves) is how a client made for Data2G's host (Ragtime) says it
-knows that host's extensions. Ion offers one of them: `DISCONNECTED`
-says why the link ended, in Data2G's words (`DISCONNECTED reason
-[detail] [unconfirmed]`, its `docs/arq.md` §9):
+knows that host's extensions (Data2G's `docs/arq.md` §9). Without it
+`TIMEOUT`, `TXPOWER` and `CLEANTXBUFFER n` are answered `WRONG`, and
+everything else is as above. With it:
+
+| Command | Reply | Data2G | |
+|---|---|---|---|
+| `CLEANTXBUFFER` | `CLEANTXBUFFER OK drop_from drop_to limbo_from limbo_to` | PR #118 | host offsets (bytes written since `CONNECTED`), ranges `[from, to)`; an empty limbo is `drop_from drop_from`; a second clean before the limbo settles repeats it; `BUFFEREMPTY` and `FAILED ` as VARA's |
+| `CLEANTXBUFFER n` | as above, or `CLEANTXBUFFER LATE` | PR #118 | drops only bytes before offset `n` (`drop_to` is `n`, or what has been written if less); `LATE`, nothing dropped, if a byte at or past `n` is on the air |
+| | `CLEANTXBUFFER SETTLED from split to` | PR #118 | once the limbo is acknowledged: delivered before `split` (Ion: always `to`) |
+| | `CLEANTXBUFFER SETTLED from split to UNKNOWN` | PR #118 | the link ended first (before its `DISCONNECTED`): acknowledged before `split`, the rest on the air unacknowledged |
+| `TIMEOUT` | `TIMEOUT s` | PR #122 | the link idle close, seconds; `1000000000.0` (Ion's default) is none |
+| `TIMEOUT s` | `OK` / `WRONG` | PR #122 | any finite `s` > 0, for the link under way and later ones; `1000000000` or more: none again |
+| `TXPOWER` | `TXPOWER dB` | PR #122 | how far below the operator's drive Ion transmits (0.0 at first) |
+| `TXPOWER dB` | `OK` / `WRONG` | PR #122 | −60 to 0; anything above 0 is `WRONG`: a host can only turn Ion down |
+| | `DISCONNECTED reason [detail] [unconfirmed]` | PR #122 | why the link ended (below) |
+
+- `BUFFER` counts the limbo until it settles.
+- Data written to the data port before `CONNECTED` is dropped (VARA
+  queues it), so offset 0 is the first byte written after `CONNECTED`.
+- `TIMEOUT` and `TXPOWER` go back to Ion's own (no idle close, 0 dB)
+  when the command client leaves.
+- **Idle close.** A link with nothing queued or in flight either way and
+  no data heard for `TIMEOUT` seconds says goodbye: `DISCONNECTED IDLE`
+  here, `PEER` at the far end. Data stuck on a bad path is not idle: that
+  is the link's own business (`LINK_LOST`, the lifeline). In a lifeline
+  hold the goodbye goes in the lifeline; a long `TIMEOUT` never keeps a
+  hold up longer than its own 15 minutes (`LINK_FAILED weak path`) or
+  its silence rule (`LINK_LOST`). Without a `TIMEOUT` a quiet link stays
+  up: its idle check-ins (every 10 s, on the air) are answered.
+- **TXPOWER** scales everything Ion transmits (bursts, broadcast and the
+  CW ID alike, so their levels against each other stay as they are), from
+  the next burst, the way lowering the drive would. The Ion worker clamps
+  whatever it is given to −60..0 dB again, so no value can make it louder
+  than the operator set.
+
+Where Ion differs from Data2G, and why:
+
+- The limbo never drops: Data2G's receiver can be told to skip bytes
+  (its abandon); Ion's cannot without a change on the air. So `SETTLED`
+  always says delivered (`split` = `to`) unless the link ended first.
+  Data2G also holds the next burst 0.25 s after `SETTLED` for a reply;
+  Ion does not. A client that waits for `SETTLED` before writing again
+  (Ragtime does) waits for the limbo's acknowledgement: one ACK on a
+  good path, more on a lossy one.
+- `TIMEOUT`'s default: Data2G's is 300 s; Ion never closed a quiet link,
+  and VARA clients count on that, so its default is none, reported as
+  `1000000000.0` (a client reads a number; Ragtime writes the value it
+  read to go back to the host's own).
+- `TXPOWER`: Data2G takes −60 to 20 dB of output volume; Ion takes −60 to
+  0 dB below the drive (Ion HF's owner: never louder than configured).
+  Ragtime's Auto ALC, which may ask for up to 6 dB over its base, is
+  answered `WRONG` and reads back the level unchanged.
+- `ABORT` with a limbo unsettled: `OK` (Ion's order, as before), then
+  `CLEANTXBUFFER SETTLED ... UNKNOWN`, then `DISCONNECTED ABORT`.
+- A link that compresses (not used by Ion HF) answers `CLEANTXBUFFER
+  FAILED `: its records are coded against each other.
+
+`DISCONNECTED` reasons:
 
 | Reason | When |
 |---|---|
 | `CLIENT` | this end's `DISCONNECT` (or a call given up); `unconfirmed` if the goodbye went unacknowledged |
+| `IDLE` | the idle close (`TIMEOUT`); `unconfirmed` as `CLIENT` |
 | `PEER` | the far end closed it |
 | `ABORT` | `ABORT`, or the link stopped in Ion itself |
 | `LINK_LOST` | nothing heard from the far end for too long |
 | `LINK_FAILED weak path` | the lifeline's hold ran out: the path stayed below the floor for 15 minutes and both ends closed by agreement ([link.md](link.md), Lifeline) |
 | `NO_ANSWER` | the call went unanswered |
 
-Without `DATA2G ON` it stays plain `DISCONNECTED`. Data2G's other
-`DATA2G ON` extensions (`CLEANTXBUFFER` with offsets, `TIMEOUT`,
-`TXPOWER`) are answered `WRONG`, as before.
+Without `DATA2G ON` it stays plain `DISCONNECTED`.
 
 **Holding below the floor.** When the link falls below its slowest level
 it holds in the lifeline ([link.md](link.md), Lifeline) and stays
@@ -104,7 +167,8 @@ it holds in the lifeline ([link.md](link.md), Lifeline) and stays
 moves until the link resumes), `PTT ON/OFF` follows the lifeline's 8 s
 bursts and `BUSY` the far end's. The Link screen shows **Hold** for the
 level. A client with its own timeout (Pat's, a Winlink session's) may
-give up first; the lifeline holds for up to 15 minutes.
+give up first; the lifeline holds for up to 15 minutes, whatever
+`TIMEOUT` says.
 
 Broadcast groups ([broadcast.md](broadcast.md)), as Data2G's host offers
 them, on the KISS port 200 below the command port (8100):

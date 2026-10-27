@@ -29,6 +29,7 @@ impl Station {
                 ) => {
                     self.last_progress = now;
                     self.last_moved = now;
+                    self.last_data = now;
                     self.link_t0 = Some(now - self.air.duration(inc.wave, TINY, 0));
                     self.state = State::Connected;
                     self.clear_wait();
@@ -190,6 +191,7 @@ impl Station {
             }
             ok.push(got);
         }
+        self.check_limbo();
         ok
     }
 
