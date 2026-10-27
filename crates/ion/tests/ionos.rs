@@ -18,7 +18,8 @@
 //! (without `Config::smooth_target` / `hold_by_goodput`),
 //! `ION_POWER=1` (with `Config::power_aware`), `ION_START=floor`
 //! (the first data burst at the floor, `Config::start_margin_db`),
-//! `ION_TRACE=1` (every data burst's level).
+//! `ION_LIFELINE=0` (without `Config::lifeline`), `ION_TRACE=1` (every
+//! data burst's level).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,9 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         if std::env::var("ION_START").is_ok_and(|v| v == "floor") {
             c.start_margin_db = None;
         }
+        if std::env::var("ION_LIFELINE").is_ok_and(|v| v == "0") {
+            c.lifeline = false;
+        }
         c
     };
     let a = Station::new(cfg("N0JLF"), air.clone());
@@ -94,6 +98,10 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
             })
             .collect();
         eprintln!("{} {snr_db:+} dB seed {seed}: {}", mode.name(), line.join(", "));
+    }
+    let holds = sim.stations[0].stats().holds + sim.stations[1].stats().holds;
+    if holds > 0 {
+        eprintln!("{} {snr_db:+} dB seed {seed}: {holds} holds", mode.name());
     }
     (sim.stations[1].stats().bytes_received, sim.airtime())
 }

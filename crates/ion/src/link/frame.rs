@@ -228,6 +228,52 @@ pub enum Tiny {
 /// Frames a tiny ACK can account for.
 pub const TINY_ACK_FRAMES: usize = 6;
 
+/// Lifeline messages (`docs/link.md`, Lifeline): header-only bursts in
+/// `Wave::Lifeline`, whose 4-bit kinds are their own (0 and 5–15 unused).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Life {
+    /// The holding sender's probe, with how it last heard the peer's
+    /// Report (`None`: none yet in this hold).
+    Probe {
+        snr_db: Option<f32>,
+    },
+    /// The answer: how the probe was heard.
+    Report {
+        snr_db: f32,
+    },
+    /// Goodbye: `weak`, the hold ran out; else a host ended the link.
+    Bye {
+        weak: bool,
+    },
+    ByeAck,
+}
+
+impl Life {
+    /// (kind, extra). SNRs as everywhere: 6 bits, 1 dB from -24 dB.
+    pub fn encode(self) -> (u8, u16) {
+        match self {
+            Life::Probe { snr_db } => (1, snr_db.map_or(0, |s| 1 << 6 | snr_q(s, 6) as u16)),
+            Life::Report { snr_db } => (2, snr_q(snr_db, 6) as u16),
+            Life::Bye { weak } => (3, weak as u16),
+            Life::ByeAck => (4, 0),
+        }
+    }
+
+    pub fn decode(kind: u8, extra: u16) -> Option<Life> {
+        Some(match kind {
+            1 => Life::Probe {
+                snr_db: (extra >> 6 & 1 == 1).then(|| snr_from_q((extra & 0x3F) as u32)),
+            },
+            2 => Life::Report {
+                snr_db: snr_from_q((extra & 0x3F) as u32),
+            },
+            3 => Life::Bye { weak: extra & 1 == 1 },
+            4 => Life::ByeAck,
+            _ => return None,
+        })
+    }
+}
+
 impl Tiny {
     pub const CONN_ACK_KIND: u8 = 2;
 
@@ -467,6 +513,20 @@ mod tests {
             }
         }
         assert_eq!(kinds, [1, 8, 9, 12, 10, 13, 11, 14, 0, 15]);
+        for m in [
+            Life::Probe { snr_db: None },
+            Life::Probe { snr_db: Some(-17.0) },
+            Life::Report { snr_db: -24.0 },
+            Life::Report { snr_db: 12.0 },
+            Life::Bye { weak: true },
+            Life::Bye { weak: false },
+            Life::ByeAck,
+        ] {
+            let (k, e) = m.encode();
+            assert!(k < 16);
+            assert_eq!(Life::decode(k, e), Some(m));
+        }
+        assert_eq!(Life::decode(0, 0), None);
         let (k, e) = ack(ChanClass::from_bits(3), 2, true).encode();
         assert_eq!(Tiny::decode(k, e), Some(ack(ChanClass::from_bits(2), 0, true)));
         // SNR saturates instead of wrapping.

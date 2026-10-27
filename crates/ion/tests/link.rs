@@ -34,7 +34,8 @@ fn gear_knobs(c: &mut Config) {
 /// turns every one off; `ION_ADAPT`,
 /// `ION_TINY_ALL` = 0/1 one at a time; `ION_BURST_LONG` (s),
 /// `ION_BURST_OVERHEAD` (share), `ION_BURST_STEADY` and
-/// `ION_BURST_CLIMB` (dB) tune `burst_adapt`; `ION_CHEAP_ACK` = margin dB or `off`.
+/// `ION_BURST_CLIMB` (dB) tune `burst_adapt`; `ION_CHEAP_ACK` = margin dB or `off`;
+/// `ION_LIFELINE=0` turns the lifeline off.
 fn overhead_knobs(c: &mut ion::link::Config) {
     let env = |k: &str| std::env::var(k).ok();
     let flag = |k: &str| env(k).map(|v| v != "0");
@@ -65,6 +66,9 @@ fn overhead_knobs(c: &mut ion::link::Config) {
     // ION_CHEAP_ACK = margin in dB, or "off".
     if let Some(v) = env("ION_CHEAP_ACK") {
         c.cheap_ack_margin_db = if v == "off" { None } else { Some(v.parse().unwrap()) };
+    }
+    if env("ION_LIFELINE").is_some_and(|v| v == "0") {
+        c.lifeline = false;
     }
 }
 
@@ -368,13 +372,32 @@ fn receiver_can_ask_to_disconnect() {
 
 #[test]
 fn a_silent_peer_times_the_receiver_out() {
-    let mut sim = pair(20.0, 8, |_| {});
-    transfer(&mut sim, 2_000, 300.0);
-    // A vanishes (radio off): B must not hang forever.
-    let t0 = sim.t;
-    sim.stations[0] = Station::new(Config::new("N0ABC"), sim.air.clone());
-    let ok = sim.run_until(t0 + 300.0, |s| s.stations[1].state() == State::Failed);
-    assert!(ok, "B still {:?}", sim.stations[1].state());
+    // A vanishes (radio off): B must not hang forever. It holds in the
+    // lifeline first, as for a deep fade (`docs/link.md`, Lifeline);
+    // without it, it gives up after `link_timeout_s`.
+    for lifeline in [true, false] {
+        let mut sim = pair(20.0, 8, |_| {});
+        sim.stations[1] = Station::new(
+            Config {
+                lifeline,
+                ..Config::new("W1AW")
+            },
+            sim.air.clone(),
+        );
+        sim.stations[1].listen();
+        transfer(&mut sim, 2_000, 300.0);
+        let t0 = sim.t;
+        sim.stations[0] = Station::new(Config::new("N0ABC"), sim.air.clone());
+        let c = Config::new("W1AW");
+        let within = if lifeline {
+            c.life_enter_s + c.life_silent_s + c.life_probe_max_s + 10.0
+        } else {
+            300.0
+        };
+        let ok = sim.run_until(t0 + within, |s| s.stations[1].state() == State::Failed);
+        assert!(ok, "B still {:?}", sim.stations[1].state());
+        assert_eq!(sim.stations[1].end(), Some(ion::link::station::End::LinkLost));
+    }
 }
 
 /// The first OFDM level (the MFSK levels come first).

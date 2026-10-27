@@ -102,7 +102,11 @@ the burst, so a fade hits a few bits of many codewords.
 The mode and the header type are not sent as bits: they select the CRC's
 initial value (CRC-16-CCITT, polynomial 0x1021; four initial values), and
 the receiver tries all four hypotheses. A header decoded under the wrong
-hypothesis fails its CRC.
+hypothesis fails its CRC. A time-scaled layout (Below the floor) XORs a
+value of its own k into the initial value (none at k = 1, so the full
+band's headers are as they were), so a receiver of one layout never takes
+another's header: R1/7, the link's lifeline, and the full band cannot
+mistake each other's bursts (`tests/lifeline.rs`).
 
 **Code.** A K = 15 tail-biting convolutional code whose every trellis step
 emits a whole tone: 5 output bits = one 32-ary symbol, one information bit
@@ -505,8 +509,9 @@ decode from about −14 dB on AWGN; it measures 0.80 at −14 dB and 1.00 at
 
 ## Below the floor (study)
 
-A study, not used by the link: weak-signal options for the worst HF below
-R0, in two families. **Narrow:** the same noncoherent 32-ary MFSK in one
+A study of weak-signal options for the worst HF below R0, in two
+families; R1/7 has since become the link's lifeline ([link.md](link.md),
+Lifeline). **Narrow:** the same noncoherent 32-ary MFSK in one
 400 Hz slot of the six in [phy.md](phy.md) (Six slices, centres 500–2500
 Hz), room for five other stations. **Full band:** something more robust
 than R0 in the whole channel (longer symbols, repetition).
@@ -780,8 +785,8 @@ falls); six of them, one per slot, about one R0 receiver.
   the threshold, and stretching does both at once.
 - Expected-header reception, LLR calibration, the channel report and
   clock tracking in scaled layouts; offsets and drift on fading channels;
-  cross-detection between layouts (a full-band receiver and an R1/7
-  receiver hearing each other's bursts; the CRC does not name the layout);
+  cross-detection between layouts (since settled: the header CRC now
+  names the layout, Header);
   Doppler beyond 16 Hz on one path; burst-to-burst behaviour in a link
   (ARQ timing, 7.85 s ACKs, connect). Nothing on the air.
 

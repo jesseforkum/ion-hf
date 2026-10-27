@@ -142,6 +142,10 @@ pub struct IonStatus {
     pub slot_tx: u8,
     pub slot_rx: u8,
     pub band: [f32; 3],
+    /// The link holds below the floor (`ion` docs/link.md, Lifeline).
+    pub holding: bool,
+    /// Why the link ended, once it has.
+    pub end: Option<ion::link::station::End>,
 }
 
 #[derive(Clone, Debug)]
@@ -544,6 +548,8 @@ impl Worker {
             on_air: self.node.on_air() || self.bcast_on_air,
             busy: self.node.busy(),
             connected_s: self.connected_at.map_or(0.0, |t| self.now() - t),
+            holding: s.holding(),
+            end: s.end(),
         }
     }
 
@@ -686,11 +692,16 @@ impl Worker {
                     self.schedule_id(now, &peer);
                     self.closing = false;
                 }
-                self.note(match state {
-                    State::Connected => format!("Ion: connected to {peer}"),
-                    State::Disconnected => "Ion: disconnected".to_string(),
-                    State::Failed => format!("Ion: link to {peer} failed (no answer)"),
-                    other => format!("Ion: {other:?}"),
+                use ion::link::station::End;
+                let end = self.node.station().end();
+                self.note(match (state, end) {
+                    (State::Connected, _) => format!("Ion: connected to {peer}"),
+                    (_, Some(End::Weak { .. })) => format!("Ion: disconnected from {peer}, the path too weak"),
+                    (_, Some(End::LinkLost)) => format!("Ion: link to {peer} lost"),
+                    (_, Some(End::NoAnswer)) => format!("Ion: no answer from {peer}"),
+                    (State::Disconnected, _) => "Ion: disconnected".to_string(),
+                    (State::Failed, _) => format!("Ion: link to {peer} failed"),
+                    (other, _) => format!("Ion: {other:?}"),
                 });
                 self.last_state = state;
             }

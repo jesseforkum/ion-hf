@@ -17,8 +17,11 @@ use crate::phy_mfsk::MfskMode;
 
 mod config;
 mod gear;
+mod lifeline;
 mod receiver;
 mod sender;
+
+use lifeline::Hold;
 
 pub use config::Config;
 pub use receiver::cheap_ack_waves;
@@ -84,12 +87,11 @@ fn wave_rank(w: Wave) -> usize {
 
 /// The next more robust waveform for a tiny or control burst (not the
 /// slice: only the receivers of one third of the band hear it). Never the
-/// lifeline: only a hold sends in it.
+/// lifeline, whose messages are its own: only a hold sends in it.
 fn wave_down(w: Wave) -> Wave {
     match w {
         Wave::Ofdm(Guard::Normal) => Wave::Ofdm(Guard::Long),
         Wave::Ofdm(_) => Wave::Mfsk(MfskMode::R1),
-        Wave::Lifeline => Wave::Lifeline,
         _ => FLOOR_WAVE,
     }
 }
@@ -116,6 +118,32 @@ pub enum State {
     Disconnected,
     /// Gave up: no answer after every retry, or the peer went silent.
     Failed,
+}
+
+/// Why a link ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// We ended it ([`Station::disconnect`], or a call given up);
+    /// `confirmed`: the peer acknowledged the goodbye.
+    Client { confirmed: bool },
+    /// The peer ended it.
+    Peer,
+    /// The call went unanswered.
+    NoAnswer,
+    /// The peer went silent.
+    LinkLost,
+    /// The lifeline's hold ran out: the path stayed too weak to resume.
+    Weak { confirmed: bool },
+}
+
+impl End {
+    fn unconfirmed(self) -> End {
+        match self {
+            End::Client { .. } => End::Client { confirmed: false },
+            End::Weak { .. } => End::Weak { confirmed: false },
+            e => e,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,6 +301,13 @@ pub struct Stats {
     /// measurement (delay ms, Doppler Hz, effective and mean SNR dB) and
     /// the class we report back.
     pub heard: Vec<(usize, [f32; 4], ChanClass)>,
+    /// The lifeline: holds begun, holds the sending side resumed, seconds
+    /// held, probes sent.
+    pub holds: u32,
+    pub resumes: u32,
+    pub hold_s: f64,
+    pub probes: u32,
+    pub knocks: u32,
 }
 
 /// One slot of a data burst sent.
@@ -321,11 +356,28 @@ pub struct Station {
     tries: u32,
     /// Answer to send at the next opportunity.
     reply: Option<Outgoing>,
-    /// The burst just handed out was the last one (DiscAck): close after it.
+    /// The burst just handed out was the last one (DiscAck): close after it,
+    /// for this reason.
     close_after_tx: bool,
+    close_end: End,
+    /// Why we are saying goodbye (as it ends once acknowledged).
+    disc_why: End,
+    /// Why the link ended.
+    end: Option<End>,
+    /// The lifeline's hold, when the link is in one; holds that began soon
+    /// after the last resume, and when that was.
+    hold: Option<Hold>,
+    flaps: u8,
+    resumed_at: f64,
+    /// When the holds that flapped into each other began.
+    hold_from: f64,
     last_heard: f64,
     /// Last time the link moved: an ACK, data, a turn or the connection.
     last_progress: f64,
+    /// Last time data did: frames acknowledged or delivered, an idle
+    /// check-in answered, a turn, the connection (for the lifeline: an ACK
+    /// that says nothing arrived is not this).
+    last_moved: f64,
     last_tx_end: f64,
     last_tx_wave: Wave,
     // Sending side.
@@ -447,8 +499,16 @@ impl Station {
             tries: 0,
             reply: None,
             close_after_tx: false,
+            close_end: End::Peer,
+            disc_why: End::Client { confirmed: true },
+            end: None,
+            hold: None,
+            flaps: 0,
+            resumed_at: f64::NEG_INFINITY,
+            hold_from: 0.0,
             last_heard: 0.0,
             last_progress: 0.0,
+            last_moved: 0.0,
             last_tx_end: 0.0,
             last_tx_wave: FLOOR_WAVE,
             out: VecDeque::new(),
@@ -521,6 +581,24 @@ impl Station {
         &self.peer
     }
 
+    /// Why the link ended (once it has: Disconnected or Failed).
+    pub fn end(&self) -> Option<End> {
+        self.end
+    }
+
+    /// The link's session number, while there is a link.
+    pub fn session(&self) -> Option<u8> {
+        matches!(self.state, State::Connecting | State::Connected | State::Disconnecting).then_some(self.session)
+    }
+
+    /// The link ends: `state` (Disconnected or Failed), for `why`.
+    fn finish(&mut self, state: State, why: End) {
+        self.end_hold(self.last_heard.max(self.last_tx_end));
+        self.state = state;
+        self.end = Some(why);
+        self.awaiting = Awaiting::Nothing;
+    }
+
     pub fn call(&self) -> &str {
         &self.cfg.call
     }
@@ -566,6 +644,7 @@ impl Station {
         self.role = Role::Sender;
         self.tx_at = now;
         self.last_progress = now;
+        self.last_moved = now;
         let mut f = Frame::new(Kind::ConnReq, self.session as u32);
         let mut text = format!("{} {} {}", self.cfg.call, self.peer, self.cfg.max_level);
         text.truncate(Frame::max_payload(CONTROL_BYTES));
@@ -673,7 +752,7 @@ impl Station {
         match self.state {
             State::Connecting => {
                 self.clear_wait();
-                self.state = State::Disconnected;
+                self.finish(State::Disconnected, End::Client { confirmed: false });
             }
             State::Connected => {
                 self.out.clear();
@@ -682,6 +761,11 @@ impl Station {
                 self.last_burst.clear();
                 self.sends.clear();
                 self.reply = None;
+                if self.hold.is_some() {
+                    self.bye(End::Client { confirmed: true });
+                    return;
+                }
+                self.disc_why = End::Client { confirmed: true };
                 let wave = match self.role {
                     Role::Sender => self.cur_wave(),
                     Role::Receiver => LADDER[self.rx_level].wave,
@@ -731,6 +815,14 @@ impl Station {
             }
             return Some(self.note_tx(r));
         }
+        if self.state == State::Connected && self.cfg.lifeline {
+            if self.hold.is_none() && now - self.last_moved >= self.cfg.life_enter_s {
+                self.enter_hold(now, self.role == Role::Sender);
+            }
+            if self.hold.is_some() {
+                return self.hold_tx(now);
+            }
+        }
         // New data while waiting on a check-in's answer: send it, its ACK
         // settles both.
         if self.awaiting == Awaiting::Ack
@@ -754,11 +846,11 @@ impl Station {
                 _ => self.tries > self.cfg.retries,
             };
             if give_up {
-                self.state = match self.awaiting {
-                    Awaiting::DiscAck => State::Disconnected,
-                    _ => State::Failed,
-                };
-                self.awaiting = Awaiting::Nothing;
+                match self.awaiting {
+                    Awaiting::DiscAck => self.finish(State::Disconnected, self.disc_why.unconfirmed()),
+                    Awaiting::ConnAck => self.finish(State::Failed, End::NoAnswer),
+                    _ => self.finish(State::Failed, End::LinkLost),
+                }
                 return None;
             }
             self.deadline = None;
@@ -781,7 +873,7 @@ impl Station {
         }
         if self.role == Role::Receiver {
             if self.state == State::Connected && now - self.last_progress > self.cfg.link_timeout_s {
-                self.state = State::Failed;
+                self.finish(State::Failed, End::LinkLost);
                 return None;
             }
             // Something to send and the sender has gone quiet: ask.
@@ -805,6 +897,11 @@ impl Station {
         let nothing_left = self.out.is_empty() && self.inflight.is_empty();
         // A peer leaving with data still to send gets the turn first.
         if nothing_left && (self.want_disc || self.peer_wants_disc && !self.peer_wants_turn) {
+            self.disc_why = if self.want_disc {
+                End::Client { confirmed: true }
+            } else {
+                End::Peer
+            };
             self.state = State::Disconnecting;
             let b = self.tiny(Tiny::DiscReq, wave);
             return Some(self.send_awaiting(b, Awaiting::DiscAck));
@@ -835,22 +932,21 @@ impl Station {
         self.last_tx_end = t;
         if self.close_after_tx {
             self.close_after_tx = false;
-            self.state = State::Disconnected;
+            self.finish(State::Disconnected, self.close_end);
+            return;
+        }
+        if self.state == State::Connected && self.holding() {
+            self.probe_sent(t);
             return;
         }
         if self.awaiting != Awaiting::Nothing {
             // The answer comes back in the waveform we just used, or an ACK
             // in the slower one the last came in.
-            let answer_in = |w: Wave| {
-                self.air
-                    .duration(w, TINY, 0)
-                    .max(self.air.duration(w, CONTROL, frame_bits(CONTROL, 1)))
-            };
-            let mut answer = answer_in(self.last_tx_wave);
+            let mut answer = self.answer_s(self.last_tx_wave);
             if self.awaiting == Awaiting::Ack
                 && let Some(w) = self.peer_ack_wave
             {
-                answer = answer.max(answer_in(w));
+                answer = answer.max(self.answer_s(w));
             }
             let mut reply = self.cfg.turnaround_s + answer;
             if self.awaiting == Awaiting::TurnTaken {
@@ -859,18 +955,34 @@ impl Station {
                 reply += self.cfg.max_burst_s;
             }
             self.reply_wait = reply + self.cfg.reply_slack_s;
-            // The peer's CW ID goes ahead of its first burst after each ID
-            // time: if one has come since it last keyed (counted back a
-            // whole long burst, to be sure), its answer comes that much later.
-            if let (Some(t0), Some((every, peer_id_s))) = (self.link_t0, self.ids) {
-                let keyed = self.last_heard - self.cfg.max_burst_long_s;
-                let next = t0 + (((keyed - t0) / every).floor() + 1.0).max(1.0) * every;
-                if next <= t + self.reply_wait {
-                    self.reply_wait += peer_id_s;
-                }
-            }
+            self.reply_wait += self.peer_id_s(t, self.reply_wait);
             self.deadline = Some(t + self.reply_wait);
         }
+    }
+
+    /// Longest answer in `w`: a tiny message or a control frame (the
+    /// lifeline answers header-only).
+    fn answer_s(&self, w: Wave) -> f64 {
+        let tiny = self.air.duration(w, TINY, 0);
+        match w {
+            Wave::Lifeline => tiny,
+            _ => tiny.max(self.air.duration(w, CONTROL, frame_bits(CONTROL, 1))),
+        }
+    }
+
+    /// How much later than `wait` after `t` the peer's answer may come for
+    /// its CW ID, which goes ahead of its first burst after each ID time:
+    /// its length if one has come since the peer last keyed (counted back a
+    /// whole long burst, to be sure).
+    fn peer_id_s(&self, t: f64, wait: f64) -> f64 {
+        if let (Some(t0), Some((every, peer_id_s))) = (self.link_t0, self.ids) {
+            let keyed = self.last_heard - self.cfg.max_burst_long_s;
+            let next = t0 + (((keyed - t0) / every).floor() + 1.0).max(1.0) * every;
+            if next <= t + wait {
+                return peer_id_s;
+            }
+        }
+        0.0
     }
 
     /// Mid-link CW IDs every `every_s`, on [`Station::link_t0`]'s clock; the
@@ -910,17 +1022,25 @@ impl Station {
         if self.answering && !frames.iter().flatten().any(|f| f.kind == Kind::ConnReq) {
             self.answering = false;
         }
+        if inc.wave == Wave::Lifeline {
+            self.lifeline_rx(inc, now);
+            return;
+        }
+        if self.hold.is_some() && !self.hold_heard(inc, tiny, &frames, now) {
+            return;
+        }
 
         if self.state == State::Disconnecting {
             match tiny {
                 Some(Tiny::DiscAck) => {
                     self.clear_wait();
-                    self.state = State::Disconnected;
+                    self.finish(State::Disconnected, self.disc_why);
                 }
                 Some(Tiny::DiscReq) => {
                     self.clear_wait();
                     self.reply = Some(self.tiny(Tiny::DiscAck, inc.wave));
                     self.close_after_tx = true;
+                    self.close_end = self.disc_why;
                 }
                 // The peer missed our goodbye: again now, no faster than
                 // what reached us.
@@ -947,6 +1067,7 @@ impl Station {
             self.harq.clear();
             self.last_ack = (0, 0, 0, false);
             self.last_progress = now;
+            self.last_moved = now;
         }
 
         match self.role {
@@ -974,6 +1095,7 @@ impl Station {
             self.role = Role::Receiver;
             self.last_heard = now;
             self.last_progress = now;
+            self.last_moved = now;
             self.answering = true;
             self.reset_data();
             self.agree(self.cfg.compress && f.flags & flags::COMPRESS != 0);
@@ -991,6 +1113,9 @@ impl Station {
     /// same, one more robust, then the floor; the floor at once when the
     /// link has stalled.
     fn retry_wave(&self, w: Wave, now: f64) -> Wave {
+        if w == Wave::Lifeline {
+            return w;
+        }
         if now - self.last_progress > STALL_S {
             return FLOOR_WAVE;
         }
@@ -1089,6 +1214,9 @@ impl Station {
         self.next_speak_up = 0.0;
         self.sends.clear();
         self.stream_total = self.out.len() as u64;
+        self.hold = None;
+        self.flaps = 0;
+        self.resumed_at = f64::NEG_INFINITY;
     }
 
     fn reset_link(&mut self) {
@@ -1098,6 +1226,7 @@ impl Station {
         self.clear_wait();
         self.reply = None;
         self.close_after_tx = false;
+        self.end = None;
         self.peer.clear();
     }
 }

@@ -121,7 +121,9 @@ fn sides(
 ) -> (Vec<(&'static str, String, String)>, Vec<(&'static str, String, String)>) {
     let sending = s.is_some_and(|s| s.role == Role::Sender);
     let dash = || ("—".to_string(), String::new());
+    let hold = || ("Hold".to_string(), String::new());
     let (llv, llu) = match s {
+        Some(s) if s.holding => hold(),
         Some(s) if sending => split(theme::level(s.level)),
         _ => dash(),
     };
@@ -131,6 +133,7 @@ fn sides(
     };
     let (qv, qu) = s.map_or_else(dash, |s| split(theme::bytes(s.pending as u64)));
     let (rlv, rlu) = match s {
+        Some(s) if s.holding => hold(),
         Some(_) if !sending => app.hist.peer_level.map_or_else(dash, |l| split(theme::level(l))),
         _ => dash(),
     };
