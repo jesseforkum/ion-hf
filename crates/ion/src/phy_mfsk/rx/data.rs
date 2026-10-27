@@ -198,10 +198,14 @@ impl MfskRx {
         self.stats.last_window = b.w;
         self.stats.last_a = b.params.a;
         self.stats.last_s = b.params.s;
+        let k = self.layout.k as f32;
         let chan = if b.dsyms == 0 {
             ChannelMeas::of_snr(b.snr_db)
         } else {
-            measure(b, fmt.sym, b.w / 2 - disc_trim(fmt, b.w), (f1, f2, fnum))
+            let mut m = measure(b, fmt.sym, b.w / 2 - disc_trim(fmt, b.w), (f1, f2, fnum));
+            m.delay_ms *= k;
+            m.doppler_hz /= k;
+            m
         };
         out.push(MfskBurst {
             mode: b.mode,
@@ -211,7 +215,7 @@ impl MfskRx {
             metrics,
             symbols: b.symbols,
             snr_db: b.snr_db,
-            freq_offset_hz,
+            freq_offset_hz: freq_offset_hz / k,
             start_sample: b.start_sample,
             clock_ppm: (b.drift / fmt.sym as f64 * 1e6) as f32,
             chan,

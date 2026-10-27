@@ -9,7 +9,7 @@ use ion_dsp::dsp::{AUDIO_RATE, Complex, Decimator, Nco, lowpass_taps};
 
 use super::frame::{Fmt, NBINS, PRE_LEN};
 use super::util::Fft320;
-use super::{BB_RATE, DEC, Expect, MfskBurst, MfskMode, SYM};
+use super::{BB_RATE, Expect, MfskBurst, MfskLayout, MfskMode, SYM};
 use crate::blanker::Blanker;
 
 mod acquire;
@@ -37,8 +37,6 @@ pub(super) const NE: usize = NBINS + 2 * EXT;
 /// off (the image falls on the grid), R1's 71.4 Hz grid would not.
 const FE_TAPS: usize = 511;
 const FE_CUTOFF_HZ: f32 = 1560.0;
-/// Audio index of baseband sample k is DEC·k − FE_DELAY.
-const FE_DELAY: i64 = (FE_TAPS as i64 - 1) / 2 - (DEC as i64 - 1);
 /// A candidate this strong makes the receiver busy before its header has
 /// decoded (noise rarely gets there; a burst at −14 dB does).
 const Z_BUSY: f32 = 3.0;
@@ -46,9 +44,6 @@ const Z_BUSY: f32 = 3.0;
 const MARGIN: i64 = 8;
 /// LLR clamp.
 pub(super) const LLR_MAX: f32 = 12.0;
-/// Audio samples behind each baseband sample's blanked count (see
-/// `MfskRx::process`).
-const BLANK_SPAN: usize = 2 * (DEC / 2) + 1;
 
 type Energies = [f32; NE];
 
@@ -213,6 +208,9 @@ struct Active {
 
 pub struct MfskRx {
     center_hz: f32,
+    layout: MfskLayout,
+    /// Front-end filter taps.
+    fe_taps: usize,
     nco: Nco,
     dec: Decimator,
     ring: Vec<Complex>,
@@ -248,10 +246,22 @@ fn gi(mode: MfskMode) -> usize {
 
 impl MfskRx {
     pub fn new(center_hz: f32) -> Self {
+        Self::with_layout(MfskLayout::FULL, center_hz)
+    }
+
+    /// A receiver of R0 and R1 in `layout` (one layout per receiver).
+    /// Scaled layouts get the full band's filter in their own samples,
+    /// widened by the extra detector range.
+    pub fn with_layout(layout: MfskLayout, center_hz: f32) -> Self {
+        let k = layout.k;
+        let fe_taps = (FE_TAPS - 1) * k + 1;
+        let cutoff = (FE_CUTOFF_HZ + 25.0 * (layout.hmax - MfskLayout::FULL.hmax).max(0) as f32) / k as f32;
         Self {
             center_hz,
+            layout,
+            fe_taps,
             nco: Nco::new(center_hz, AUDIO_RATE),
-            dec: Decimator::new(DEC, lowpass_taps(FE_TAPS, FE_CUTOFF_HZ, AUDIO_RATE)),
+            dec: Decimator::new(layout.dec(), lowpass_taps(fe_taps, cutoff, AUDIO_RATE)),
             ring: vec![Complex::ZERO; RING],
             n_bb: 0,
             fft: Fft320::new(),
@@ -293,7 +303,13 @@ impl MfskRx {
             return 0.0;
         }
         let s: u32 = (0..w).map(|n| self.blanked[(start as usize + n) & MASK] as u32).sum();
-        s as f32 / (w * BLANK_SPAN) as f32
+        // Audio samples behind each baseband sample's count.
+        let span = 2 * (self.layout.dec() / 2) + 1;
+        s as f32 / (w * span) as f32
+    }
+
+    pub fn layout(&self) -> MfskLayout {
+        self.layout
     }
 
     pub fn center_hz(&self) -> f32 {
@@ -308,9 +324,12 @@ impl MfskRx {
         self.expect = e;
     }
 
-    /// Audio sample of a candidate's preamble start (baseband `t0c`).
+    /// Audio sample of a candidate's preamble start (baseband `t0c`): the
+    /// audio index of baseband sample k is dec·k minus the filter delay.
     fn audio_start(&self, t0c: i64) -> i64 {
-        DEC as i64 * t0c - FE_DELAY - self.blanker.delay() as i64
+        let dec = self.layout.dec() as i64;
+        let fe_delay = (self.fe_taps as i64 - 1) / 2 - (dec - 1);
+        dec * t0c - fe_delay - self.blanker.delay() as i64
     }
 
     /// True when a preamble starting at baseband `t0c` falls in the
@@ -318,7 +337,7 @@ impl MfskRx {
     fn in_slot(&self, t0c: i64) -> bool {
         self.expect.is_some_and(|e| {
             let off = self.audio_start(t0c) - e.start_sample as i64;
-            off.unsigned_abs() <= e.tol_samples + (DEC * Q) as u64
+            off.unsigned_abs() <= e.tol_samples + (self.layout.dec() * Q) as u64
         })
     }
 
@@ -329,7 +348,9 @@ impl MfskRx {
             if let Some(b) = self.dec.push(z) {
                 self.ring[self.n_bb as usize & MASK] = b;
                 // Audio zeroed around the front-end filter's centre.
-                self.blanked[self.n_bb as usize & MASK] = self.blanker.blanked_count((FE_TAPS - 1) / 2, DEC / 2) as u8;
+                self.blanked[self.n_bb as usize & MASK] =
+                    self.blanker
+                        .blanked_count((self.fe_taps - 1) / 2, self.layout.dec() / 2) as u8;
                 self.n_bb += 1;
                 if self.n_bb.is_multiple_of(Q as u64) {
                     self.on_column(out);

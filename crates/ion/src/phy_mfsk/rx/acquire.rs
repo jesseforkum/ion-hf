@@ -6,7 +6,7 @@ use super::model::{Params, estimate, header_prior, header_prior_r1, metric, mutu
 use super::{Active, Cand, EXT, Energies, Known, MARGIN, MfskRx, NE, RING, gi};
 use crate::phy_mfsk::frame::{self, Fmt, HYPS, Kind, PRE_LEN};
 use crate::phy_mfsk::util::lse;
-use crate::phy_mfsk::{DEC, MfskMode, SYM, TRANSITION, bin_hz, conv};
+use crate::phy_mfsk::{MfskMode, SYM, bin_hz, conv};
 
 /// Timing search range around the coarse estimate, baseband samples.
 const DSEARCH: i32 = 64;
@@ -460,11 +460,14 @@ impl MfskRx {
         );
         let (_, _, wi, dsel, params) = best.unwrap();
         let w = wins[wi];
-        let snr_db = 10.0 * (fmt.tones as f32 * params.gtot).max(1e-6).log10() - 10.0 * (0.3 * w as f32).log10();
+        // The window's noise bandwidth is (8000/k)/w Hz: 2400 Hz is 0.3·k·w
+        // of it.
+        let k = self.layout.k as f32;
+        let snr_db = 10.0 * (fmt.tones as f32 * params.gtot).max(1e-6).log10() - 10.0 * (0.3 * k * w as f32).log10();
         // The whole-symbol window peaks half a frequency sweep late (the
         // next symbol's sweep starts on the current tone).
         let dstart = if mode == MfskMode::R0 { d[2] } else { c.d[2] };
-        let t0 = c.t0c + dstart as i64 - (TRANSITION / DEC / 2) as i64;
+        let t0 = c.t0c + dstart as i64 - (self.layout.sweep / self.layout.dec() / 2) as i64;
         let start_sample = self.audio_start(t0).max(0) as u64;
         Active {
             mode,
