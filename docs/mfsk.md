@@ -549,7 +549,7 @@ band (`scaled_layout_numbers`); no level's power changes.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Tone spacing, Hz | 50 | 71.4 | 11.9 | 10.2 | 8.9 | 25 | 35.7 | 50 | 25 (13 carriers) |
 | Data symbol, ms | 28 | 14 | 84 | 98 | 112 | 56 | 28 | 28 | 50 |
-| Preamble symbol, ms | 28 | 28 | 168 | 196 | 224 | 56 | 56 | 28 | — |
+| Preamble symbol, ms | 28 | 28 | 168 | 196 | 224 | 56 | 56 | 28 | OFDM, 308 ms A ([phy.md](phy.md)) |
 | Occupied, data / preamble, Hz | 2450 | 2357 / 2450 | 393 / 408 | 337 / 350 | 295 / 306 | 1225 | 1179 / 1225 | 2450 | 325 |
 | Raw bit/s | 178.6 | 357.1 | 59.5 | 51.0 | 44.6 | 89.3 | 178.6 | 178.6 | — |
 | Header-only burst, s | 1.79 | 1.12 | 6.73 | 7.85 | 8.97 | 3.59 | 2.24 | 1.79 | 2.21 |
@@ -601,8 +601,8 @@ here). Read differences of 1 dB as noise.
 | R0 ×2 | −14 / −14 | −10 / −10 | −10 / −10 | −12 / −12 | −9 / −9 | | | −12 / −12 |
 | R0 ×2, expected header | −15 / −15 | −12 / −12 | −12 / −12 | −14 / −14 | −12 / −12 | | | −14 / −14 |
 | R0 ×4, expected header | −15 / −15 | −12 / −12 | −12 / −12 | −14 / −14 | −12 / −12 | | | −15 / −15 |
-| *Data2G c16r25, r1/3 (theirs)* ⁵ | −14.3 | | | −11.2 | −9.9 | | | −11.9 |
-| *Data2G c8r50, r1/3 (theirs)* ⁵ | −11.1 | | | | | | | −8.1 |
+| *Data2G c16r25, r1/3 (theirs)* ⁵ | −14.3 | | | −11.2 ᵇ | −9.9 ᵇ | | | −11.9 |
+| *Data2G c8r50, r1/3 (theirs)* ⁵ | −11.1 ᵇ | | | | | | | −8.1 ᵇ |
 
 ³ Not thresholds: Sixth's loss floor on slow fading (Six slices in
 [phy.md](phy.md)); NVIS frames run 0.62–0.95 from −3 to +14 dB, CCIR
@@ -611,7 +611,8 @@ up to +14 dB. ⁵ Not measured here: Data2G's end-to-end 10%-failure points
 (`scripts/cpm_floor_study.py` at 12d1235), converted from mean power in
 2.5 kHz by +0.18 dB; c16r25 is 16 tones at 25 Hz (400 Hz), c8r50 8 tones
 at 50 Hz, both rate 1/3 with their GF(M) code where they quote it (AWGN,
-MPD; flutter and NVIS are their binary-code numbers). Their MPD is the
+MPD; ᵇ marks their binary-code numbers, before the GF(M) code moved
+their points 0.3–1.7 dB lower). Their MPD is the
 same IONOS profile; their MPP (−11.3 c16r25, −7.6 c8r50) is IONOS's
 2 ms/1 Hz, not this page's Watterson CCIR poor.
 
@@ -634,7 +635,8 @@ burst delivered with the right fields):
   −17 ± 1 on CCIR moderate and poor, NVIS disturbed and IONOS MPD, −15 on
   flutter and low-latitude disturbed. Ladder-style (midway AWGN / CCIR
   poor) R1/7 sits at −18 dB, 6 dB under R0's −12, at a quarter of its
-  speed per frame. Its header-only burst decodes at the frame's SNR.
+  speed per frame (both inputs ±1 dB; R0's own CCIR poor point reads
+  −9 here and −11 above). Its header-only burst decodes at the frame's SNR.
 - **Long symbols and Doppler.** The worry was 10 Hz tones against 10 Hz
   of Doppler. The receiver's five-bin model (Receiver, step 5) collects the
   leaked energy in ±2 bins; over a 98 ms window a fast-fading tone keeps a
@@ -787,8 +789,9 @@ falls); six of them, one per slot, about one R0 receiver.
 
 - **R1/7 as a slot mode and as a deep floor.** Frames from −19 dB on
   AWGN and −17 ± 1 dB on every slow- and moderate-Doppler channel, −15 dB
-  on 10 Hz flutter, −11 dB at 30 Hz; ladder threshold about −18 dB, 6 dB
-  under R0. It fits 350 Hz, sits beside five others and a neighbour
+  on 10 Hz flutter, about −11 to −13 dB at 30 Hz (a flat curve, see
+  above); ladder threshold about −18 dB (midway AWGN −19 and CCIR poor
+  −17, each ±1 dB), about 6 dB under R0's −12. It fits 350 Hz, sits beside five others and a neighbour
   30 dB stronger, pulls in ±35 Hz, costs a seventh of an R0 receiver.
   Price: 8.7 bit/s net per 32-byte frame (a 29.5 s burst) and a 7.85 s
   header-only ACK. R1/8 is the same within the noise with 47 Hz to the
