@@ -318,8 +318,8 @@ neighbour's carriers start: 2521 taps (Blackman sinc, cutoff 197 Hz),
 ±0.011 dB to 150 Hz, about −0.6 dB at 170 Hz and −1.8 dB at 180 Hz, at
 least 74.9 dB down beyond 250 Hz (`sixth_filter_response`). The 100 Hz
 transition takes 1.5× the slice's taps. Half had a 1681-tap filter with a
-230 Hz cutoff, only ~30 dB down at its neighbour's carriers; it now uses
-this one.
+230 Hz cutoff, only 12.8 dB down at 250 Hz, where its neighbour's
+carriers start; it now uses this one.
 
 **Receiver changes** (layout fields, so the other numerologies are
 unchanged):
@@ -343,7 +343,8 @@ unchanged):
   guard (uncoded BER 1e-2–3e-1 at 30 dB, `diag_sixth_floor`). A real
   sound card's 50 ppm moves a 14 s burst by 0.7 ms: harmless in Sixth's
   10 ms guard, a third of Half's spare.
-- `rho_full_min` 0.13: noise reached 0.13 in the first runs.
+- `rho_full_min` 0.13 (slice 0.11): noise reached 0.10 in 120 s and
+  0.139 in 3600 s (`sixth_noise_long`), hence Sixth's two syncs there.
 
 **Sync at low SNR** (`diag_sixth_rho`: 40 QPSK bursts of 40 symbols per
 point; delivered with the right header):
@@ -425,8 +426,8 @@ levels would not survive such a neighbour in Half.
 
 **CPU** (`sixth_cpu`, release, one core, one receiver over 60 s of noise
 with six bursts): Normal 8.9 ms per second of audio, Slice 13.0, Half
-15.2, Sixth 18.7; six Sixth receivers about 112 ms/s (11% of a core),
-three Slices 39. The 2521-tap filter at 8 kHz output is most of it; a
+15.2, Sixth 18.7; six Sixth receivers, by six times one, about 112 ms/s
+(11% of a core), three Slices 39. The 2521-tap filter at 8 kHz output is most of it; a
 two-stage decimator (a short anti-alias filter to 8 kHz, then ~440 taps
 for the 100 Hz transition) should cut it several-fold (not tried).
 
