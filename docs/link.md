@@ -18,6 +18,7 @@ Code, in `crates/ion/src/`:
 | `link/audio.rs` | bursts to audio and back through the PHYs, and every receiver at once |
 | `link/node.rs` | `Node`: a station driven by audio, with the CW sense |
 | `link/compress.rs` | optional compression of the stream |
+| `link/station/lifeline.rs` | the lifeline: holding below the floor (Lifeline) |
 | `link/sim.rs` | a model channel and two-station simulator for the tests |
 
 The station knows nothing about audio: it hands out `Outgoing` bursts and
@@ -304,7 +305,8 @@ lost whatever the SNR, and a slice can move clear of it.
   for an ACK in the slowest waveform the last one came in.
 - A sender with nothing to send checks in with an Idle every `idle_s`
   (10 s). No progress (nothing acknowledged, delivered or handed over) for
-  `link_timeout_s` (120 s) ends the link.
+  `link_timeout_s` (120 s) ends the link; with the lifeline on (the
+  default) the link holds well before that instead (Lifeline).
 - Either side can ask to disconnect (a flag in the ACKs); once nothing is
   left in flight the sender sends DiscReq and the other side answers
   DiscAck. `Station::disconnect` drops what is still queued and sends
@@ -319,6 +321,233 @@ answering station keyed the ConnAck the caller heard), which both ends
 keep. A wait for an answer is stretched by the length of the peer's ID
 when an ID time has passed since the peer last keyed. Ion HF sends the
 end-of-link ID itself ([app.md](app.md)).
+
+## Lifeline
+
+When the link can no longer hold the floor, both ends hold it in R1/7
+instead of retrying until a timer gives up: the floor's R1 stretched 7
+times ([mfsk.md](mfsk.md), Below the floor), 32 tones 10.2 Hz apart in
+337 Hz, which gets its 7.85 s header-only bursts through from about
+−20 dB on AWGN and −18 dB on CCIR poor, 6 dB under R0. They report how
+each end hears the other, keep the session through the fade, resume
+without reconnecting when the path comes back, and close by agreement
+when it does not. Code: `link/station/lifeline.rs`; `Config::lifeline`
+off gives the old behaviour.
+
+**On the air.** R1/7 sits in the 400 Hz around the link's centre
+(1500 Hz), where both ends already are; its pull-in is ±35 Hz (R0's
+±75 Hz), so the lifeline's receiver follows the frequency offset of the
+peer's last bursts (`Receivers::follow`, moved once it is 8 Hz off, and
+by the lifeline's own bursts through a hold). Its bursts are
+`Wave::Lifeline`, header-only, at R0's level: one constant-envelope tone
+peaking at `TX_LEVEL`, the same peak and mean power as R0; no level
+changes. What tells them apart: the MFSK header's CRC initial value now
+carries the layout's time scale as well as the mode and header type
+(unchanged at k = 1, so full-band bursts are bit for bit as before), so
+no full-band receiver takes an R1/7 header and the R1/7 receiver takes no
+full-band one (`tests/lifeline.rs`: R0, R1, slice and OFDM bursts from
+−6 to +20 dB never come out of it, R1/7 bursts never out of the others).
+The R1/7 receiver tries R1 headers only. It does start on other MFSK in
+its 400 Hz (an R1 data burst, an R0 burst 10–50 Hz off) and takes up to
+6 s to give up, so it counts as carrier sense only while the link holds.
+It costs about 13% more receiver CPU on noise, 23% on a link's bursts
+(`receiver_cpu`).
+
+**Messages** (`frame::Life`): header-only bursts in R1/7, their 4-bit kind
+their own (read only from the lifeline's receiver; tiny messages use all
+16 kinds):
+
+| Kind | Message | `extra` |
+|---:|---|---|
+| 1 | Probe: the holding sender's, with how it last heard the peer | bit 6 set: an SNR in bits 0–5 (1 dB from −24) |
+| 2 | Report: the answer, how the probe was heard | SNR, bits 0–5 |
+| 3 | Bye: goodbye | bit 0: the hold ran out (else a host ended it) |
+| 4 | ByeAck | |
+
+Between probes the sender **knocks**: a header-only R0 Poll, which an
+answering side that hears it answers with its ACK (not as a poll for a
+lost ACK, which would hold its ACKs back after the resume). A path that
+has come back answers the knock at once, so the link need not wait for
+the next probe. No data goes in R1/7: nothing needs a frame.
+
+**Trigger** (`life_enter_s`, 45 s): no data has moved for 45 s, at either
+end: nothing acknowledged or delivered, no idle check-in answered, no
+turn. ACKs that say nothing arrived do not count (on a path that is weak
+one way, the polls' ACKs keep coming). The sending side then holds as the
+prober, the other as the answering side; the receiving side's timer
+stops its unasked ACKs as well. A probe heard makes an end the answering
+side at once (two ends that both thought they were sending sort it out
+that way; the probes' timing differs by up to 4.9 s by call sign).
+
+**Hold.** What is in flight stays in flight and what is queued stays
+queued, offsets and all; what the peer has acknowledged stays
+acknowledged. The HARQ store is given up at both ends (the sender's
+when the hold begins, the receiver's at the first probe), so frames go
+again fresh. The prober probes at once, then after 60 s, doubling to
+120 s (back to 60 s once a report is within 3 dB of resuming), and right
+after each CW ID time (below); it knocks every 30 s between probes when
+there is time for the answer. It waits for a Report 0.3 + 7.85 + 2 s,
+plus the peer's CW ID when one is due.
+
+**Resume**, without reconnecting: when a Report says the peer hears us,
+and we hear the Report, at `life_resume_db` (1 dB) over the floor's
+threshold (−12 dB mean SNR, so −11 dB), or when we hear a knock's ACK
+there that reports the same of us (the ACK's report is the effective
+SNR: 1 dB over the floor's −13). The gear starts afresh from the report,
+as after a ConnAck (the old channel's holds and failures dropped), and
+data goes at once. The answering side leaves its hold at the first
+ladder burst it hears. **Hysteresis**: the hold begins at no data for
+45 s (in the model, a mean SNR of about −15 dB) and ends at −11 dB both
+ways; a hold within 300 s of a resume is a flap and adds 2 dB to what the
+next resume wants (up to 6 dB), stops the knocks, and keeps the hold's
+clock running from the first hold.
+
+**Ending.**
+
+- The hold has lasted `life_max_s` (15 min, counted across flaps): the
+  prober says Bye (weak) in R1/7, up to `disc_retries` (3) tries; both
+  ends close, `End::Weak` (the host's `LINK_FAILED weak path`), or
+  unconfirmed if the ByeAck never came.
+- Nothing heard from the peer for `life_silent_s` (300 s; the answering
+  side, which only hears probes, 300 + 120 s): `End::LinkLost` at each
+  end. Nobody can agree with nobody.
+- A host disconnects in a hold (`Station::disconnect`, or
+  `disconnect_when_sent` once its 30 s are up, since nothing moves): Bye
+  in R1/7 from either end at once, `End::Client` there, `End::Peer` at
+  the other.
+- Not built: **retry later** ("try again in N minutes" in the Bye). It
+  fits the Bye's spare bits, but neither the VARA nor Data2G's host
+  interface has a way to tell a client, and calling back on our own is a
+  station placing an automatic call on HF, which the owner should decide
+  on (§97.221). Nor **lifeline ACKs** for a link weak one way (data at R0
+  or above where it gets through, ACKs back in R1/7): the Report already
+  says which way is weak, and the ARQ would take the 7.85 s ACK in its
+  waits; at present such a link holds and, if it stays so, closes.
+
+**Timers with 8 s bursts.** A probe exchange is 7.85 + 0.3 + 7.85 s; the
+reply wait covers it. **CW ID** (§97.119) goes ahead of each end's first
+burst after each 570 s of the link's ID clock (CW ID above); a hold
+probes 0.5 s after each ID time, and the answering side answers at once,
+so neither end's ID slips by a probe gap (`cw_ids_stay_on_time_through_a_hold`:
+two `Node`s on audio, IDs every 100 s, a 6-minute fade: every burst after
+an ID time follows its ID; in the hold the prober's IDs went 0.6 s after
+each ID time and the answering side's 14 s after, after the probe and the
+prober's ID, both every 100 s).
+
+**Host** ([app.md](app.md)): the link stays `CONNECTED` through a hold;
+`BUFFER` keeps counting what is unacknowledged, `PTT` follows the R1/7
+bursts, `BUSY` the peer's. With `DATA2G ON`, `DISCONNECTED` says why
+(`Station::end`). The Link screen shows Hold for the level.
+
+### Results (simulation)
+
+`tests/lifeline.rs`; `--ignored --nocapture` for the tables. A sends a
+long stream to B at +10 dB (lopsided: +15 dB), the SNR drops from 120 s
+as the row says. *Today* is `lifeline` off, and once the SNR is back,
+A calls again (as an operator or a client that noticed would; B answers
+again whenever its link has ended): the most favourable case for today.
+Resume: from the SNR's return to the next byte delivered. Lost: bytes
+of the stream B never got (today's reconnect starts from what was still
+queued; what was in flight is gone). Air: both stations' air time from
+the fade until data flows again (until the end where it never does).
+Ended: when each end's link ended, from the start of the fade (over the
+seeds where it did); in the ends, `up` is a link that never ended,
+`weak` `End::Weak`, `lost` `End::LinkLost`. Medians over the seeds,
+range in brackets.
+
+**Model channel** (`lifeline_table`, `ModelMedium`, 12 seeds):
+
+| Scenario | | connected at end | stream intact | resume, s | lost, bytes | air, s | holds (A) | ended A / B, s | ends A / B |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| fade −15 dB 2 min | today | 12/12 | 9/12 | 15 (9–129) | 0 (0–2210) | 46 (25–63) | 0 | 191 (120–233) / 120 (120–120) | lost/lost, up/up |
+|  | lifeline | 12/12 | 12/12 | 30 (29–45) | 0 | 53 (52–67) | 1 | — / — | up/up |
+| fade −15 dB 5 min | today | 12/12 | 3/12 | 17 (11–123) | 22 (0–2210) | 91 (33–111) | 0 | 264 (120–407) / 159 (120–287) | lost/lost, up/up |
+|  | lifeline | 12/12 | 12/12 | 33 (13–34) | 0 | 73 (72–87) | 1 | — / — | up/up |
+| fade −15 dB 10 min | today | 12/12 | 1/12 | 17 (16–81) | 22 (0–2210) | 95 (33–199) | 0 | 362 (120–665) / 241 (120–544) | lost/lost, up/up |
+|  | lifeline | 12/12 | 12/12 | 30 (12–46) | 0 | 126 (110–139) | 1 | — / — | up/up |
+| dies at −15 dB | today | 0/12 | 12/12 | — | 0 | 79 (17–197) | 0 | 378 (120–720) / 268 (120–626) | lost/lost |
+|  | lifeline | 0/12 | 12/12 | — | 0 | 172 (164–186) | 1 | 970 (962–1001) / 970 (962–1001) | weak/weak |
+| dies at −30 dB | today | 0/12 | 12/12 | — | 0 | 7 (7–14) | 0 | 112 (112–120) / 120 (120–120) | lost/lost |
+|  | lifeline | 0/12 | 12/12 | — | 0 | 30 (30–37) | 1 | 292 (292–300) / 420 (420–420) | lost/lost |
+| A→B −15 dB 10 min | today | 12/12 | 4/12 | 17 (15–89) | 5950 (0–11900) | 164 (65–331) | 0 | 347 (215–672) / 234 (121–560) | lost/lost, up/up |
+|  | lifeline | 12/12 | 12/12 | 34 (11–53) | 0 | 161 (136–194) | 1 | — / — | up/up |
+| B→A −15 dB 10 min | today | 12/12 | 0/12 | 17 (16–17) | 3570 (1020–6970) | 102 (101–194) | 0 | 114 (113–230) / 122 (121–237) | lost/lost |
+|  | lifeline | 12/12 | 12/12 | 24 (10–53) | 0 | 147 (143–169) | 1 | — / — | up/up |
+| A→B −15 dB for good | today | 0/12 | 12/12 | — | 0 | 149 (49–529) | 0 | 361 (215–1216) / 312 (121–1107) | lost/lost |
+|  | lifeline | 0/12 | 12/12 | — | 0 | 210 (189–266) | 1 | 965 (963–996) / 965 (963–996) | weak/weak |
+
+**Through the real PHYs** (`lifeline_audio_table`, `AudioMedium`, Watterson CCIR poor, SNR against each burst's mean power, 3 seeds; today's 5- and 10-minute fades and the −15 dB death come out the same because today's link is gone long before the fade's end and the same seeds then call again the same way):
+
+| Scenario | | connected at end | stream intact | resume, s | lost, bytes | air, s | holds (A) | ended A / B, s | ends A / B |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| fade −15 dB 2 min | today | 3/3 | 2/3 | 43 (36–143) | 0 (0–22) | 67 (46–72) | 0 | 227 (120–227) / 128 (123–128) | lost/lost, up/up |
+|  | lifeline | 3/3 | 3/3 | 34 (28–66) | 0 | 67 (65–74) | 1 | — / — | up/up |
+| fade −15 dB 5 min | today | 3/3 | 1/3 | 36 (18–54) | 22 (0–22) | 72 (38–106) | 0 | 227 (120–235) / 123 (122–236) | lost/lost |
+|  | lifeline | 3/3 | 3/3 | 40 (38–49) | 0 | 104 (93–116) | 1 | — / — | up/up |
+| fade −15 dB 10 min | today | 3/3 | 1/3 | 36 (18–54) | 22 (0–22) | 72 (38–106) | 0 | 227 (120–235) / 123 (122–236) | lost/lost |
+|  | lifeline | 3/3 | 3/3 | 50 (44–60) | 0 | 174 (158–179) | 1 | — / — | up/up |
+| dies at −15 dB | today | 0/3 | 3/3 | — | 0 | 45 (21–72) | 0 | 227 (120–235) / 123 (122–236) | lost/lost |
+|  | lifeline | 0/3 | 3/3 | — | 0 | 228 (205–237) | 1 | 966 (961–976) / 966 (961–976) | weak/weak |
+| dies at −30 dB | today | 0/3 | 3/3 | — | 0 | 19 (19–20) | 0 | 120 (120–120) / 122 (122–123) | lost/lost |
+|  | lifeline | 0/3 | 3/3 | — | 0 | 43 (42–43) | 1 | 294 (294–294) / 422 (422–423) | lost/lost |
+| A→B −15 dB 10 min | today | 3/3 | 0/3 | 18 (18–37) | 4420 (4420–6290) | 85 (75–128) | 0 | 242 (224–350) / 124 (123–245) | lost/lost |
+|  | lifeline | 3/3 | 3/3 | 31 (24–74) | 0 | 186 (167–193) | 1 (1–2) | — / — | up/up |
+| B→A −15 dB 10 min | today | 3/3 | 0/3 | 18 (18–36) | 4930 (1870–5100) | 143 (123–156) | 0 | 174 (122–221) / 178 (122–225) | lost/lost |
+|  | lifeline | 3/3 | 3/3 | 51 (14–71) | 0 | 206 (200–221) | 1 | — / — | up/up |
+| A→B −15 dB for good | today | 0/3 | 3/3 | — | 0 | 59 (58–111) | 0 | 242 (224–350) / 124 (123–245) | lost/lost |
+|  | lifeline | 0/3 | 3/3 | — | 0 | 240 (225–277) | 1 (1–2) | 968 (964–971) / 968 (964–971) | weak/weak |
+
+**SNR wandering around the floor** (`flapping_table`, model channel, a
+slow fade of σ about the mean, τ 60 s, from 60 s, 30 min, 12 seeds;
+both modes call again at once when a link ends, today's best case):
+
+| Mean, σ (dB) | | holds (A) | resumes | bytes delivered | links ended |
+|---|---|---:|---:|---:|---:|
+| −11, 2 | today | 0 | 0 | 18574 (14018–25324) | 0 |
+| −11, 2 | lifeline | 1 (0–2) | 1 (0–2) | 18464 (14370–25324) | 1 |
+| −13, 2 | today | 0 | 0 | 16946 (11740–21826) | 8 |
+| −13, 2 | lifeline | 3 (1–3) | 1 (0–1) | 15146 (10486–20990) | 12 |
+| −14, 3 | today | 0 | 0 | 15384 (12242–19696) | 48 |
+| −14, 3 | lifeline | 3 (2–4) | 1 (0–2) | 14834 (11752–18860) | 13 |
+| −15, 2 | today | 0 | 0 | 14780 (10288–19986) | 58 |
+| −15, 2 | lifeline | 2 (2–3) | 0 (0–1) | 14648 (10200–19128) | 13 |
+
+**Healthy links unchanged.** IONOS WGN and MPP at −6, 0 and +6 dB, two
+seeds (`ionos_table`): byte-identical to before the lifeline in 11 of 12
+runs and in all 12 with `ION_LIFELINE=0`; the twelfth (MPP 0 dB, seed 1)
+held four times and moved 6718 bytes instead of 6356. The model
+throughput table (`throughput_table` in `tests/link.rs`, 16 seeds) is
+identical from +2 dB up; with 6 dB of slow fading at −2 and 0 dB, where
+the fades reach under the floor and the link holds, within ±2% (161 →
+163, 169 → 168, 256 → 260, 395 → 396 bit/s). The existing link, IONOS,
+ladder, node and host tests pass unchanged except
+`a_silent_peer_times_the_receiver_out`, whose receiver now holds before
+it gives up (465 s instead of 120 s; the old bound with the lifeline off).
+
+**What the numbers say.**
+
+- Fades under the floor no longer cost the link: every fade from 2 to 10
+  minutes was held and resumed with nothing lost or repeated, where today
+  the link is lost at both ends and what was in flight goes with it
+  (up to 2.2 kB here; 3.6–6 kB median on a lopsided path, 4.4–4.9 kB
+  through the PHYs).
+- Resuming takes 24–34 s median after the SNR is back on the model
+  channel and 31–51 s through the PHYs (about the knock interval),
+  against 15–17 s and 18–43 s for today's call placed exactly then;
+  today's real cost is noticing and calling again.
+- A hold is not free on the air: probes, reports and knocks take 15–30%
+  of the time (both stations together; under 400 Hz for the R1/7 part),
+  about what today's retries take before they give up, but for as long
+  as the hold lasts.
+- A path that stays weak closes by agreement after 16 minutes, both ends
+  told why, instead of each end timing out on its own after 2–12 minutes;
+  a path that goes silent is lost after 5 minutes (prober) and 7 minutes
+  (answering side) instead of 2.
+- Around the floor's threshold the link holds 2–3 times in 30 minutes,
+  not every burst; it moves 1–11% less than today's link with an
+  instant redial there (R0 still trickles at −13 dB in the model, and a
+  hold waits for −11 dB), and its links end 12–13 times in 360 minutes
+  (holds that ran out) against today's 8–58.
 
 ## Compression
 
@@ -360,9 +589,12 @@ HF leaves compression off on links; nets compress direct messages
 | `start_margin_db` | 3 dB | |
 | `slice_slots` | on | |
 | `compress` | off | |
+| `lifeline`, `life_enter_s` | on, 45 s | Lifeline |
+| `life_probe_s`, `life_probe_max_s`, `life_knock_s` | 60 s, 120 s, 30 s | |
+| `life_silent_s`, `life_max_s`, `life_resume_db` | 300 s, 900 s, 1 dB | |
 
 `tests/ionos.rs` switches some of these for comparisons (`ION_SMOOTH=0`,
-`ION_HOLD=0`, `ION_POWER=1`, `ION_START=floor`).
+`ION_HOLD=0`, `ION_POWER=1`, `ION_START=floor`, `ION_LIFELINE=0`).
 
 ## Over the air
 

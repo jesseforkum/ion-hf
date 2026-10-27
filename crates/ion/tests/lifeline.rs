@@ -748,6 +748,7 @@ fn cw_ids_stay_on_time_through_a_hold() {
     let t0 = st.link_t0().expect("ID clock");
     for (k, j) in journal.iter().enumerate() {
         let ids: Vec<f64> = j.iter().filter(|e| e.1 && e.2 == "CW ID").map(|e| e.0).collect();
+        eprintln!("side {k}: ID clock from {t0:.1} s, IDs at {ids:.1?}");
         // Every burst after an ID time has had its ID since that time.
         for &(t, tx, ref what) in j {
             if !tx || what == "CW ID" || t < t0 + every {
