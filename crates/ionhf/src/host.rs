@@ -599,6 +599,9 @@ impl Host {
             }
             ["DATA2G", on @ ("ON" | "OFF")] => {
                 self.data2g = *on == "ON";
+                if !self.data2g {
+                    self.limbo = None;
+                }
                 self.say("OK");
             }
             ["CLEANTXBUFFER"] => self.clean(None),
@@ -745,7 +748,7 @@ impl Host {
         let buffer = if self.data2g {
             s.pending
         } else {
-            s.pending - s.limbo_bytes
+            s.pending.saturating_sub(s.limbo_bytes)
         };
         if self.connected.is_some() && self.last_buffer != Some(buffer) {
             self.last_buffer = Some(buffer);

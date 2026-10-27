@@ -100,7 +100,7 @@ impl Station {
         self.stream_total -= k;
         for s in &mut self.sends {
             if s.0 > sent {
-                s.0 = (s.0 - k).max(sent);
+                s.0 = s.0.saturating_sub(k).max(sent);
             }
         }
         if self.limbo.is_none() {
