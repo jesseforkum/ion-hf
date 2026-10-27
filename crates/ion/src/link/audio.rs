@@ -38,7 +38,9 @@ pub fn numerology(g: Guard) -> Numerology {
 /// The guard of a received OFDM burst's numerology.
 pub fn guard_of(num: Numerology) -> Guard {
     match num {
-        Numerology::Slice | Numerology::Slim | Numerology::Half | Numerology::Quarter => Guard::Slice,
+        Numerology::Slice | Numerology::Slim | Numerology::Half | Numerology::Quarter | Numerology::Sixth => {
+            Guard::Slice
+        }
         Numerology::Long | Numerology::LongWide => Guard::Long,
         Numerology::Normal | Numerology::NormalWide => Guard::Normal,
     }

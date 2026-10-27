@@ -37,6 +37,7 @@ measured on the air.
 | `Slice` | 50 Hz, 4 ms | 13 | 650 Hz | yes: the two slice levels |
 | `NormalWide`, `LongWide` | as Normal, Long | 55, 109 | 2750, 2725 Hz | no (`link::audio::WIDE` = false) |
 | `Slim`, `Half`, `Quarter` | | 25, 7, 5 | 650, 350, 250 Hz | no |
+| `Sixth` | 25 Hz, 10 ms | 13 | 325 Hz | no: six slices 400 Hz apart (Six slices) |
 
 Any of them can send a **header-only** burst (32 bits, no data symbols)
 for the link's short messages. The link's centre is 1500 Hz
@@ -276,6 +277,175 @@ part of the band. The link's slice levels, in the low-PAPR mode, are in
 | 600 s of noise (`slice_noise_long`) | 505 triggers, 0 syncs, worst 0.084 (threshold 0.11) |
 | Slice bursts into the full-width receivers, and back (`diag_slice_cross`, 20 dB) | no burst delivered either way (CRC masks), but some preamble checks pass: 12 slice bursts gave Normal 1 and NormalWide 2 header attempts; 48 full-width bursts gave the slice receivers 0–2 (correlation up to 0.131), each a wasted header decode and ~0.9 s of `busy()` |
 
+## Six slices
+
+A study, not used by the link: can the passband hold six OFDM slices side
+by side instead of three, and with which numerology? Centres 500, 900,
+1300, 1700, 2100 and 2500 Hz (400 Hz apart, symmetric about 1500 Hz,
+carriers 350–2650 Hz). Two candidates, both with their outer carriers at
+±150 Hz, so the guard between neighbours is the same 100 Hz from carrier
+to carrier (Slice: 150 Hz):
+
+| | A: `Half` | B: `Sixth` | `Slice` (three) |
+|---|---|---|---|
+| Spacing, CP, symbol | 50 Hz, 4 ms, 24 ms | 25 Hz, 10 ms, 50 ms | 50 Hz, 4 ms, 24 ms |
+| Carriers, occupied | 7 (bins −3..3), 350 Hz | 13 (bins −6..6), 325 Hz | 13, 650 Hz |
+| Pilots per symbol, data carriers | 2, 5 | 3, 10 (the slice's pattern in carrier indices: 75 Hz × 100 ms) | 3, 10 |
+| Energy per data cell, against Normal | 6.2× (7.9 dB) | 6.9× (8.4 dB) | 3.45× (5.4 dB) |
+| A | 2464 samples (308 ms), 3 carriers, period 10 ms | the same | 1408 (176 ms), 7 carriers, 10 ms |
+| Header | 36 symbols (864 ms) | 18 symbols (900 ms) | 18 symbols (432 ms) |
+| `overhead_s`, header-only burst | 1.25 s, 2.11 s | 1.31 s, 2.21 s | 0.67 s, 1.10 s |
+| Filter | 2521 taps, cutoff 197 Hz | the same | 1681, 370 Hz |
+| Frequency pull-in | ±50 Hz (tested ±40) | ±50 Hz (tested ±40) | ±50 Hz |
+| Data cells per second, one / all | 208 / 1250 | 200 / 1200 | 417 / 1250 |
+
+Six slices carry no more than three: 1200–1250 data cells per second,
+65–68% of Normal's 1833, the same as three Slices. What six buy is
+granularity (six independent links, or six channels of one link) and
+3 dB more energy per cell, at twice Slice's fixed overhead per burst.
+
+**Sixth.** Long's spacing and guard on the slice's carrier and pilot
+geometry; 18 header symbols are forced (17 × 20 = 340 slots < 352). A on
+every 4th bin, as Half's every 2nd: 3 carriers with a 10 ms period (every
+2nd bin would be 20 ms, ±25 Hz). A is as long as Half's: the same
+bandwidth and power give the same energy per Hz. Receiver constants are
+Long's (energy window 68, back-off 6, 99% plateau, delay grid 2–10 ms) and
+the slice's estimator (40 pilots, time scale × 0.15). CRC masks 0x5C71 /
+0xE2B9.
+
+**Filter.** Flat to the outer carriers and ≥ 70 dB down where the
+neighbour's carriers start: 2521 taps (Blackman sinc, cutoff 197 Hz),
+±0.011 dB to 150 Hz, about −0.6 dB at 170 Hz and −1.8 dB at 180 Hz, at
+least 74.9 dB down beyond 250 Hz (`sixth_filter_response`). The 100 Hz
+transition takes 1.5× the slice's taps. Half had a 1681-tap filter with a
+230 Hz cutoff, only ~30 dB down at its neighbour's carriers; it now uses
+this one.
+
+**Receiver changes** (layout fields, so the other numerologies are
+unchanged):
+
+- `sc_drop` 14: the detector waits 14 periods of A (140 ms) after a peak
+  before it counts. A long window's metric wanders slowly; with Normal's 2
+  periods the candidates came from local peaks hundreds of samples early
+  or late on the metric's slopes, and B's search (±160) never reached the
+  true B.
+- `mf_a_free` (Sixth): B's matched filter leaves out A's three carriers.
+  A's tail correlates with B at up to 0.23 (Half 0.38, Slice 0.14) without
+  noise, and at −6 dB a lag inside A won the search about as often as B
+  itself; the whole-preamble check then passes lags a whole number of A
+  periods off, and the header fails. On Half this costs 3 of its 7 B
+  carriers and measured worse, so Half keeps the full B.
+- `mf_span` 320 for Sixth (a symbol is 400 samples), 160 for Half. A
+  wider search (800) found header symbols that look like B.
+- `drift` off for both: across 7 or 13 carriers a frequency-selective
+  fade looks like a delay slope; on CCIR poor the clock estimate ran to
+  its ±300 ppm limit, which moved Half's 14 s bursts out of their 4 ms
+  guard (uncoded BER 1e-2–3e-1 at 30 dB, `diag_sixth_floor`). A real
+  sound card's 50 ppm moves a 14 s burst by 0.7 ms: harmless in Sixth's
+  10 ms guard, a third of Half's spare.
+- `rho_full_min` 0.13: noise reached 0.13 in the first runs.
+
+**Sync at low SNR** (`diag_sixth_rho`: 40 QPSK bursts of 40 symbols per
+point; delivered with the right header):
+
+| | AWGN −12 / −10 / −8 / −6 dB | CCIR poor −12 / −10 / −8 / −6 dB |
+|---|---|---|
+| Half | 22 / 27 / 32 / 34 | 12 / 20 / 24 / 28 |
+| Sixth | 22 / 29 / 35 / 38 | 11 / 20 / 26 / 34 |
+| Slice | 8 / 26 / 36 / 39 | 3 / 12 / 24 / 30 |
+
+Half's B, 7 carriers for 20 ms, is too weak a timing reference: its
+header code would decode lower than Sixth's, but at −6 dB one burst in
+seven still locks a few periods off. Sixth's B (13 carriers, 40 ms) has
+Slice's time-bandwidth product and syncs as well as Slice from −8 dB up
+and better below.
+
+**Thresholds** (`sixth_table`; centre 1300 Hz, one K = 1440 codeword per
+burst, link clip, real header, 20 bursts per point on a 2 dB grid, the
+lowest SNR with ≥ 90% right headers and ≥ 90% decoded codewords; SNR
+against the burst's own power in 2.4 kHz, as everywhere on this page; the
+Slice rows are the table above, its NVIS row new):
+
+| Level | | AWGN header / codeword | CCIR poor | NVIS disturbed |
+|---|---|---:|---:|---:|
+| QPSK 1/4 | Half | −6 / −6 | −4 / −4 | > 36 / > 36 |
+| | Sixth | −8 / −8 | −4 / −4 | −4 / +4 ¹ |
+| | Slice | −8 / −6 | −4 / −4 | +8 / > 36 |
+| QPSK 1/2 | Half | −6 / −6 | −4 / 0 | > 36 / > 36 |
+| | Sixth | −8 / −6 | −6 / −2 | −4 / +14 ¹ |
+| | Slice | −8 / −2 | −4 / +2 | +8 / > 36 |
+| 8PSK 2/3 | Half | −6 / 0 | −4 / +12 | > 36 / > 36 |
+| | Sixth | −8 / 0 | −6 / +4 | +2 / +26 ¹ |
+| | Slice | −8 / +4 | −4 / +8 | +8 / > 36 |
+| 16QAM 3/4 | Half | −6 / +4 | −4 / +30 ² | > 36 / > 36 |
+| | Sixth | −8 / +4 | −6 / +8 | −4 / +14 ¹ |
+| | Slice | −8 / +6 | −4 / +14 | +8 / > 36 |
+
+¹ Not a threshold: on NVIS disturbed (7 ms, 1 Hz) about one Sixth burst
+in six fails at any SNR (codewords 60–95% from +10 to +36 dB, headers
+75–100%). The same channel runs fail at every level and at short bursts
+too; at 30 dB they report an SNR near −5 dB with the timing, frequency and
+clock where the good ones have them (`diag_sixth_floor`), and Long decodes
+every one of them. Not found: Sixth's estimator time scale (0.15 or 0.3)
+and drift tracking make no difference.
+² A loss floor: 75–90% from +12 to +36 dB, likely the channel estimate
+from two pilots per symbol on 7 carriers. Half's AWGN rows were measured
+with clock tracking still on (no effect without fading), its CCIR poor
+rows with it off.
+
+Six full-power slices are 7.8 dB more power in the channel than one
+(three: 4.8 dB); the thresholds are per slice, against that slice's own
+power. Against Normal (genie header; QPSK 1/2 +2 / +10, 16QAM 3/4 +12 /
++18) Sixth needs 8 dB less on AWGN and 10–12 dB less on CCIR poor, for
+11% of the bit rate.
+
+**Neighbours** (`sixth_six_slices`, `sixth_neighbours`; QPSK 1/2, link
+clip, bursts staggered so all six overlap for most of their length, 10
+runs per case; noise against one slice's power):
+
+| Test | Half | Sixth |
+|---|---|---|
+| Reported SNR at 1300 Hz, no noise, unclipped: alone / five full-power neighbours | 31.2 / 30.4 dB | 41.3 / 38.4 dB |
+| The same with the 1700 Hz neighbour 20 dB stronger | 19.1 dB | 30.1 dB |
+| … and 20 Hz closer | 4.9 dB | 17.1 dB |
+| All five neighbours 20 Hz closer (both sides) | 22.0 dB | 30.8 dB |
+| Six slices at 0 / +2 / +4 dB: codewords decoded | 59 / 60 / 60 of 60 (one own burst missed at 0 dB) | 60 / 60 / 60 of 60 |
+| One neighbour (900 Hz) 20 dB stronger, at 0 / +2 / +4 dB | 49 / 50 / 50 of 50 | 50 / 50 / 50 of 50 |
+| … and 20 Hz towards 500 Hz | 49 / 50 / 50 of 50 | 50 / 50 / 50 of 50 |
+| Bursts from the wrong slice | none | none |
+| 600 s of noise at each centre (`sixth_noise_long`) | 273–305 triggers, 0 syncs, 0 bursts, worst correlation 0.127 | 292–324 triggers, 2 syncs (0.132, 0.139), 0 bursts |
+
+Half's own floor of 31 dB is the filter: its 50 Hz carriers' spectra
+fall off half as fast in Hz as Sixth's 25 Hz ones, and the 100 Hz guard
+cuts more of them (on TX and RX). A neighbour 20 dB stronger and 20 Hz
+off puts its edge carrier where the filter is only partly down: Half is
+then left with 5 dB SINR (QPSK only), Sixth with 17 dB. QPSK 1/2 near its
+threshold still decodes in both, so the overlap tests pass; the higher
+levels would not survive such a neighbour in Half.
+
+**CPU** (`sixth_cpu`, release, one core, one receiver over 60 s of noise
+with six bursts): Normal 8.9 ms per second of audio, Slice 13.0, Half
+15.2, Sixth 18.7; six Sixth receivers about 112 ms/s (11% of a core),
+three Slices 39. The 2521-tap filter at 8 kHz output is most of it; a
+two-stage decimator (a short anti-alias filter to 8 kHz, then ~440 taps
+for the 100 Hz transition) should cut it several-fold (not tried).
+
+**Recommendation: B (Sixth), for granularity, not for throughput.** It
+syncs and decodes its header as well as Slice from −8 dB and better
+below; its codewords need up to 6 dB less than Slice's on CCIR poor (4 dB
+at QPSK 1/2; 3 dB more energy per cell); its 10 ms guard gets through NVIS disturbed, where
+Half and Slice do not decode at all; it rejects its neighbours 10 dB
+better than Half. A (Half) is limited by its timing reference (header
+−6 dB on AWGN against Sixth's −8), its 31 dB own floor and 5 dB SINR next
+to a strong neighbour, its 4 ms guard (no NVIS) and a 16QAM loss floor on
+CCIR poor. What limits B: no gain in total capacity (six Sixths are 96% of
+three Slices); 1.31 s of fixed overhead per burst, so a one-codeword QPSK
+1/2 burst is 8.5 s against Slice's 4.1 s and header-only messages take
+2.2 s; a loss floor of about one burst in six on NVIS disturbed (cause
+open); six times a 2521-tap filter. Worth taking further only if the link
+needs six independent channels: several stations at once in one SSB
+channel, or finer slots than thirds.
+
 ## Width
 
 `link::audio::WIDE` is false: the link uses the 2.45 kHz layouts, which
@@ -315,8 +485,9 @@ drift) were made on the 2.75 kHz layouts; each says so.
 The other narrow layouts, not used by the link: **Slim** (650 Hz with
 Long's guard: 25 carriers 26.7 Hz apart, 22 data, 47.5 ms symbols, 8
 header symbols), **Half** (350 Hz, 7 carriers, 5 data; A 7× Normal's
-length, 36 header symbols) and **Quarter** (250 Hz, 5 carriers, 3 data;
-A 10× Normal's, 60 header symbols).
+length, 36 header symbols; Sixth's filter and detector hold, see Six
+slices) and **Quarter** (250 Hz, 5 carriers, 3 data; A 10× Normal's, 60
+header symbols).
 
 ## Header-only bursts
 
@@ -974,7 +1145,10 @@ constellation, header fields and header-only bursts, timing, frequency
 offsets and drift, streaming with any chunk size, back-to-back bursts,
 `busy()`, noise rejection, cross-triggering between numerologies, LLR
 calibration, the SNR report and sample-clock drift. `phy_slice.rs` covers
-the slice (layout, filter, neighbours, noise), `phy_lowpapr.rs` the
+the slice (layout, filter, neighbours, noise), `phy_sixth.rs` the six-slice
+candidates Half and Sixth (`sixth_table`, `sixth_neighbours`,
+`sixth_noise_long`, `sixth_cpu` and `diag_sixth_rho` are its ignored
+measurements), `phy_lowpapr.rs` the
 low-PAPR modes and their SNR report, and `blanker.rs` the blanker. The
 ignored tests (`tables`, `numerology_tables`, `cpu_cost`, `noise_long`,
 `cross_trigger_long`, the `diag_*` tests, and `clip_table`, `pilots_table`,

@@ -118,8 +118,17 @@ pub struct Layout {
     pub sc_win: usize,
     /// Detection threshold on |P|²/R².
     pub m_on: f32,
+    /// A detector peak counts once the metric has stayed below it for this
+    /// many periods of A. Two suffice for a short window; a long window's
+    /// metric wanders slowly and has local peaks hundreds of samples early
+    /// on its rising edge.
+    pub sc_drop: usize,
     /// B matched-filter search, ± samples.
     pub mf_span: usize,
+    /// B's matched filter uses only the carriers A leaves empty: a long A
+    /// on few carriers, all of them B's, otherwise correlates with B
+    /// nearly as well as B itself at low SNR.
+    pub mf_a_free: bool,
     /// Normalised B matched-filter peak needed to go on with a candidate.
     pub rho_min: f32,
     /// Normalised whole-preamble correlation needed to accept it.
@@ -131,6 +140,10 @@ pub struct Layout {
     /// Timing: the energy window is the middle of the windows capturing
     /// at least this share of the best window's energy.
     pub plateau: f32,
+    /// Track sample-clock drift. Off for Half and Sixth: across so few
+    /// carriers a frequency-selective fade looks like a delay slope, and on
+    /// CCIR poor the estimate runs to its ±300 ppm limit.
+    pub drift: bool,
     /// Preamble noise estimate: smoothing half-width (carriers) and
     /// shrinkage towards the global mean (pseudo-samples).
     pub noise_half: usize,
@@ -176,12 +189,15 @@ pub const NORMAL: Layout = Layout {
     min_center_hz: 1300.0,
     sc_win: 264,
     m_on: 0.035,
+    sc_drop: 2,
     mf_span: 80,
+    mf_a_free: false,
     rho_min: 0.06,
     rho_full_min: 0.08,
     e_win: 24,
     b_backoff: 4,
     plateau: 0.95,
+    drift: true,
     noise_half: 6,
     noise_pseudo: 24.0,
     dd_half: 2,
@@ -212,12 +228,15 @@ pub const LONG: Layout = Layout {
     min_center_hz: 1300.0,
     sc_win: 480,
     m_on: 0.02,
+    sc_drop: 2,
     mf_span: 160,
+    mf_a_free: false,
     rho_min: 0.05,
     rho_full_min: 0.055,
     e_win: 68,
     b_backoff: 6,
     plateau: 0.99,
+    drift: true,
     noise_half: 12,
     noise_pseudo: 48.0,
     dd_half: 4,
@@ -299,12 +318,15 @@ pub const SLICE: Layout = Layout {
     min_center_hz: 500.0,
     sc_win: 1280,
     m_on: 0.035,
+    sc_drop: 2,
     mf_span: 160,
+    mf_a_free: false,
     rho_min: 0.06,
     rho_full_min: 0.11,
     e_win: 24,
     b_backoff: 4,
     plateau: 0.95,
+    drift: true,
     noise_half: 3,
     noise_pseudo: 24.0,
     dd_half: 2,
@@ -346,16 +368,21 @@ pub const SLIM: Layout = Layout {
 };
 
 /// Half: 350 Hz, the slice's spacing and CP on 7 carriers (bins −3..3),
-/// scaled from the slice as the slice is from Normal.
+/// scaled from the slice as the slice is from Normal. The filter is
+/// [`SIXTH`]'s, for six slices 400 Hz apart.
 pub const HALF: Layout = Layout {
     nc: 7,
     a_len: 2464,
     hdr_syms: 36,
     crc_data: 0x4D27,
     crc_ho: 0xA9C3,
-    filter_cutoff: 230.0,
+    filter_cutoff: SIXTH.filter_cutoff,
+    filter_len: SIXTH.filter_len,
     min_center_hz: 300.0,
     sc_win: 2336,
+    sc_drop: SIXTH.sc_drop,
+    rho_full_min: SIXTH.rho_full_min,
+    drift: false,
     noise_half: 2,
     est_k: 24,
     sparse: Pattern {
@@ -364,6 +391,59 @@ pub const HALF: Layout = Layout {
         period: 2,
     },
     ..SLICE
+};
+
+/// A sixth of the passband: Long's 25 Hz spacing and 10 ms CP on the
+/// slice's 13 carriers (bins −6..6, 325 Hz), so six fit 400 Hz apart
+/// (centres 500..2500 Hz); see `docs/phy.md`, "Six slices".
+///
+/// - pilots as the slice's in carrier indices: 75 Hz × 2 symbols (100 ms,
+///   ±5 Hz), unaliased to 13.3 ms of delay;
+/// - A on every 4th bin (3 carriers, period 10 ms, pull-in ±50 Hz): every
+///   2nd bin would be a 20 ms period, ±25 Hz;
+/// - A as long as Half's: the same bandwidth and power, so the same energy
+///   per Hz;
+/// - the filter is flat to the outer carriers (±150 Hz) and ≥ 70 dB down
+///   from ±250 Hz, where the neighbour's carriers start;
+/// - the detector waits 14 periods for its peak, and B's matched filter
+///   leaves out A's three carriers: with a long A on few carriers both
+///   otherwise lock hundreds of samples off at low SNR.
+pub const SIXTH: Layout = Layout {
+    n: 320,
+    cp: 80,
+    wola: 0,
+    nc: 13,
+    robust: SLICE.robust,
+    sparse: SLICE.robust,
+    a_step: 4,
+    a_len: 2464,
+    hdr_syms: 18,
+    crc_data: 0x5C71,
+    crc_ho: 0xE2B9,
+    filter_cutoff: 197.0,
+    filter_len: 2521,
+    min_center_hz: 300.0,
+    sc_win: 2464 - 80 - RAMP - 80,
+    m_on: 0.035,
+    sc_drop: 14,
+    mf_span: 320,
+    mf_a_free: true,
+    rho_min: 0.06,
+    rho_full_min: 0.13,
+    e_win: 68,
+    b_backoff: 6,
+    plateau: 0.99,
+    drift: false,
+    noise_half: 3,
+    noise_pseudo: 24.0,
+    dd_half: 2,
+    fd: [0.3, 1.0, 2.0],
+    fd_sparse: [0.3, 1.0, 2.0],
+    tm: [16.0, 40.0, 80.0],
+    gw: 12,
+    cw: 12,
+    est_k: 40,
+    est_lg: 0.15,
 };
 
 /// Quarter: 250 Hz, 5 carriers (bins −2..2).
@@ -840,7 +920,17 @@ pub fn qam64() -> Points {
 }
 
 /// Every layout, for the checks below and the tests.
-pub const LAYOUTS: [&Layout; 8] = [&NORMAL, &LONG, &NORMAL_WIDE, &LONG_WIDE, &SLICE, &SLIM, &HALF, &QUARTER];
+pub const LAYOUTS: [&Layout; 9] = [
+    &NORMAL,
+    &LONG,
+    &NORMAL_WIDE,
+    &LONG_WIDE,
+    &SLICE,
+    &SLIM,
+    &HALF,
+    &QUARTER,
+    &SIXTH,
+];
 
 const _: () = {
     let mut i = 0;
@@ -893,6 +983,10 @@ mod tests {
         assert_eq!(SLICE.data_carriers(Pilots::Sparse), 11);
         assert_eq!(SLICE.hdr_slots(), 360);
         assert_eq!(SLICE.a_carriers(), 7);
+        assert_eq!(SIXTH.data_carriers(Pilots::Robust), 10);
+        assert_eq!(SIXTH.hdr_slots(), 360);
+        assert_eq!((SIXTH.a_carriers(), SIXTH.a_period()), (3, 80));
+        assert_eq!((HALF.a_carriers(), HALF.a_period()), (3, 80));
     }
 
     #[test]

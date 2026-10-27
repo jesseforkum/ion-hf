@@ -549,6 +549,7 @@ fn clean_round_trip_numerologies_and_pilots() {
             Numerology::Slim => (22, 22, 666.667),
             Numerology::Half => (5, 5, 350.0),
             Numerology::Quarter => (3, 3, 250.0),
+            Numerology::Sixth => (10, 10, 325.0),
         };
         assert_eq!((i.data_carriers, i.sparse_data_carriers), (want.0, want.1));
         assert!((i.bandwidth_hz - want.2).abs() < 1e-3);

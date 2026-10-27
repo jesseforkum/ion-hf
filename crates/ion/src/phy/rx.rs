@@ -10,7 +10,7 @@ use crate::chan::ChannelMeas;
 
 use super::est;
 use super::frame::*;
-use super::tx::{b_time, preamble_boost, preamble_template, twiddles};
+use super::tx::{b_sync, preamble_boost, preamble_template, twiddles};
 use super::{Constellation, HO_COPIES, Numerology, Pilots, check_center, front_end_taps_for};
 
 mod demod;
@@ -258,12 +258,12 @@ impl PhyRx {
             map: Map::new(l, l.pre_syms(), Pilots::Robust),
             wshift: vec![0; max_g],
             drift: Drift::default(),
-            track_drift: true,
+            track_drift: l.drift,
             blanker: Blanker::new(center_hz),
             blanked: vec![0; RING],
             bfrac: vec![0.0; max_g],
             tw: twiddles(l.n),
-            bt: b_time(l),
+            bt: b_sync(l),
             pre: preamble_template(l),
             center_rot,
             dcar_r: data_carrier_table(l, &l.robust),
@@ -428,9 +428,9 @@ impl PhyRx {
                 self.sc_best = m;
                 self.sc_best_n = n;
                 self.sc_best_p = self.sc_p;
-            } else if n >= self.sc_best_n + 2 * lag {
+            } else if n >= self.sc_best_n + self.l.sc_drop as u64 * lag {
                 self.sc_track = false;
-                self.sc_hold = self.sc_best_n + 4 * lag;
+                self.sc_hold = self.sc_best_n + 2 * self.l.sc_drop as u64 * lag;
                 let f1 = self.sc_best_p.1.atan2(self.sc_best_p.0) * FS / (core::f64::consts::TAU * lag as f64);
                 self.stats.candidates += 1;
                 if self.cands.len() < self.cands.capacity() {
