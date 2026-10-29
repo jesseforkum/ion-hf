@@ -13,6 +13,7 @@ pub mod node;
 pub mod report;
 pub mod sim;
 pub mod station;
+pub mod stream;
 
 pub use node::Node;
 pub use station::{Air, Config, Expected, Gear, Incoming, Outgoing, Role, State, Station};
