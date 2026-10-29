@@ -52,6 +52,9 @@ pub enum IonCmd {
     /// The link's choice of level, from the next link on (at once while
     /// none is up).
     SetGear(Gear),
+    /// Offer the stream gear, from the next link on (at once while none
+    /// is up).
+    SetStream(bool),
     /// A Winlink host interface takes the link's received bytes and status
     /// (`None`: it has gone).
     AttachHost(Option<Sender<crate::host::HostIn>>),
@@ -132,9 +135,10 @@ pub struct IonHandle {
 
 /// Our own station's node, with OFDM at the on-air level (the loopback test
 /// stations stay at 0 dB).
-fn on_air_node(call: &str, gear: Gear, ofdm_db: f32) -> Node {
+fn on_air_node(call: &str, gear: Gear, stream: bool, ofdm_db: f32) -> Node {
     let mut cfg = Node::config(call);
     cfg.gear = gear;
+    cfg.stream = stream;
     let mut n = Node::new(cfg, DEFAULT_LEAD_S);
     n.set_ofdm_gain_db(ofdm_db);
     n.set_id_every(Some(ID_EVERY_S));
@@ -160,6 +164,7 @@ struct Worker {
     /// Extra level for our OFDM bursts, dB.
     ofdm_db: f32,
     gear: Gear,
+    stream: bool,
     /// A Winlink host (Pat, Winlink Express) driving the link.
     host: Option<Sender<crate::host::HostIn>>,
     call: String,
@@ -195,9 +200,10 @@ impl Worker {
     fn new(call: String, engine: Sender<Msg>, ui: Sender<UiEvent>, repaint: Box<dyn Fn() + Send>) -> Self {
         let bcast_call = call.clone();
         Self {
-            node: on_air_node(&call, Gear::default(), ion::link::audio::OFDM_AIR_GAIN_DB),
+            node: on_air_node(&call, Gear::default(), true, ion::link::audio::OFDM_AIR_GAIN_DB),
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
             gear: Gear::default(),
+            stream: true,
             host: None,
             call,
             engine,
@@ -296,7 +302,7 @@ impl Worker {
             self.node.station().state(),
             State::Idle | State::Listening | State::Disconnected | State::Failed
         );
-        self.node = on_air_node(&self.call, self.gear, self.ofdm_db);
+        self.node = on_air_node(&self.call, self.gear, self.stream, self.ofdm_db);
         self.node.set_plot(self.plot);
         self.connected_at = None;
         self.closing = false;
@@ -402,15 +408,24 @@ impl Worker {
             }
             IonCmd::SetGear(g) => {
                 self.gear = g;
-                match self.node.station().state() {
-                    State::Idle | State::Disconnected | State::Failed => self.reset(),
-                    State::Listening => {
-                        self.reset();
-                        self.node.station_mut().listen();
-                    }
-                    _ => {}
-                }
+                self.refresh_idle();
             }
+            IonCmd::SetStream(on) => {
+                self.stream = on;
+                self.refresh_idle();
+            }
+        }
+    }
+
+    /// A fresh node for new settings, unless a link is up.
+    fn refresh_idle(&mut self) {
+        match self.node.station().state() {
+            State::Idle | State::Disconnected | State::Failed => self.reset(),
+            State::Listening => {
+                self.reset();
+                self.node.station_mut().listen();
+            }
+            _ => {}
         }
     }
 

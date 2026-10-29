@@ -24,6 +24,8 @@ pub struct Config {
     pub ofdm_db: f32,
     /// How the link picks its level (`ion::link::Gear`).
     pub gear: Gear,
+    /// Offer the stream gear (`ion::link::frame::caps::STREAM`); off: plain ARQ.
+    pub stream: bool,
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
@@ -46,6 +48,7 @@ impl Default for Config {
             drive: 50,
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
             gear: Gear::Goodput,
+            stream: true,
             host_enabled: false,
             host_port: 8300,
             tci_url: "ws://127.0.0.1:50001".into(),
@@ -141,6 +144,15 @@ impl Gear {
             Gear::Goodput => ion::link::Gear::Goodput,
             Gear::Ladder => ion::link::Gear::Ladder,
         }
+    }
+}
+
+/// `--stream on|off`.
+pub fn parse_on_off(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -294,5 +306,12 @@ mod tests {
         assert_eq!(c.gear, Gear::Goodput);
         let c: Config = toml::from_str("gear = \"ladder\"\n").unwrap();
         assert_eq!(c.gear, Gear::Ladder);
+        assert!(Config::default().stream);
+        let c: Config = toml::from_str(
+            "stream = false
+",
+        )
+        .unwrap();
+        assert!(!c.stream);
     }
 }

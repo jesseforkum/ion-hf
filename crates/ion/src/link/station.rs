@@ -562,7 +562,14 @@ impl Station {
 
     /// The [`caps`] we offer or accept.
     fn own_caps(&self) -> u8 {
-        if self.cfg.cue { caps::CUE } else { 0 }
+        let mut c = 0;
+        if self.cfg.cue {
+            c |= caps::CUE;
+        }
+        if self.cfg.stream {
+            c |= caps::STREAM;
+        }
+        c
     }
 
     // -- application side -----------------------------------------------------

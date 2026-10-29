@@ -115,6 +115,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetCall(cfg.call.clone()));
         let _ = cmds.send(IonCmd::SetOfdmDb(cfg.ofdm_db));
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
+        let _ = cmds.send(IonCmd::SetStream(cfg.stream));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
             let _ = lb.send(LoopCmd::IonPeer(true));

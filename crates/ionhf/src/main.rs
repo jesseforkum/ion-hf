@@ -3,7 +3,7 @@
 //!
 //! Usage: ionhf [--loopback] [--tci ws://host:port] [--connect CALL]
 //! [--setup] [--log] [--shots DIR] [--quit S] [--loop-snr DB]
-//! [--gear goodput|ladder] [--size WxH] [--shot-set NAME --shot-at S]
+//! [--gear goodput|ladder] [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
 //! ionhf --sim ...: headless stations on a simulated band (see `sim`)
 
 // Release builds are GUI-subsystem exes: no console window on launch.
@@ -50,6 +50,8 @@ struct Args {
     loop_snr: Option<f32>,
     /// The link's gear for this run, over the setting.
     gear: Option<config::Gear>,
+    /// The stream gear for this run, over the setting.
+    stream: Option<bool>,
     /// Open on the log.
     log: bool,
     /// Window size in pixels (screenshots); the saved size is left alone.
@@ -70,6 +72,7 @@ fn parse_args() -> Args {
         quit: None,
         loop_snr: None,
         gear: None,
+        stream: None,
         log: false,
         size: None,
         shot_set: None,
@@ -88,6 +91,10 @@ fn parse_args() -> Args {
             "--gear" => match it.next().as_deref().and_then(config::Gear::parse) {
                 Some(g) => args.gear = Some(g),
                 None => eprintln!("--gear: goodput or ladder"),
+            },
+            "--stream" => match it.next().as_deref().and_then(config::parse_on_off) {
+                Some(on) => args.stream = Some(on),
+                None => eprintln!("--stream: on or off"),
             },
             "--log" => args.log = true,
             "--size" => {
@@ -251,6 +258,9 @@ fn main() -> eframe::Result {
             }
             if let Some(g) = args.gear {
                 let _ = app.threads.ion.cmds.send(ion_engine::IonCmd::SetGear(g.link()));
+            }
+            if let Some(on) = args.stream {
+                let _ = app.threads.ion.cmds.send(ion_engine::IonCmd::SetStream(on));
             }
             if let Some(call) = &args.connect {
                 app.connect(call);
