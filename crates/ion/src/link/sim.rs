@@ -10,6 +10,7 @@ use ion_dsp::dsp::NoiseGen;
 
 use super::harq::{ModelSlot, Soft};
 use super::station::{Air, CONTROL, Expected, Incoming, Outgoing, Station, TINY};
+use super::stream::{self, Listen};
 use crate::fec::Rate;
 use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::phy_mfsk::MfskMode;
@@ -22,6 +23,10 @@ pub trait Medium {
     /// What station `to` expects to hear next ([`Station::expected`]),
     /// before each burst it may receive.
     fn expect(&mut self, _to: usize, _e: &[Expected]) {}
+
+    /// What station `to`'s stream timekeeping needs
+    /// ([`Station::stream_listen`]), before each burst it may receive.
+    fn stream(&mut self, _to: usize, _l: Option<Listen>) {}
 }
 
 /// Air-time arithmetic from a handful of numbers per waveform, roughly what
@@ -55,8 +60,11 @@ impl Default for ModelAir {
 
 impl Air for ModelAir {
     fn duration(&self, wave: Wave, code: usize, coded_bits: usize) -> f64 {
+        if code == stream::TONES {
+            return 2.0 * stream::tones::TONE_S;
+        }
         let bits_per_sym = match code {
-            TINY | CONTROL => 2,
+            TINY | CONTROL | stream::STREAM => 2,
             l => LADDER[l].constellation.bits_per_symbol(),
         };
         match wave {
@@ -186,6 +194,9 @@ impl Medium for ModelMedium {
             return None;
         }
         let snr = self.snr_at(start) + self.dir_db[from];
+        if burst.code == stream::TONES || burst.code == stream::STREAM {
+            return self.carry_stream(burst, snr);
+        }
         let control_th = control_threshold_db(burst.wave);
         // The header is a little more robust than a control frame.
         if self.noise.uniform() > self.p_ok(control_th - 1.0, snr) {
@@ -245,6 +256,39 @@ impl Medium for ModelMedium {
         })
     }
 }
+
+impl ModelMedium {
+    /// A stream period (its timing is known, so it is always "heard";
+    /// each frame survives by its option's threshold) or a tone answer
+    /// (heard down to a few dB under the MFSK floor's control threshold).
+    fn carry_stream(&mut self, burst: &Outgoing, snr: f32) -> Option<Incoming> {
+        let mut inc = Incoming {
+            wave: burst.wave,
+            code: burst.code,
+            user: burst.user,
+            extra: burst.extra,
+            frames: Vec::new(),
+            soft: None,
+            snr_db: snr + 0.5 * self.noise.gaussian(),
+            chan: crate::chan::ChannelMeas::of_snr(snr - MODEL_FADING_DB),
+            slot: 0,
+            grid: None,
+        };
+        if burst.code == stream::TONES {
+            return (self.noise.uniform() <= self.p_ok(control_threshold_db(FLOOR_WAVE_MODEL) - 3.0, snr))
+                .then_some(inc);
+        }
+        let th = stream::model_threshold_db((burst.extra & 0xFF) as usize);
+        inc.frames = burst
+            .frames
+            .iter()
+            .map(|f| (self.noise.uniform() <= self.p_ok(th, snr)).then(|| f.clone()))
+            .collect();
+        Some(inc)
+    }
+}
+
+const FLOOR_WAVE_MODEL: Wave = Wave::Mfsk(MfskMode::R0);
 
 /// What the model's channel costs against AWGN: its effective SNR is the
 /// mean less this.
@@ -489,6 +533,7 @@ impl Sim {
                 let end = t + b.duration(&*self.air);
                 self.busy_until[s] = end;
                 self.medium.expect(other, &self.stations[other].expected());
+                self.medium.stream(other, self.stations[other].stream_listen());
                 let inc = self.medium.carry(s, &b, t, end);
                 self.log.push(AirEvent {
                     from: s,

@@ -11,6 +11,7 @@ use ion_dsp::ionos::{self, Ionos};
 use super::harq::Soft;
 use super::sim::{Medium, ModelAir};
 use super::station::{Air, CONTROL, CUE_MODE, Config, Expected, Incoming, Outgoing, TINY, frame_bits, user_code};
+use super::stream;
 use crate::fec;
 use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::phy::{self, Constellation, DataMode, Numerology, PhyRx, Pilots, TxOptions};
@@ -75,6 +76,15 @@ pub struct PhyAir;
 
 impl Air for PhyAir {
     fn duration(&self, wave: Wave, code: usize, bits: usize) -> f64 {
+        match (code, wave) {
+            (stream::TONES, _) => return stream::tones::answer_samples() as f64 / AUDIO_RATE as f64,
+            (stream::STREAM, Wave::Ofdm(_)) => {
+                return phy::burst_samples_with(Numerology::Normal, stream::pilots(), Constellation::Qpsk, bits) as f64
+                    / AUDIO_RATE as f64;
+            }
+            (stream::STREAM, Wave::Mfsk(m)) => return phy_mfsk::burst_samples(m, bits) as f64 / AUDIO_RATE as f64,
+            _ => {}
+        }
         let (c, p) = shape(code);
         let samples = match wave {
             Wave::Ofdm(g) => phy::burst_samples_with(numerology(g), p, c, bits),

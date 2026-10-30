@@ -227,6 +227,44 @@ pub fn nominal_bps(o: usize) -> f32 {
     pieces / SLOT_S as f32
 }
 
+/// The seed of a stream's tone plan.
+pub fn plan_seed(session: u8, id: u8) -> u64 {
+    (session as u64) << 8 | id as u64
+}
+
+/// What a receiving station's timekeeping needs from it
+/// (`Station::stream_listen`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listen {
+    pub session: u8,
+    pub id: u8,
+    /// Changes with each Go: the timekeeping starts again from it.
+    pub epoch: u32,
+    /// The options the next period may be in, likeliest first.
+    pub opts: Vec<usize>,
+    /// The first period starts this long after our Go ends (the sender's
+    /// turnaround and PTT lead).
+    pub after_tx_s: f64,
+    /// Periods the station has taken in, and whether the last one gave
+    /// a piece (only then does it anchor the timekeeping).
+    pub seen: u32,
+    pub last_ok: bool,
+}
+
+/// What a sending station listens for in a pause (`Station::stream_watch`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Watch {
+    /// The tone plan's seed ([`plan_seed`]).
+    pub seed: u64,
+    /// When our period ended (the pause began), on our clock.
+    pub from: f64,
+}
+
+/// How long after its period ends the sender listens before deciding,
+/// seconds: the receiver's turnaround and lead, the tones, and both
+/// sound cards' latencies.
+pub const WATCH_S: f64 = 1.15;
+
 // -- frames -------------------------------------------------------------------
 
 /// Pieces in one OFDM long frame (180 bytes: id, option, first index,
@@ -337,6 +375,14 @@ pub fn decode_codeword(llrs: &[f32]) -> (Option<Vec<u8>>, f32) {
     }
     let bits = fec::Decoder::new().decode_prefix(&comb);
     (bits.map(|b| super::audio::bits_to_bytes(&b)), blind as f32)
+}
+
+/// About where each option loses 1% of its frames, dB in 2.4 kHz, for
+/// the model channel (`sim::ModelMedium`): the MFSK ladder levels', and
+/// the QPSK rates spaced as their codes need.
+pub fn model_threshold_db(o: usize) -> f32 {
+    const T: [f32; 11] = [-12.0, -9.0, -8.0, -6.5, -4.5, -1.5, -0.5, 1.0, 2.5, 5.5, 8.0];
+    T[o.min(T.len() - 1)]
 }
 
 // -- block sizing and the start ------------------------------------------------

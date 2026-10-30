@@ -154,7 +154,7 @@ impl Station {
     }
 
     /// The peer asks for the turn (or no longer does).
-    fn note_turn_ask(&mut self, want: bool, now: f64) {
+    pub(super) fn note_turn_ask(&mut self, want: bool, now: f64) {
         if want && !self.peer_wants_turn {
             self.turn_asked_at = now;
         }
@@ -313,7 +313,9 @@ impl Station {
             .collect();
         let resent = pieces.len();
         let mut in_flight: usize = self.inflight.values().map(Vec::len).sum();
-        while pieces.len() < room && !self.out.is_empty() && in_flight < WINDOW_BYTES {
+        // While the queue waits for a stream, only what is in flight goes.
+        let draining = self.stream_wanted(self.last_heard.max(self.last_tx_end));
+        while pieces.len() < room && !self.out.is_empty() && in_flight < WINDOW_BYTES && !draining {
             let n = self.out.len().min(max_payload);
             let chunk: Vec<u8> = self.out.drain(..n).collect();
             self.inflight.insert(self.next_offset, chunk);

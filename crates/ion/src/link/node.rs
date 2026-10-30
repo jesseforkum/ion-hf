@@ -126,6 +126,10 @@ impl Air for NodeAir {
     fn max_bits(&self, wave: Wave, code: usize) -> usize {
         PhyAir.max_bits(wave, code)
     }
+
+    fn lead_s(&self) -> f64 {
+        self.lead_s
+    }
 }
 
 pub struct Node {
