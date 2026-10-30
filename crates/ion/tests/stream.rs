@@ -5,10 +5,12 @@
 
 use std::sync::Arc;
 
+use ion::link::audio::{AudioMedium, PhyAir};
 use ion::link::frame::{Frame, Kind, caps, flags};
 use ion::link::sim::{ModelAir, ModelMedium, Sim};
 use ion::link::stream::{STREAM, TONES};
 use ion::link::{Air, Config, Outgoing, State, Station};
+use ion_dsp::ionos::{Mode, Reference};
 
 fn payload(n: usize, seed: u32) -> Vec<u8> {
     let mut x = seed.wrapping_mul(2_654_435_761) | 1;
@@ -172,4 +174,47 @@ fn a_cw_id_ends_the_block_and_it_goes_on_after() {
         let due = t0 + n * 120.0;
         assert!(n < 1.0 || due <= e.start || due >= e.end, "{e:?} across {due}");
     }
+}
+
+/// Real PHYs on IONOS SIM: the timekeeping finds the periods, the tones
+/// are heard, the block arrives whole.
+fn ionos(mode: Mode, snr_db: f32, n: usize, seed: u64) -> Sim {
+    let air: Arc<dyn Air> = Arc::new(PhyAir);
+    let a = Station::new(Config::new("N0JLF"), air.clone());
+    let mut b = Station::new(Config::new("N0CALL"), air.clone());
+    b.listen();
+    let medium = AudioMedium::ionos(mode, 2, Reference::Peak, snr_db, seed);
+    let mut sim = Sim::new(a, b, Box::new(medium), air);
+    sim.stations[0].connect("N0CALL", 0.0);
+    sim.stations[0].send(&payload(n, seed as u32));
+    sim
+}
+
+#[test]
+fn on_ionos_at_0_db_the_stream_delivers() {
+    let n = 6_000;
+    let mut sim = ionos(Mode::Wgn, 0.0, n, 11);
+    let done = sim.run_until(1_200.0, |s| s.stations[1].stats().bytes_received >= n as u64);
+    if std::env::var("ION_DUMP").is_ok() {
+        dump(&sim);
+        for p in &sim.stations[1].stats().stream_log {
+            eprintln!(
+                "{:<9} {}/{} {:+.1} dB -> {}",
+                ion::link::stream::OPTS[p.0 as usize].name,
+                p.1,
+                p.2,
+                p.3,
+                p.4
+            );
+        }
+    }
+    assert!(
+        done,
+        "{} of {n} in {:.0} s",
+        sim.stations[1].stats().bytes_received,
+        sim.t
+    );
+    assert_eq!(sim.stations[1].take_received(), payload(n, 11));
+    assert!(periods(&sim) > 3);
+    assert!(sim.stations[1].stats().stream_blocks >= 1);
 }

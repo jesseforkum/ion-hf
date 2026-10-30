@@ -178,7 +178,7 @@ pub fn level_trim_db(code: usize) -> f32 {
 /// `TX_LEVEL`, as loud as every MFSK burst: the gain is the OFDM part's.
 pub fn transmit_with(b: &Outgoing, ofdm_gain: f32) -> Vec<f32> {
     let mut a = modulate(b);
-    if matches!(b.wave, Wave::Ofdm(_)) {
+    if matches!(b.wave, Wave::Ofdm(_)) && b.code != stream::TONES {
         let cap = 10f32.powf(OFDM_AIR_GAIN_MAX_DB / 20.0);
         let g = (ofdm_gain * 10f32.powf(level_trim_db(b.code) / 20.0)).min(cap);
         if g != 1.0 {
@@ -283,8 +283,56 @@ pub fn transmit(b: &Outgoing) -> Vec<f32> {
     behind_cue(b, modulate(b))
 }
 
+/// A tone answer ([`stream::TONES`]): the session's pair for its message,
+/// `off_hz` off the grid, at `TX_LEVEL` like every steady signal.
+pub fn transmit_tones(b: &Outgoing, off_hz: f32) -> Vec<f32> {
+    let seed = stream::plan_seed(super::station::user_session(b.user), (b.extra >> 8) as u8);
+    match stream::Msg::from_code(b.extra & 0xFF) {
+        Some(m) => stream::tones::synth(&stream::tones::Plan::new(seed), m, off_hz),
+        None => Vec::new(),
+    }
+}
+
+/// A stream period ([`stream::STREAM`]): its frames' codewords in the
+/// option's waveform (`extra` holds the option).
+fn modulate_period(b: &Outgoing) -> Vec<f32> {
+    let o = ((b.extra & 0xFF) as usize).min(stream::OPTS.len() - 1);
+    match stream::OPTS[o].fam {
+        stream::Fam::Ofdm => {
+            let n = stream::OPTS[o].n;
+            let bits: Vec<u8> = b
+                .frames
+                .iter()
+                .flat_map(|f| fec::encode_span(&bytes_to_bits(f), 0, n))
+                .collect();
+            phy::modulate_full(
+                numerology(Guard::Normal),
+                Constellation::Qpsk,
+                b.user,
+                0,
+                &bits,
+                CENTER_HZ,
+                &tx_options(stream::OFDM_LEVEL),
+            )
+        }
+        stream::Fam::Mfsk(m, r) => {
+            let syms: Vec<u8> = b
+                .frames
+                .iter()
+                .flat_map(|f| fec::nb::encode_bits_at(r, fec::nb::link_layout(), &bytes_to_bits(f)))
+                .collect();
+            phy_mfsk::modulate_symbols(m, b.user, b.extra, &syms, CENTER_HZ)
+        }
+    }
+}
+
 /// [`transmit`] without the cue.
 fn modulate(b: &Outgoing) -> Vec<f32> {
+    match b.code {
+        stream::TONES => return transmit_tones(b, 0.0),
+        stream::STREAM => return modulate_period(b),
+        _ => {}
+    }
     match b.wave {
         Wave::Mfsk(m) => {
             debug_assert!(!is_long(b.code), "long frames on MFSK");
@@ -545,6 +593,15 @@ pub struct Receivers {
     /// last [`Receivers::process`], in its bursts' order.
     plot: bool,
     plots: Vec<Option<RxPlot>>,
+    /// The stream gear's period acquisition, and the periods it handed
+    /// over in the last [`Receivers::process`].
+    stream: stream::acq::Acq,
+    stream_out: Vec<Incoming>,
+    /// Samples counted on our clock but never given to the receivers
+    /// ([`Receivers::skip`]).
+    skipped: u64,
+    /// The MFSK period expectation last set: (start, user).
+    mfsk_expect: Option<(u64, u16)>,
 }
 
 /// Audio samples [`Receivers`] hand each receiver at a time (20 ms).
@@ -573,7 +630,61 @@ impl Receivers {
             expected: Vec::new(),
             plot: false,
             plots: Vec::new(),
+            stream: stream::acq::Acq::new(),
+            stream_out: Vec::new(),
+            skipped: 0,
+            mfsk_expect: None,
         }
+    }
+
+    /// The stream the station listens for (`Station::stream_listen`).
+    pub fn stream_listen(&mut self, l: Option<stream::Listen>) {
+        self.stream.set(l);
+        if !self.stream.active() && self.mfsk_expect.take().is_some() {
+            self.mfsk.expect(None);
+        }
+    }
+
+    /// Our own burst ended at clock sample `at` (now if `None`): the
+    /// stream's first period is timed from our Go.
+    pub fn stream_tx_end(&mut self, at: Option<u64>) {
+        self.stream.note_tx_end(at);
+    }
+
+    /// The stream acquisition's carrier offset (Hz) and counters.
+    pub fn stream_state(&self) -> (f32, stream::acq::AcqStats) {
+        (self.stream.offset_hz(), self.stream.stats)
+    }
+
+    /// Our clock, samples: everything heard and skipped.
+    pub fn clock(&self) -> u64 {
+        self.stream.clock()
+    }
+
+    /// `n` samples we did not hear (we were transmitting, or a simulation
+    /// skipped silence): the receivers do not see them, the clock counts
+    /// them.
+    pub fn skip(&mut self, n: usize) {
+        self.skipped += n as u64;
+        self.stream.skip(n);
+    }
+
+    /// Points the MFSK receiver at the MFSK period due, if one is.
+    fn stream_expect_mfsk(&mut self) {
+        let want = self.stream.mfsk_expect();
+        let key = want.as_ref().map(|w| (w.0, w.2.user));
+        if key == self.mfsk_expect {
+            return;
+        }
+        self.mfsk_expect = key;
+        self.mfsk.expect(want.map(|(start, tol, h)| phy_mfsk::Expect {
+            start_sample: start.saturating_sub(self.skipped),
+            tol_samples: tol,
+            header: Some(h),
+            alt: None,
+            min_score: phy_mfsk::EXPECT_MIN_SCORE,
+            min_margin: phy_mfsk::EXPECT_MIN_MARGIN,
+        }));
     }
 
     /// Runs every receiver and the meter over `samples`: the bursts land in
@@ -583,6 +694,7 @@ impl Receivers {
         self.ofdm_out.clear();
         self.ofdm_slot.clear();
         self.mfsk_out.clear();
+        self.stream_out.clear();
         let from = self.meter.samples();
         self.meter.push(samples);
         let to = self.meter.samples();
@@ -590,9 +702,20 @@ impl Receivers {
         // burst it announces is still in that receiver's ring (2 s).
         for block in samples.chunks(RUN_BLOCK) {
             let m0 = self.mfsk_out.len();
+            if self.stream.active() {
+                self.stream_expect_mfsk();
+            }
             self.mfsk.process(block, &mut self.mfsk_out);
             let mut k = m0;
             while k < self.mfsk_out.len() {
+                if self.stream.active() {
+                    let start = self.mfsk_out[k].start_sample + self.skipped;
+                    if let Some(inc) = self.stream.take_mfsk(&self.mfsk_out[k], start) {
+                        self.mfsk_out.remove(k);
+                        self.stream_out.push(inc);
+                        continue;
+                    }
+                }
                 if !self.mfsk_out[k].cue {
                     k += 1;
                     continue;
@@ -612,6 +735,20 @@ impl Receivers {
                 rx.process(block, &mut self.ofdm_out);
                 self.ofdm_slot.resize(self.ofdm_out.len(), Some(k));
             }
+            self.stream.push(block, &mut self.stream_out);
+        }
+        // While a stream is on, its periods come from the acquisition
+        // alone: a header the link's own receivers caught is a copy.
+        if let Some(s) = self.stream.session() {
+            let keep: Vec<bool> = self
+                .ofdm_out
+                .iter()
+                .map(|b| !stream::is_period_user(b.user, s))
+                .collect();
+            let mut it = keep.iter();
+            self.ofdm_out.retain(|_| *it.next().unwrap());
+            let mut it = keep.iter();
+            self.ofdm_slot.retain(|_| *it.next().unwrap());
         }
         // Bursts heard: out of the thirds they covered (all, full-band).
         for (b, slot) in self.ofdm_out.iter().zip(&self.ofdm_slot) {
@@ -638,6 +775,7 @@ impl Receivers {
         let slot = self.slot;
         out.extend(self.ofdm_out.iter().map(|b| Incoming { slot, ..decode(b) }));
         out.extend(self.mfsk_out.iter().map(|b| Incoming { slot, ..decode_mfsk(b) }));
+        out.append(&mut self.stream_out);
         self.plots.clear();
         if self.plot {
             self.plots.extend(self.ofdm_out.iter().map(ofdm_plot));
@@ -731,6 +869,46 @@ impl Default for Receivers {
     }
 }
 
+/// Seconds of audio a simulated stream period carries before and after
+/// it: the timekeeping's widest window and its margin.
+const STREAM_LEAD_S: f64 = 0.8;
+
+impl AudioMedium {
+    /// A tone answer through its path, heard by the sending side's detector.
+    fn carry_tones(&mut self, from: usize, burst: &Outgoing) -> Option<Incoming> {
+        let tx = transmit_tones(burst, 0.0);
+        let lead = (0.1 * AUDIO_RATE) as usize;
+        let mut input = vec![0.0; lead];
+        input.extend_from_slice(&tx);
+        input.resize(input.len() + 2 * lead, 0.0);
+        let mut out = vec![0.0; input.len()];
+        let power = ion_dsp::TX_LEVEL * ion_dsp::TX_LEVEL / 2.0;
+        match &mut self.paths {
+            Paths::Watterson(ch) => {
+                ch[from].process(&input, &mut out);
+                let sigma = noise_sigma(power, self.snr_db, 2400.0, AUDIO_RATE);
+                add_awgn(&mut out, sigma, &mut self.noise);
+            }
+            Paths::Ionos(ch, _) => ch[from].process(&input, Some((power, self.snr_db)), &mut out),
+        }
+        let seed = stream::plan_seed(super::station::user_session(burst.user), (burst.extra >> 8) as u8);
+        let plan = stream::tones::Plan::new(seed);
+        let h = stream::tones::detect(&plan, &out, 0, 3 * lead, stream::tones::MARK);
+        h.msg.map(|m| Incoming {
+            wave: burst.wave,
+            code: stream::TONES,
+            user: burst.user,
+            extra: m.code() | (burst.extra & 0xFF00),
+            frames: Vec::new(),
+            soft: None,
+            snr_db: 10.0 * h.score.max(1e-3).log10(),
+            chan: crate::chan::ChannelMeas::of_snr(0.0),
+            slot: 0,
+            grid: None,
+        })
+    }
+}
+
 /// The two directions' channels.
 enum Paths {
     /// Watterson channels (`ion_dsp::channel`); SNR in 2.4 kHz against the
@@ -755,6 +933,8 @@ pub struct AudioMedium {
     receivers: [Receivers; 2],
     noise: NoiseGen,
     heard: Vec<Incoming>,
+    /// Where each side's receivers' audio last ended, seconds.
+    heard_to: [f64; 2],
 }
 
 impl AudioMedium {
@@ -769,6 +949,7 @@ impl AudioMedium {
             noise: NoiseGen::new(seed ^ 0xA5A5),
             heard: Vec::new(),
             pep: false,
+            heard_to: [0.0; 2],
         }
     }
 
@@ -792,6 +973,7 @@ impl AudioMedium {
             noise: NoiseGen::new(seed ^ 0xA5A5),
             heard: Vec::new(),
             pep: false,
+            heard_to: [0.0; 2],
         }
     }
 
@@ -815,7 +997,17 @@ impl Medium for AudioMedium {
         self.receivers[to].expect(e);
     }
 
-    fn carry(&mut self, from: usize, burst: &Outgoing, _start: f64, _end: f64) -> Option<Incoming> {
+    fn stream(&mut self, to: usize, l: Option<stream::Listen>) {
+        self.receivers[to].stream_listen(l);
+    }
+
+    fn carry(&mut self, from: usize, burst: &Outgoing, start: f64, end: f64) -> Option<Incoming> {
+        // Our own burst: the stream's first period is timed from the end
+        // of our Go.
+        self.receivers[from].stream_tx_end(Some((end * AUDIO_RATE as f64) as u64));
+        if burst.code == stream::TONES {
+            return self.carry_tones(from, burst);
+        }
         let on_air = matches!(self.paths, Paths::Ionos(_, ionos::Reference::Peak));
         let tx = if on_air {
             transmit_with(burst, ofdm_gain(OFDM_AIR_GAIN_DB))
@@ -834,14 +1026,30 @@ impl Medium for AudioMedium {
             body.iter().map(|x| x * x).sum::<f32>() / body.len() as f32
         };
         // Lead-in and tail of noise around the burst, and the channel delay.
-        let lead = (0.1 * AUDIO_RATE) as usize;
+        // A stream period gets room for the timekeeping's search window.
+        let to = 1 - from;
+        let lead_s = if burst.code == stream::STREAM {
+            (start - self.heard_to[to]).clamp(0.1, STREAM_LEAD_S)
+        } else {
+            0.1
+        };
+        let lead = (lead_s * AUDIO_RATE as f64) as usize;
+        let tail = if burst.code == stream::STREAM {
+            (STREAM_LEAD_S * AUDIO_RATE as f64) as usize
+        } else {
+            lead
+        };
         let latency = match &self.paths {
             Paths::Watterson(ch) => ch[from].latency(),
             Paths::Ionos(ch, _) => ch[from].latency(),
         };
         let mut input = vec![0.0; lead];
         input.extend_from_slice(&tx);
-        input.resize(input.len() + latency + lead, 0.0);
+        input.resize(input.len() + latency + tail, 0.0);
+        let first = ((start - lead_s) * AUDIO_RATE as f64).max(0.0) as u64;
+        let gap = first.saturating_sub(self.receivers[to].clock());
+        self.receivers[to].skip(gap as usize);
+        self.heard_to[to] = start - lead_s + input.len() as f64 / AUDIO_RATE as f64;
         let mut out = vec![0.0; input.len()];
         match &mut self.paths {
             Paths::Watterson(ch) => {
@@ -862,7 +1070,10 @@ impl Medium for AudioMedium {
         }
         self.heard.clear();
         self.receivers[1 - from].process(&out, &mut self.heard);
-        self.heard.drain(..).next()
+        // One burst, one answer: a stream period the timekeeping gave up
+        // on during another burst is not this burst.
+        let period = burst.code == stream::STREAM;
+        self.heard.drain(..).find(|i| (i.code == stream::STREAM) == period)
     }
 }
 

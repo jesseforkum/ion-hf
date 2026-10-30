@@ -303,6 +303,9 @@ pub struct Stats {
     /// Stream periods sent or taken in, and blocks delivered.
     pub stream_periods: u32,
     pub stream_blocks: u32,
+    /// Receiving side: each period's option, frames decoded and tried,
+    /// SNR, and the answer to it (0 DONE, 1 SLOWER, 2 FASTER, 3 none).
+    pub stream_log: Vec<(u8, u8, u8, f32, u8)>,
     /// Seconds we were on the air.
     pub airtime_s: f64,
     /// Level of each data burst we sent, in order.

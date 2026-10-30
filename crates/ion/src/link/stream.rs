@@ -9,6 +9,7 @@
 //! the frames and the receiver's rule. `Station` runs the protocol,
 //! `audio` the waveforms and the timekeeping.
 
+pub mod acq;
 pub mod code;
 pub mod sync;
 pub mod tones;
@@ -393,20 +394,21 @@ pub fn block_bytes(queued: usize, o: usize) -> usize {
     queued.min(target.clamp(BLOCK_MIN, BLOCK_MAX))
 }
 
-/// The start option for an SNR (dB in 2.4 kHz, as the link reports it):
-/// a step or two below what the lab's receivers measured on each
-/// (`rateless-stream.md`, the call).
+/// The start option for an SNR (dB in 2.4 kHz, effective, as the link
+/// reports it), against the ladder's effective-SNR thresholds: QPSK 1/4
+/// about where the full-band QPSK 1/3 level is (0 dB), each halving of
+/// the rate 1.5 dB lower (chase), MFSK at its ladder levels' thresholds.
 pub fn start_pick(snr_db: f32) -> usize {
     const T: [(f32, &str); 10] = [
-        (9.0, "QPSK 1/2"),
-        (6.0, "QPSK 1/3"),
-        (3.5, "QPSK 1/4"),
-        (2.0, "QPSK 1/6"),
-        (-0.5, "QPSK 1/8"),
-        (-2.0, "R1 2/3"),
-        (-4.0, "R1 1/2"),
-        (-6.0, "R1 1/3"),
-        (-9.0, "R1 1/4"),
+        (5.0, "QPSK 1/2"),
+        (2.0, "QPSK 1/3"),
+        (0.0, "QPSK 1/4"),
+        (-1.0, "QPSK 1/6"),
+        (-2.5, "QPSK 1/8"),
+        (-4.5, "R1 2/3"),
+        (-6.5, "R1 1/2"),
+        (-8.0, "R1 1/3"),
+        (-10.0, "R1 1/4"),
         (f32::NEG_INFINITY, "R0 1/4"),
     ];
     opt_index(T.iter().find(|(s, _)| snr_db >= *s).unwrap().1)

@@ -344,19 +344,19 @@ impl Station {
         self.send_awaiting(b, Awaiting::StreamReport)
     }
 
-    /// Control bursts around a stream go in the waveform of the option in
-    /// use: OFDM control frames are heard down to about 0 dB, as QPSK
-    /// periods; MFSK R1 below.
+    /// Control bursts around a stream go in a waveform heard where the
+    /// option in use works: an OFDM control frame from QPSK 1/3 up (its
+    /// header needs about +2 dB), MFSK R1 below, R0 with R0 periods.
     fn stream_ctl_wave(&self) -> Wave {
         let o = self
             .stream_tx
             .as_ref()
             .map(|t| t.opt)
             .or(self.stream_rx.as_ref().map(|r| r.opt));
-        match o.map(|o| OPTS[o].fam) {
-            Some(Fam::Ofdm) => Wave::Ofdm(Guard::Normal),
-            Some(Fam::Mfsk(m, _)) => Wave::Mfsk(m),
-            None => FLOOR_WAVE,
+        match o {
+            Some(o) if o >= stream::opt_index("QPSK 1/3") => Wave::Ofdm(Guard::Normal),
+            Some(0) | None => FLOOR_WAVE,
+            Some(_) => Wave::Mfsk(crate::phy_mfsk::MfskMode::R1),
         }
     }
 
@@ -400,7 +400,10 @@ impl Station {
                 let r = self.stream_rx.as_mut().unwrap();
                 r.live = true;
                 r.epoch += 1;
-                r.opt = (opt as usize).min(OPTS.len() - 1).min(mine);
+                // The bolder of the sender's pick (from its reports) and
+                // ours (from the Start): a pick too bold costs two periods
+                // before SLOWER, one too timid a climb of several.
+                r.opt = mine.max(opt as usize).min(OPTS.len() - 1);
                 r.alt = None;
                 let go = Ctl::Go { id, opt: r.opt as u8 };
                 self.last_ack = (0, 0, 0, false);
@@ -676,6 +679,7 @@ impl Station {
             // Neither rate decoded: we cannot tell; keep both in mind.
         }
         r.alt = None;
+        let log = (st.opt as u8, st.ok as u8, st.tried as u8, st.snr_db);
         r.rule.push(st);
         self.stats.stream_periods += 1;
         if r.dec.complete() && !r.done {
@@ -703,6 +707,9 @@ impl Station {
             Some(Msg::Faster) => r.alt = stream::up(r.opt).map(|u| std::mem::replace(&mut r.opt, u)),
             _ => {}
         }
+        self.stats
+            .stream_log
+            .push((log.0, log.1, log.2, log.3, m.map_or(3, |m| m.code() as u8)));
         if let Some(m) = m {
             let b = self.tone_burst(m);
             self.reply = Some(b);
