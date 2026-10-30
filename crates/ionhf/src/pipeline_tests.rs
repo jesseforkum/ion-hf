@@ -113,6 +113,17 @@ impl Drop for Rig {
     }
 }
 
+/// The host interface on `port`, once its ports are open.
+fn host_on(port: u16, rig: &Rig, h: &IonHandle) -> crate::host::HostHandle {
+    let host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).unwrap();
+    let end = Instant::now() + Duration::from_secs(5);
+    while !host.listening() {
+        assert!(Instant::now() < end, "host ports {port}/{} busy", port + 1);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    host
+}
+
 /// A program on the host interface's command and data ports.
 struct HostClient {
     cmd: TcpStream,
@@ -298,7 +309,7 @@ fn winlink_host_drives_a_ion_link() {
     let mut rig = Rig::new();
     let h = rig.ion();
     let port = 18_300;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let _host = host_on(port, &rig, &h);
     let mut c = HostClient::connect(port);
     for l in [
         "VERSION",
@@ -352,7 +363,7 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
     let mut rig = Rig::new();
     let h = rig.ion();
     let port = 18_400;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let _host = host_on(port, &rig, &h);
     let mut kiss = TcpStream::connect(("127.0.0.1", port - 200)).expect("KISS port");
     let mut c = HostClient::connect(port);
     // Ragtime's start-up, in its order; then its KISS persistence frame.

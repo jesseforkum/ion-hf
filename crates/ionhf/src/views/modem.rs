@@ -42,6 +42,7 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
     };
     let host = match (app.host_on(), app.host_client) {
         (false, _) => Lit::Off,
+        (true, _) if app.host_waiting() => Lit::On(theme::WARN),
         (true, false) => Lit::Armed(theme::US),
         (true, true) => Lit::On(theme::US),
     };

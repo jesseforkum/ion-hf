@@ -249,18 +249,18 @@ impl App {
         }
         let port = self.cfg.host_port;
         match crate::host::spawn(port, self.threads.ion.cmds.clone(), self.threads.ui_tx.clone()) {
-            Ok(h) => {
-                self.note(format!("Host 127.0.0.1:{port} / {}", port + 1));
-                self.host = Some(h);
-            }
-            Err(e) => {
-                self.note(format!("! host port {port}: {e}"));
-            }
+            Ok(h) => self.host = Some(h),
+            Err(e) => self.note(format!("! host port {port}: {e}")),
         }
     }
 
     pub fn host_on(&self) -> bool {
         self.host.is_some()
+    }
+
+    /// On, but its ports are still held by another program.
+    pub fn host_waiting(&self) -> bool {
+        self.host.as_ref().is_some_and(|h| !h.listening())
     }
 
     pub fn set_drive(&mut self, pct: u32) {
@@ -653,6 +653,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The host ports first: the radio can take seconds to let go, and
+        // an Ion started meanwhile would find them still open.
+        self.host = None;
         self.cmd(IonCmd::Stop);
         let _ = self.engine.send(Msg::Shutdown);
         if let Some(h) = self.threads.engine.take() {

@@ -117,7 +117,15 @@ fn kiss_frames(buf: &mut Vec<u8>) -> Vec<(u8, Vec<u8>)> {
 
 pub struct HostHandle {
     stop: Arc<AtomicBool>,
+    listening: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostHandle {
+    /// The command and data ports are open (else still waiting for them).
+    pub fn listening(&self) -> bool {
+        self.listening.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for HostHandle {
@@ -129,26 +137,68 @@ impl Drop for HostHandle {
     }
 }
 
-/// Opens the two ports and serves one host at a time.
-pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Result<HostHandle> {
-    let cmd = TcpListener::bind(("127.0.0.1", port))?;
-    let data = TcpListener::bind(("127.0.0.1", port + 1))?;
-    cmd.set_nonblocking(true)?;
-    data.set_nonblocking(true)?;
-    let kiss = port
-        .checked_sub(200)
-        .and_then(|p| TcpListener::bind(("127.0.0.1", p)).ok())
-        .filter(|l| l.set_nonblocking(true).is_ok());
-    if kiss.is_none() {
-        log::info!("Winlink host: no KISS port {}", port.saturating_sub(200));
+/// Longest wait between tries at a busy host port.
+const BIND_RETRY_MAX: Duration = Duration::from_secs(2);
+
+fn listen(port: u16) -> std::io::Result<TcpListener> {
+    let l = TcpListener::bind(("127.0.0.1", port))?;
+    l.set_nonblocking(true)?;
+    Ok(l)
+}
+
+/// Sleeps `d` in short steps; false once `stop` is set.
+fn wait(stop: &AtomicBool, d: Duration) -> bool {
+    let end = Instant::now() + d;
+    while Instant::now() < end {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let _ = ion.send(IonCmd::AttachHost(Some(tx)));
+    !stop.load(Ordering::Relaxed)
+}
+
+/// Opens the two ports and serves one host at a time. Ports another
+/// program holds (an Ion still closing, say) are tried again until they
+/// are free or the handle is dropped.
+pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Result<HostHandle> {
     let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
+    let listening = Arc::new(AtomicBool::new(false));
+    let (stop2, listening2) = (stop.clone(), listening.clone());
     let thread = std::thread::Builder::new().name("winlink-host".into()).spawn(move || {
+        let mut retry = Duration::from_millis(250);
+        let mut warned = false;
+        let (cmd, data) = loop {
+            match listen(port).and_then(|c| Ok((c, listen(port + 1)?))) {
+                Ok(pair) => break pair,
+                Err(e) => {
+                    if !warned {
+                        warned = true;
+                        let _ = ui.try_send(UiEvent::Warning(format!("host port {port}: {e}; waiting")));
+                    }
+                    if !wait(&stop2, retry) {
+                        return;
+                    }
+                    retry = (retry * 2).min(BIND_RETRY_MAX);
+                }
+            }
+        };
+        let kiss_port = port.checked_sub(200);
+        let mut kiss = kiss_port.and_then(|p| listen(p).ok());
+        if kiss.is_none() {
+            log::info!("Winlink host: no KISS port {}", port.saturating_sub(200));
+        }
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _ = ion.send(IonCmd::AttachHost(Some(tx)));
+        listening2.store(true, Ordering::Relaxed);
+        let _ = ui.try_send(UiEvent::Host(format!("Host 127.0.0.1:{port} / {}", port + 1)));
         let mut h = Host::new(ion.clone(), ui);
+        let mut kiss_tried = Instant::now();
         while !stop2.load(Ordering::Relaxed) {
+            if kiss.is_none() && kiss_port.is_some() && kiss_tried.elapsed() >= BIND_RETRY_MAX {
+                kiss_tried = Instant::now();
+                kiss = kiss_port.and_then(|p| listen(p).ok());
+            }
             h.service(&cmd, &data, kiss.as_ref(), &rx);
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -156,6 +206,7 @@ pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Re
     })?;
     Ok(HostHandle {
         stop,
+        listening,
         thread: Some(thread),
     })
 }
@@ -543,5 +594,94 @@ impl Host {
             self.last_busy = s.busy;
             self.say(if s.busy { "BUSY ON" } else { "BUSY OFF" });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A port another program holds (as a closing Ion would): the host
+    /// waits, says so once, keeps its handle, and opens the ports once they
+    /// are free.
+    #[test]
+    fn a_busy_port_is_waited_for() {
+        for held in [18_700, 18_701] {
+            let port = 18_700;
+            let blocker = TcpListener::bind(("127.0.0.1", held)).unwrap();
+            let (ion, ion_rx) = crossbeam_channel::unbounded();
+            let (ui, ui_rx) = crossbeam_channel::unbounded();
+            let host = spawn(port, ion, ui).unwrap();
+            std::thread::sleep(Duration::from_millis(800));
+            assert!(!host.listening(), "listening beside port {held}'s holder");
+            let other = if held == port { port + 1 } else { port };
+            assert!(
+                TcpStream::connect(("127.0.0.1", other)).is_err(),
+                "port {other} left open"
+            );
+            let warnings = ui_rx
+                .try_iter()
+                .filter(|e| matches!(e, UiEvent::Warning(w) if w.contains("waiting")))
+                .count();
+            assert_eq!(warnings, 1);
+            assert!(!ion_rx.try_iter().any(|c| matches!(c, IonCmd::AttachHost(Some(_)))));
+            drop(blocker);
+            let end = Instant::now() + Duration::from_secs(5);
+            while !host.listening() {
+                assert!(Instant::now() < end, "never opened port {port} after {held} was freed");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            TcpStream::connect(("127.0.0.1", port)).unwrap();
+            TcpStream::connect(("127.0.0.1", port + 1)).unwrap();
+            assert!(ion_rx.try_iter().any(|c| matches!(c, IonCmd::AttachHost(Some(_)))));
+            drop(host);
+        }
+    }
+
+    /// Turning the host off while it waits ends it at once.
+    #[test]
+    fn a_waiting_host_stops_promptly() {
+        let port = 18_710;
+        let _blocker = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let (ion, _ion_rx) = crossbeam_channel::unbounded();
+        let (ui, _ui_rx) = crossbeam_channel::unbounded();
+        let host = spawn(port, ion, ui).unwrap();
+        std::thread::sleep(Duration::from_millis(3_000));
+        let t = Instant::now();
+        drop(host);
+        assert!(t.elapsed() < Duration::from_millis(500), "{:?}", t.elapsed());
+    }
+
+    /// Ion closes first while a client is connected, which leaves the
+    /// connection in TIME_WAIT on the host port; a new host opens the port
+    /// at once, without waiting.
+    #[test]
+    fn a_port_in_time_wait_reopens_at_once() {
+        let port = 18_720;
+        let (ion, _ion_rx) = crossbeam_channel::unbounded();
+        let (ui, ui_rx) = crossbeam_channel::unbounded();
+        let host = spawn(port, ion.clone(), ui.clone()).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while !host.listening() {
+            assert!(Instant::now() < end);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut cmd = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut data = TcpStream::connect(("127.0.0.1", port + 1)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        drop(host);
+        let mut b = [0u8; 64];
+        for s in [&mut cmd, &mut data] {
+            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            while matches!(s.read(&mut b), Ok(n) if n > 0) {}
+        }
+        drop((cmd, data));
+        let host = spawn(port, ion, ui).unwrap();
+        let end = Instant::now() + Duration::from_millis(500);
+        while !host.listening() {
+            assert!(Instant::now() < end, "port {port} not reopened");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!ui_rx.try_iter().any(|e| matches!(e, UiEvent::Warning(_))));
     }
 }
