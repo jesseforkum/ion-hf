@@ -385,6 +385,9 @@ pub struct Station {
     reply_by: Option<f64>,
     // Stream gear.
     stream_tx: Option<stream::StreamTx>,
+    /// A block whose DONE was heard and the next block followed at once:
+    /// the next Go confirms it.
+    stream_prev: Option<stream::StreamTx>,
     stream_rx: Option<stream::StreamRx>,
     stream_ids: u8,
     stream_hold_until: f64,
@@ -526,6 +529,7 @@ impl Station {
             last_tx_code: TINY,
             reply_by: None,
             stream_tx: None,
+            stream_prev: None,
             stream_rx: None,
             stream_ids: seed,
             stream_hold_until: 0.0,
@@ -765,6 +769,7 @@ impl Station {
             + self.inflight.values().map(Vec::len).sum::<usize>()
             + self.unsent.iter().map(Vec::len).sum::<usize>()
             + self.stream_tx.as_ref().map_or(0, |t| t.block.len())
+            + self.stream_prev.as_ref().map_or(0, |t| t.block.len())
     }
 
     /// End the link now: drop what is still queued and say goodbye. A peer
@@ -780,6 +785,7 @@ impl Station {
             }
             State::Connected => {
                 self.stream_tx = None;
+                self.stream_prev = None;
                 self.stream_rx = None;
                 self.out.clear();
                 self.inflight.clear();
@@ -1204,6 +1210,7 @@ impl Station {
 
     fn reset_data(&mut self) {
         self.stream_tx = None;
+        self.stream_prev = None;
         self.stream_rx = None;
         self.stream_hold_until = 0.0;
         self.reply_by = None;

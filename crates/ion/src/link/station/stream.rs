@@ -223,6 +223,12 @@ impl Station {
 
     /// Opens a block (or reopens one after an ID): the Start, awaiting Go.
     pub(super) fn stream_start(&mut self, now: f64) -> Option<Outgoing> {
+        self.stream_start_at(now, None)
+    }
+
+    /// [`Station::stream_start`], the next block in option `opt` (the
+    /// one the last block ended in) rather than from the reports.
+    fn stream_start_at(&mut self, now: f64, opt: Option<usize>) -> Option<Outgoing> {
         let resume = self
             .stream_tx
             .as_ref()
@@ -231,7 +237,7 @@ impl Station {
             if !self.stream_wanted(now) || !self.inflight.is_empty() || self.stream_tx.is_some() {
                 return None;
             }
-            let opt = stream::start_pick(self.aim_db.unwrap_or(0.0));
+            let opt = opt.unwrap_or_else(|| stream::start_pick(self.aim_db.unwrap_or(0.0)));
             let n = stream::block_bytes(self.out.len(), opt);
             let block: Vec<u8> = self.out.drain(..n).collect();
             let offset = self.next_offset;
@@ -254,6 +260,11 @@ impl Station {
                 done_heard: false,
             });
         }
+        let wave = if self.stream_prev.is_some() {
+            self.stream_ctl_wave()
+        } else {
+            self.cur_wave()
+        };
         let t = self.stream_tx.as_mut()?;
         t.phase = TxPhase::Starting;
         t.done_heard = false;
@@ -264,13 +275,15 @@ impl Station {
             len: t.block.len() as u32,
             crc: t.crc,
         };
-        let b = self.ctl(c, self.cur_wave());
+        let b = self.ctl(c, wave);
         Some(self.send_awaiting(b, Awaiting::StreamGo))
     }
 
     /// The block goes back to the ARQ queue, in front.
+    /// The block, and one unconfirmed before it, go back to the ARQ queue
+    /// in front, in order.
     fn stream_requeue(&mut self) {
-        if let Some(t) = self.stream_tx.take() {
+        for t in [self.stream_tx.take(), self.stream_prev.take()].into_iter().flatten() {
             for &b in t.block.iter().rev() {
                 self.out.push_front(b);
             }
@@ -279,13 +292,45 @@ impl Station {
         self.stream_hold_until = self.last_heard.max(self.last_tx_end) + HOLD_S;
     }
 
+    /// The block whose DONE was heard: acknowledged.
+    fn stream_acked(&mut self, t: &StreamTx) {
+        self.stats.bytes_acked += t.block.len() as u64;
+        self.stats.stream_blocks += 1;
+    }
+
+    /// DONE heard: the next block at once, if the stream is still wanted
+    /// (its Go confirms this one); else End.
+    fn stream_next(&mut self, now: f64) -> Outgoing {
+        let wanted = self.stream_prev.is_none()
+            && self.stream_wanted(now)
+            && self.inflight.is_empty()
+            && self
+                .stream_tx
+                .as_ref()
+                .is_some_and(|t| t.phase != TxPhase::Ending(EndWhy::Id));
+        if !wanted {
+            return self.stream_end(EndWhy::Done, now);
+        }
+        let mut prev = self.stream_tx.take().unwrap();
+        let opt = prev.opt;
+        prev.phase = TxPhase::Ending(EndWhy::Done);
+        self.stream_prev = Some(prev);
+        match self.stream_start_at(now, Some(opt)) {
+            Some(b) => b,
+            None => {
+                self.stream_tx = self.stream_prev.take();
+                self.stream_end(EndWhy::Done, now)
+            }
+        }
+    }
+
     /// Sending side, while running: the next period when its slot comes,
     /// or the End.
     pub(super) fn stream_poll(&mut self, now: f64) -> Option<Outgoing> {
         let t = self.stream_tx.as_ref()?;
         let TxPhase::Running { t0 } = t.phase else { return None };
         if t.done_heard {
-            return Some(self.stream_end(EndWhy::Done, now));
+            return Some(self.stream_next(now));
         }
         let at = t0 + t.k as f64 * SLOT_S;
         if now < at {
@@ -380,13 +425,18 @@ impl Station {
                     .stream_rx
                     .as_ref()
                     .is_some_and(|r| r.id == id && r.offset == offset && r.crc == crc && r.dec.len() == len as usize);
+                // A block that follows another keeps the rule's memory
+                // (its probes' back-off) and the option the last one
+                // ended in.
+                let before = self.stream_rx.as_ref().map(|r| r.rule.clone());
+                let follows = before.is_some();
                 if !same {
                     self.stream_rx = Some(StreamRx {
                         id,
                         offset,
                         crc,
                         dec: code::Decoder::new(len as usize),
-                        rule: Rule::new(),
+                        rule: before.unwrap_or_default(),
                         opt: 0,
                         alt: None,
                         done: false,
@@ -404,12 +454,22 @@ impl Station {
                 r.live = true;
                 r.go_out = false;
                 r.epoch += 1;
-                // The bolder of the sender's pick (from its reports) and
-                // ours (from the Start): a pick too bold costs two periods
-                // before SLOWER, one too timid a climb of several.
-                r.opt = mine.max(opt as usize).min(OPTS.len() - 1);
+                // First block: the more cautious of the sender's pick (from
+                // its reports) and ours (from the Start): on fading a pick
+                // too bold loses periods before SLOWER, and the block was
+                // sized for it. Later blocks go on in the option the last
+                // ended in, which the sender names.
+                r.opt = if follows {
+                    (opt as usize).min(OPTS.len() - 1)
+                } else {
+                    mine.min(opt as usize)
+                };
                 r.alt = None;
-                let go = Ctl::Go { id, opt: r.opt as u8 };
+                let go = Ctl::Go {
+                    id,
+                    opt: r.opt as u8,
+                    delivered: self.delivered & 0xFF_FFFF,
+                };
                 self.last_ack = (0, 0, 0, false);
                 self.reply = Some(self.ctl(go, inc.wave));
             }
@@ -430,10 +490,34 @@ impl Station {
                 };
                 self.reply = Some(self.ctl(rep, inc.wave));
             }
-            (Role::Sender, Ctl::Go { id, opt }) if self.awaiting == Awaiting::StreamGo => {
-                let Some(t) = self.stream_tx.as_mut().filter(|t| t.id == id) else {
+            (Role::Sender, Ctl::Go { id, opt, delivered }) if self.awaiting == Awaiting::StreamGo => {
+                if self.stream_tx.as_ref().is_none_or(|t| t.id != id) {
                     return;
-                };
+                }
+                self.note_turn_ask(f.flags & flags::WANT_TURN != 0, now);
+                self.peer_wants_disc = f.flags & flags::WANT_DISC != 0;
+                if let Some(p) = self.stream_prev.take() {
+                    let end = p.offset.wrapping_add(p.block.len() as u32) & 0xFF_FFFF;
+                    if (delivered.wrapping_sub(end) & 0xFF_FFFF) < 0x80_0000 {
+                        self.stream_acked(&p);
+                    } else {
+                        // A DONE heard that was not sent: both blocks back
+                        // to the link, the older first.
+                        self.stream_prev = Some(p);
+                        self.clear_wait();
+                        self.stream_requeue();
+                        return;
+                    }
+                }
+                self.last_progress = now;
+                // The peer wants the turn or to leave: this block waits.
+                if self.peer_wants_turn || self.peer_wants_disc {
+                    self.clear_wait();
+                    self.stream_requeue();
+                    self.stream_hold_until = now;
+                    return;
+                }
+                let t = self.stream_tx.as_mut().unwrap();
                 t.opt = (opt as usize).min(OPTS.len() - 1);
                 t.phase = TxPhase::Running {
                     t0: now + self.cfg.turnaround_s - t.k as f64 * SLOT_S,
@@ -467,9 +551,8 @@ impl Station {
                     _ => EndWhy::GiveUp,
                 };
                 if got {
-                    self.stats.bytes_acked += t.block.len() as u64;
-                    self.stats.stream_blocks += 1;
-                    self.stream_tx = None;
+                    let t = self.stream_tx.take().unwrap();
+                    self.stream_acked(&t);
                 } else if why == EndWhy::Id {
                     // Resumes from `poll_tx` once the ID is out.
                 } else if why == EndWhy::Done {

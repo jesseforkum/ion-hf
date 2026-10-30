@@ -598,9 +598,10 @@ pub enum Ctl {
         len: u32,
         crc: u32,
     },
-    /// Receiver: ready; first period in option `opt` (no faster than the
-    /// start's).
-    Go { id: u8, opt: u8 },
+    /// Receiver: ready; first period in option `opt`; everything before
+    /// `delivered` (24 bits) is delivered (it confirms the block before,
+    /// when blocks follow one another).
+    Go { id: u8, opt: u8, delivered: u32 },
     /// Sender: the stream is over (heard DONE, or gave up).
     End { id: u8 },
     /// Receiver: whether it has the block, everything before `delivered`
@@ -629,7 +630,11 @@ impl Ctl {
                 b.extend_from_slice(&crc.to_le_bytes());
                 b
             }
-            Ctl::Go { id, opt } => vec![2, id, opt],
+            Ctl::Go { id, opt, delivered } => {
+                let mut b = vec![2, id, opt];
+                b.extend_from_slice(&delivered.to_le_bytes()[..3]);
+                b
+            }
             Ctl::End { id } => vec![3, id],
             Ctl::Report {
                 id,
@@ -655,7 +660,11 @@ impl Ctl {
                 len: u24(&b[6..9]),
                 crc: u32::from_le_bytes(b[9..13].try_into().ok()?),
             },
-            2 if b.len() >= 3 => Ctl::Go { id: b[1], opt: b[2] },
+            2 if b.len() >= 6 => Ctl::Go {
+                id: b[1],
+                opt: b[2],
+                delivered: u24(&b[3..6]),
+            },
             3 if b.len() >= 2 => Ctl::End { id: b[1] },
             4 if b.len() >= 7 => Ctl::Report {
                 id: b[1],
@@ -739,7 +748,11 @@ mod tests {
                 len: 16_384,
                 crc: 0xDEAD_BEEF,
             },
-            Ctl::Go { id: 3, opt: 4 },
+            Ctl::Go {
+                id: 3,
+                opt: 4,
+                delivered: 0x12_3456,
+            },
             Ctl::End { id: 200 },
             Ctl::Report {
                 id: 7,

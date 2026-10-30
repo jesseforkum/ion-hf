@@ -17,8 +17,8 @@ timekeeping; program: [app.md](../app.md).
   is plain ARQ and its ConnReq/ConnAck bytes are alpha.5's.
 - **When**: 4 kB or more queued, nothing in flight, the gear's aim below
   5 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
-  within two periods. The queue then goes in blocks of 4–16 kB (about two
-  minutes at the start option).
+  within two periods. The queue then goes in blocks of 2–16 kB (about a
+  minute of the start option's nominal rate).
 - **Handshake and ending**: Start / Go and End / Report control frames
   (`Kind::Stream`). The Report alone acknowledges a block; DONE only stops
   the periods. A block given up goes back to ARQ.
@@ -53,7 +53,7 @@ timekeeping; program: [app.md](../app.md).
 - **Turn handling**: the simplest safe one. The stream is never
   interrupted; the receiving side's wish to send goes in its Report at the
   block's end and the sender then hands over by the link's rules. Blocks
-  are sized to about two minutes so nobody waits long.
+  are sized to a minute or two so nobody waits long.
 - **Pause timing with PTT lead and tail**: the slot is fixed (11.4 s) so a
   receiver unsure of the option still knows when the next period comes.
   With the 0.2 s lead the pause is at least 1.4 s of air: the receiver's

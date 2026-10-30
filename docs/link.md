@@ -397,8 +397,10 @@ while the peer asks for the turn or a goodbye, nor with a CW ID due
 within two periods. With more queued and frames still in flight, the
 data bursts send only what is in flight until it is acknowledged.
 
-**A block.** The sender takes the next 4–16 kB of its queue
-(`stream::block_bytes`: about two minutes at the start option) and cuts it
+**A block.** The sender takes the next 2–16 kB of its queue
+(`stream::block_bytes`: about a minute of the start option's nominal
+rate, one and a half to two in practice; a block's bytes all arrive at
+its end) and cuts it
 into 28-byte pieces, K of them. Pieces are numbered 0–65535: 0..K are the
 block itself, the rest repairs of a systematic Cauchy code over GF(2^16)
 (`stream::code`), any K distinct pieces giving the block back.
@@ -474,7 +476,7 @@ Start (control) → Go (control) | period 0 | pause | period 1 | pause | … DON
   puts an ID ahead of a period or an answer.
 
 **Turns.** A stream is not interrupted: the receiving side cannot ask
-for the turn mid-block, so the block is kept to a few minutes; its
+for the turn mid-block, so a block is kept to a minute or two; its
 Report carries the wish, and the sender does not open another block
 while the peer wants the turn (`the_receiver_with_data_gets_the_turn_after_the_block`,
 `after_the_turn_the_other_side_streams_too`).
