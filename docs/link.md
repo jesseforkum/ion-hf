@@ -389,19 +389,36 @@ answer with two tones, and silence meaning "go on"
 ([experiments/rateless-stream.md](experiments/rateless-stream.md),
 variant A; the build: [experiments/stream-gear.md](experiments/stream-gear.md)).
 
-**When.** On a link that agreed to `caps::STREAM`, with at least
-`stream::MIN_BYTES` (4 kB) queued and nothing in flight, while the SNR the
-gear aims by is below `stream::BELOW_DB` (2 dB in 2.4 kHz, about +4 dB
-IONOS S:N; from +3 dB up the stream at best draws with the link's HARQ,
-[experiments/stream-gear.md](experiments/stream-gear.md)), and not
-while the peer asks for the turn or a goodbye, nor with a CW ID due
-within two periods. With more queued and frames still in flight, the
-data bursts send only what is in flight until it is acknowledged.
+**When.** Streaming is for large transfers at low S:N; every transfer
+starts on ARQ, and ARQ's own goodput (data bytes acknowledged over the
+seconds spent sending data) is the yardstick. On a link that agreed to
+`caps::STREAM`, once ARQ has sent data for `stream::MEASURE_S` (75 s; a
+short transfer is done by then and never streams), the queue streams
+when all of these hold (calibrated on IONOS SIM,
+[experiments/stream-gear.md](experiments/stream-gear.md), Decision):
 
-**A block.** The sender takes the next 2–16 kB of its queue
-(`stream::block_bytes`: about four minutes of the option's nominal rate
-after a block that needed at most 1.1 times its pieces, one minute
-otherwise) and cuts it
+- ARQ's goodput is under `stream::REGION_BPS` (1850 B/min): the stream
+  wins where ARQ is slow (0 dB and below) and not above;
+- what is left would take ARQ longer than `stream::BREAK_EVEN_S`
+  (450 s) at that goodput: the gear-on link overtook the gear-off one
+  82–374 s into 0 dB sessions and 191–551 s into −6 dB ones;
+- the SNR the gear aims by is below `stream::BELOW_DB` (2 dB in 2.4 kHz);
+- the peer asks for neither the turn nor a goodbye, and no CW ID is due
+  within two periods.
+
+With frames still in flight, the data bursts send only those until they
+are acknowledged. The same test runs at each block's end: what is left
+under break-even (the tail) finishes on ARQ. From a run's second block on,
+a block slower than ARQ was goes back to ARQ for 5 minutes. The first
+block of a run starts no faster than an option of four times ARQ's
+goodput (`stream::start_cap`).
+
+**A block.** The sender takes the next 1–16 kB of its queue: the first
+block of a run about two minutes at ARQ's goodput (`stream::FIRST_BLOCK_S`;
+the stream should do at least that, so it completes wherever the stream
+settles), later ones about 2.5 minutes of the option's nominal rate after
+a block that needed at most 1.05 times its pieces, one minute otherwise
+(`stream::block_bytes`), and cuts it
 into 28-byte pieces, K of them. Pieces are numbered 0–65535: 0..K are the
 block itself, the rest repairs of a systematic Cauchy code over GF(2^16)
 (`stream::code`), any K distinct pieces giving the block back. The
@@ -464,7 +481,8 @@ Start → Go | period 0 | pause | … DONE → Start → Go | period 0 | … DON
 - **The receiver's rule** (`stream::Rule`, the lab's): DONE once it holds
   K pieces (and decodes and delivers the block; a block whose CRC fails
   starts again). MFSK: SLOWER under 60% of frames, FASTER after two clean
-  periods (into QPSK only from −1 dB), longer after a failed probe. OFDM,
+  periods (into QPSK only when the last two periods both read 0 dB or
+better), longer after a failed probe. OFDM,
   over the last two periods: each codeword's blind information predicts
   how the neighbouring rates would do; it moves to the better by 3%,
   faster only if 80% would decode; down into MFSK when, over four

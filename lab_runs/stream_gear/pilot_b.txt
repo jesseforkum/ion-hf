@@ -1,0 +1,4 @@
+SIZE WGN +0 10000 on 364 periods 0
+SIZE WGN +0 10000 off 364 periods 0
+SIZE MPP -3 10000 on ~938 periods 34
+SIZE MPP -3 10000 off ~931 periods 0

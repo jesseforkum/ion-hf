@@ -1,0 +1,5 @@
+stream=1 MPG +0 dB seed 900 900 s: 22190 B (1479 B/min); first period Some(111.0) s; air: periods+pauses 82% ARQ data 9% control 10%; blocks 6; arrivals [18s:340 43s:428 89s:768 97s:1108 104s:1190 119s:1274 130s:1358 143s:1498 154s:1638 166s:1834 177s:2030 189s:2226 200s:2679 289s:5331 308s:5835 319s:6507 536s:11962 556s:12466 568s:13138 579s:13810 590s:14146 601s:14614 621s:15286 735s:18150 880s:21686 900s:22190]
+stream=1   10 kB at Some(536.0) s (1118 B/min), 50 kB at None s (- B/min)
+stream=1   options (periods ok/tried frames): {"QPSK 1/4": (2, 0, 12), "QPSK 1/6": (27, 59, 104), "QPSK 1/8": (23, 60, 69), "R1 1/2": (2, 10, 10), "R1 1/3": (2, 6, 6), "R1 2/3": (9, 63, 63)}
+stream=1   aim every 30 s: -5.0 -2.0 -6.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0
+stream=1   acquisition: Some(AcqStats { periods: 1, found: 1, fallback: 0, missed: 0, half_ms: 600.0, err_ms: 7.720162 })

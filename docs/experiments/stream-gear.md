@@ -15,8 +15,9 @@ timekeeping; program: [app.md](../app.md).
   `stream = false` in `ionhf.toml` or `--stream off` turns it off). With it
   off, or with a peer that does not offer it (alpha.5 and before), the link
   is plain ARQ and its ConnReq/ConnAck bytes are alpha.5's.
-- **When**: 4 kB or more queued, nothing in flight, the gear's aim below
-  2 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
+- **When**: after 75 s of ARQ, while ARQ's goodput is under 1850 B/min
+  and what is left would take it over 450 s (Decision, below), the gear's
+  aim below 2 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
   within two periods. The queue then goes in blocks of 2–16 kB (about four
   minutes of the option's nominal rate), one after another: at DONE the
   next Start goes at once and its Go confirms the block before; End and
@@ -46,10 +47,8 @@ timekeeping; program: [app.md](../app.md).
 
 ### Choices
 
-- **Threshold** 4 kB (`stream::MIN_BYTES`): the lab's smallest file was
-  10 kB; a block needs a minute or two to pay for its Start/Go and
-  End/Report (two control round trips, 3–20 s by waveform) and its
-  overshoot (about half a period and a pause).
+- **Threshold**: no fixed size; a break-even time at ARQ's own measured
+  goodput (Decision).
 - **Gate** 2 dB aim (`stream::BELOW_DB`, about +4 dB IONOS S:N): at +3 dB
   the build drew with ARQ on fading and lost 12% on WGN (Sessions); the
   lab's stream drew there too.
@@ -166,6 +165,85 @@ problem above at its worst for the stream.
 
 **Clock, carrier offset and jitter**: `AudioMedium` has none of them, so
 the exp-sync impairment sets were not run on this code (see below).
+
+## Decision: when to stream
+
+The gear should never cost a short transfer anything and should pay on
+large ones. Every threshold below comes from the traced sessions.
+
+**Crossover**: the time from the start of a session after which the
+gear-on link has delivered more than the gear-off one for good
+(`lab_runs/stream_gear/cross.py` on `final_300.txt`/`final_900.txt`
+against the gear-off traces; the gear then started at once, 15–32 s in):
+
+| S:N | WGN | MPG | MPP |
+|---:|---:|---:|---:|
+| +3 | never (5 and 15 min) | 257 s (5 min); behind at 15 min | never |
+| 0 | 82 s | 189 s | 218 s (5 min), 374 s (15 min) |
+| −3 | 282 s | 282 s | > 300 s |
+| −6 | 191 s | 239 s (5 min), 480 s (15 min) | 200 s (5 min), 551 s (15 min) |
+
+ARQ's goodput (cumulative from its first data burst, gear off) 90 s in and
+later: 0 dB at most 1700 B/min (WGN), +3 dB at least 1976 B/min (MPG at
+180 s; 3138–7438 at 90 s).
+
+**Rules** (`Station::stream_wanted`, `stream_next`):
+
+- No decision before ARQ has sent data for 75 s (`MEASURE_S`): its
+  goodput is the yardstick, and a short transfer is done by then, so it
+  never streams and costs nothing.
+- **Region**: ARQ's goodput under 1850 B/min (`REGION_BPS`), between the
+  0 dB and +3 dB figures above; the aim below 2 dB and the hand-back at
+  QPSK 1/4 stay. From a run's second block on, a block slower than ARQ was
+  hands back to ARQ for 5 minutes.
+- **Break-even**: what is left must take ARQ longer than 450 s
+  (`BREAK_EVEN_S`) at its goodput: above most crossovers (82–374 s at
+  0 dB, 191–551 s at −6 dB). The fixed 4 kB threshold is gone.
+- **Tail**: the same test at each block's DONE; under it, End, and the
+  rest goes on ARQ.
+- **First block**: about two minutes at ARQ's goodput (`FIRST_BLOCK_S`,
+  blocks from 1 kB), and its option no faster than four times that goodput
+  (`start_cap`): MPP −3 dB's first block had been sized for QPSK 1/6 and
+  never completed in 5 minutes.
+- **Probes**: the receiver asks to go up from MFSK into QPSK only when its
+  last two periods both read 0 dB or better (the lab's −1 dB on one period
+  probed every few periods at −3 dB, a lost period each).
+- **Host hint** (a host declaring a transfer's total size): not built.
+  The rule sees only what is queued; Winlink clients queue a whole
+  message at once.
+
+**Mixed sizes** (`stream_sizes` in `tests/stream.rs`,
+`lab_runs/stream_gear/sizes.sh`, `sizes_1.txt`, `sizes_2.txt`,
+`sizes_table.py`): each size queued alone at the start, gear on against
+gear off, seed 900 + S:N, timed until the receiving side holds it all,
+capped at 15 minutes and past that projected from the rate so far (~, as
+exp-stream). 50 kB is read from the 200 kB run, as the lab read its small
+files. B/min, on / off (on over off):
+
+| S:N | channel | 2 kB on / off (ratio) | 10 kB on / off (ratio) | 50 kB on / off (ratio) | 200 kB on / off (ratio) |
+|---:|---|---|---|---|---|
+| +3 | WGN | 3871 / 3871 (1.00) | 6522 / 6522 (1.00) | 7317 / 7317 (1.00) | ~7322 / ~7322 (1.00) |
+| +3 | MPG | 2857 / 2857 (1.00) | 2247 / 2247 (1.00) | 3476 / 3476 (1.00) | ~3406 / ~3406 (1.00) |
+| +3 | MPP | 2000 / 2000 (1.00) | 3846 / 3846 (1.00) | 4071 / 4071 (1.00) | ~4035 / ~4035 (1.00) |
+| +0 | WGN | 1429 / 1429 (1.00) | 1648 / 1648 (1.00) | ~2379 / ~1655 (1.44) | ~2379 / ~1655 (1.44) |
+| +0 | MPG | 526 / 526 (1.00) | 1015 / 857 (1.18) | ~1479 / ~792 (1.87) | ~1479 / ~792 (1.87) |
+| +0 | MPP | 822 / 822 (1.00) | 1038 / 916 (1.13) | ~1584 / ~850 (1.86) | ~1584 / ~850 (1.86) |
+| -3 | WGN | 686 / 686 (1.00) | 743 / 762 (0.98) | ~776 / ~767 (1.01) | ~776 / ~767 (1.01) |
+| -3 | MPG | 418 / 418 (1.00) | ~581 / ~533 (1.09) | ~567 / ~533 (1.06) | ~567 / ~533 (1.06) |
+| -3 | MPP | 513 / 513 (1.00) | ~661 / ~644 (1.03) | ~719 / ~645 (1.11) | ~719 / ~645 (1.11) |
+| -6 | WGN | 755 / 755 (1.00) | 821 / 805 (1.02) | ~815 / ~807 (1.01) | ~815 / ~807 (1.01) |
+| -6 | MPG | 403 / 403 (1.00) | ~426 / ~386 (1.10) | ~426 / ~386 (1.10) | ~426 / ~386 (1.10) |
+| -6 | MPP | 396 / 396 (1.00) | ~526 / ~487 (1.08) | ~533 / ~488 (1.09) | ~533 / ~488 (1.09) |
+
+- **Never worse than 0.98**, short transfers and +3 dB included: 2 kB
+  and +3 dB never stream (identical runs), 10 kB at 0 dB on WGN stays on
+  ARQ (it is under break-even there).
+- **Gains on large transfers at 0 dB**: 1.44× on WGN, 1.86–1.87× on MPG
+  and MPP; 1.06–1.11× at −3 dB on fading, 1.08–1.10× at −6 dB on fading,
+  about level on WGN at −3 and −6 dB (R1 2/3 with its 11.4 s slot is
+  little faster than ARQ's own MFSK there).
+- One seed per cell: the fading cells vary by about 1.3× between seeds
+  (the lab); ratios within a few percent are not significant.
 
 ## What is not known (first on-air test)
 
