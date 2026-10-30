@@ -288,3 +288,31 @@ fn diag_clean_errors() {
         }
     }
 }
+
+/// Spread 16QAM has no error floor: at high SNR the clip's distortion, which
+/// falls on the outer points' despread symbols, must not leave confident
+/// wrong LLRs that the code cannot correct (it lost about 7% of codewords at
+/// 30–40 dB before).
+#[test]
+fn spread_16qam_decodes_at_high_snr() {
+    let (num, c, r) = (Numerology::NormalWide, Constellation::Qam16, ion::fec::Rate::R2_3);
+    let per_burst = 60 * phy::info_for(num).data_carriers * c.bits_per_symbol() / r.n();
+    let (mut bad, mut total) = (0, 0);
+    for seed in 0..30u64 {
+        let infos: Vec<Vec<u8>> = (0..per_burst)
+            .map(|k| random_bits(ion::fec::K, seed * 1000 + k as u64))
+            .collect();
+        let bits: Vec<u8> = infos.iter().flat_map(|i| ion::fec::encode(r, i)).collect();
+        let opt = TxOptions::low_papr(c, Pilots::Robust);
+        let a = phy::modulate_full(num, c, 1, 0, &bits, num.center_hz(), &opt);
+        let out = receive(num, &a, Some(35.0), Profile::Awgn, 200 + seed);
+        assert_eq!(out.len(), 1, "seed {seed}");
+        for (info, llrs) in infos.iter().zip(out[0].llrs.chunks_exact(r.n())) {
+            total += 1;
+            if ion::fec::decode(r, llrs).as_ref() != Some(info) {
+                bad += 1;
+            }
+        }
+    }
+    assert_eq!(bad, 0, "{bad} of {total} codewords lost");
+}
