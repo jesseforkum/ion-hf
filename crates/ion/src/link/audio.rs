@@ -64,10 +64,43 @@ fn shape(code: usize) -> (Constellation, Pilots) {
 /// when it has one, else the plain clip for its constellation.
 pub fn tx_options(code: usize) -> TxOptions {
     let (c, p) = shape(code);
+    if let Some((headroom_db, spread)) = td_clip_pick(code) {
+        return TxOptions {
+            clip_db: None,
+            spread,
+            data_gain_db: 0.0,
+            hdr_clip_db: None,
+            td_clip: Some(phy::TdClip {
+                headroom_db,
+                overshoot: &[1.0, 2.0, 3.0],
+            }),
+            ..TxOptions::for_burst(c, p)
+        };
+    }
     match code {
         l if l < LADDER.len() && LADDER[l].low_papr => TxOptions::low_papr(c, p),
         _ => TxOptions::for_burst(c, p),
     }
+}
+
+/// Experiment (`ION_TDCLIP=1`): the whole-burst clipper's headroom (dB) and
+/// spreading for ladder level `code`, as picked in PR #1's ladder table.
+fn td_clip_pick(code: usize) -> Option<(f32, bool)> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("ION_TDCLIP").is_ok_and(|v| v == "1")) {
+        return None;
+    }
+    Some(match code {
+        5..=7 | 9 | 10 => (-3.0, true),
+        8 => (-1.0, true),
+        11 => (0.0, true),
+        12 => (1.0, true),
+        13 => (3.5, false),
+        14 => (4.0, false),
+        15 => (7.0, false),
+        16 => (6.0, false),
+        _ => return None,
+    })
 }
 
 /// Air time from the PHYs' burst arithmetic.
