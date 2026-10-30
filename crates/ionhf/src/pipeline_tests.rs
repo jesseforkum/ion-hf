@@ -245,6 +245,51 @@ fn ion_disconnect_mid_transfer_ends_promptly_and_ids() {
     h.cmds.send(IonCmd::Stop).unwrap();
 }
 
+/// A call nobody answers, given up by the host: the call stops and our CW
+/// ID is the last thing on the air.
+#[test]
+fn ion_call_given_up_ends_with_an_id() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::Connect("N0BODY".into())).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "never called; notes {:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::GiveUp).unwrap();
+    h.cmds.send(IonCmd::Listen).unwrap();
+    let ok = rig.run_until(Duration::from_secs(10), |r| r.id_sent() && r.keyed);
+    assert!(ok, "no CW ID; notes {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(15), |r| !r.keyed);
+    assert!(ok, "still keyed");
+    rig.run_until(Duration::from_secs(5), |r| r.keyed);
+    assert!(!rig.keyed, "keyed again after the ID; notes {:?}", rig.ion_notes);
+}
+
+/// Broadcast traffic identifies after its run of bursts, not before or
+/// between them.
+#[test]
+fn a_broadcast_run_ends_with_one_id() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::GroupOpen(1, "NET".into())).unwrap();
+    h.cmds.send(IonCmd::GroupSend(1, b"one".to_vec(), None)).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "no broadcast; notes {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(30), |r| !r.keyed);
+    assert!(ok, "broadcast never ended");
+    assert!(!rig.id_sent(), "ID before the run ended: {:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::GroupSend(1, b"two".to_vec(), None)).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "second broadcast never went");
+    let ok = rig.run_until(Duration::from_secs(30), |r| !r.keyed);
+    assert!(ok, "second broadcast never ended");
+    assert!(!rig.id_sent(), "ID between the bursts: {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(15), Rig::id_sent);
+    assert!(ok, "no CW ID after the run; notes {:?}", rig.ion_notes);
+    let n = rig.ion_notes.iter().filter(|n| n.contains("CW ID")).count();
+    assert_eq!(n, 1, "{:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::Stop).unwrap();
+}
+
 /// A host program (standing in for Pat) drives Ion through the VARA-style
 /// interface: connect to LOOP, send a line, read the echo, wait for
 /// BUFFER 0, disconnect.

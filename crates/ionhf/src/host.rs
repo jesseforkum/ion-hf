@@ -394,7 +394,7 @@ impl Host {
             ["LISTEN", "OFF"] => {
                 self.listen = false;
                 if self.connected.is_none() && self.calling.is_none() {
-                    let _ = self.ion.send(IonCmd::Stop);
+                    let _ = self.ion.send(IonCmd::GiveUp);
                 }
                 self.say("OK");
             }
@@ -413,8 +413,8 @@ impl Host {
                 if self.connected.is_some() {
                     let _ = self.ion.send(IonCmd::DisconnectWhenSent);
                 } else {
-                    // Nothing up (or still calling): give up now.
-                    let _ = self.ion.send(IonCmd::Stop);
+                    // Nothing up (or still calling): give up now, and ID.
+                    let _ = self.ion.send(IonCmd::GiveUp);
                     self.calling = None;
                     self.say("DISCONNECTED");
                     self.relisten();

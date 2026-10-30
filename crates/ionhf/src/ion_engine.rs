@@ -19,6 +19,9 @@ use crate::engine::{Msg, SAMPLE_RATE, UiEvent};
 /// the calls inside Ion frames do not count while the protocol is not
 /// publicly documented). Under 10 minutes, as the next burst may be late.
 const ID_EVERY_S: f64 = 570.0;
+/// A broadcast run has ended once nothing more has gone for this long:
+/// its CW ID.
+const BCAST_ID_HOLD_S: f64 = 10.0;
 /// From the end of the closing station's CW ID to the start of ours.
 const ID_GAP_S: f64 = 1.5;
 /// How long a host program's DISCONNECT waits for what is queued to go.
@@ -47,6 +50,9 @@ pub enum IonCmd {
     DisconnectWhenSent,
     /// Drop everything locally, without transmitting.
     Stop,
+    /// End a call or link now (a host program gave up): what is on the
+    /// air stops, then our CW ID goes out if we have keyed since the last.
+    GiveUp,
     /// Extra level for OFDM bursts on the air, dB (0 to 3).
     SetOfdmDb(f32),
     /// The link's choice of level, from the next link on (at once while
@@ -183,8 +189,8 @@ struct Worker {
     ports: BTreeMap<u8, usize>,
     /// The broadcast burst is on the air.
     bcast_on_air: bool,
-    /// When broadcast traffic last brought on a CW ID.
-    bcast_id_at: f64,
+    /// When we first keyed after our last CW ID.
+    keyed_from: Option<f64>,
     /// Decode plots wanted (kept across new nodes).
     plot: bool,
     /// Broadcast bursts sent since the last status, for the log.
@@ -216,7 +222,7 @@ impl Worker {
             ),
             ports: BTreeMap::new(),
             bcast_on_air: false,
-            bcast_id_at: f64::NEG_INFINITY,
+            keyed_from: None,
             plot: false,
             bcast_sent: Vec::new(),
         }
@@ -369,6 +375,15 @@ impl Worker {
                 self.id_due = None;
                 self.note("Ion: stopped");
             }
+            IonCmd::GiveUp => {
+                let calling = self.node.station().state() == State::Connecting;
+                self.reset();
+                self.note(if calling {
+                    "Ion: stopped calling"
+                } else {
+                    "Ion: stopped"
+                });
+            }
             IonCmd::AttachHost(h) => self.host = h,
             IonCmd::GroupOpen(port, name) => {
                 if let Some(old) = self.ports.remove(&port) {
@@ -472,17 +487,23 @@ impl Worker {
                 if matches!(m, IonIn::TxDone) && self.id_on_air {
                     self.id_on_air = false;
                     self.keyed_since_id = false;
+                    self.keyed_from = None;
                     continue;
                 }
                 if matches!(m, IonIn::TxDone) && self.bcast_on_air {
                     self.bcast_on_air = false;
                     self.bcast.on_tx_done(now);
-                    // Broadcast traffic identifies too, at least every
-                    // ID_EVERY_S while it goes on.
-                    if now - self.bcast_id_at >= ID_EVERY_S {
-                        self.bcast_id_at = now;
-                        self.id_due.get_or_insert(now);
-                    }
+                    // Broadcast traffic identifies at the end of each run,
+                    // and at least every ID_EVERY_S while it goes on.
+                    let due = if self.keyed_from.is_some_and(|t| now - t >= ID_EVERY_S) {
+                        now
+                    } else {
+                        now + BCAST_ID_HOLD_S
+                    };
+                    self.id_due = Some(match self.id_due {
+                        Some(d) if d <= now => d,
+                        _ => due,
+                    });
                     continue;
                 }
                 match m {
@@ -525,6 +546,7 @@ impl Worker {
                 ));
                 self.bcast_on_air = true;
                 self.keyed_since_id = true;
+                self.keyed_from.get_or_insert(now);
                 self.bcast_sent.push(ion::link::node::BurstNote {
                     tx: true,
                     level: Some(b.code),
@@ -546,6 +568,7 @@ impl Worker {
                 && let Some(burst) = self.node.poll(now)
             {
                 self.keyed_since_id = true;
+                self.keyed_from.get_or_insert(now);
                 let _ = self.engine.send(Msg::IonTx(burst));
             }
             for p in self.node.take_plots() {
