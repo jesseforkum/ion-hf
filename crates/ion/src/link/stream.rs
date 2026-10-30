@@ -46,8 +46,9 @@ pub const REGION_BPS: f64 = 1850.0 / 60.0;
 /// Break-even: the stream pays only for what would take ARQ longer than
 /// this at its measured goodput, seconds. The gear-on link overtook the
 /// gear-off one 82–374 s into the 0 dB sessions, 191–551 s into the −6 dB
-/// ones; 450 s holds a margin over most of them.
-pub const BREAK_EVEN_S: f64 = 450.0;
+/// ones, and over six seeds at −6 dB on fading it was still behind after
+/// 5 minutes; 600 s is past every crossover measured.
+pub const BREAK_EVEN_S: f64 = 600.0;
 /// Data bursts send only what is in flight (so the queue can stream) for
 /// at most this long, seconds; then the stream waits [`DRAIN_HOLD_S`].
 pub const DRAIN_S: f64 = 40.0;

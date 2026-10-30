@@ -16,7 +16,7 @@ timekeeping; program: [app.md](../app.md).
   off, or with a peer that does not offer it (alpha.5 and before), the link
   is plain ARQ and its ConnReq/ConnAck bytes are alpha.5's.
 - **When**: after 75 s of ARQ, while ARQ's goodput is under 1850 B/min
-  and what is left would take it over 450 s (Decision, below), the gear's
+  and what is left would take it over 600 s (Decision, below), the gear's
   aim below 2 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
   within two periods. The queue then goes in blocks of 2–16 kB (about four
   minutes of the option's nominal rate), one after another: at DONE the
@@ -196,9 +196,12 @@ later: 0 dB at most 1700 B/min (WGN), +3 dB at least 1976 B/min (MPG at
   0 dB and +3 dB figures above; the aim below 2 dB and the hand-back at
   QPSK 1/4 stay. From a run's second block on, a block slower than ARQ was
   hands back to ARQ for 5 minutes.
-- **Break-even**: what is left must take ARQ longer than 450 s
-  (`BREAK_EVEN_S`) at its goodput: above most crossovers (82–374 s at
-  0 dB, 191–551 s at −6 dB). The fixed 4 kB threshold is gone.
+- **Break-even**: what is left must take ARQ longer than 600 s
+  (`BREAK_EVEN_S`) at its goodput: past every crossover measured (82–374 s
+  at 0 dB, 191–551 s at −6 dB). The mixed-size table below ran with 450 s;
+  600 s came after the six-seed runs at −6 dB on fading (the `ionos_table`
+  section) and can only make the gear stream less. The fixed 4 kB
+  threshold is gone.
 - **Tail**: the same test at each block's DONE; under it, End, and the
   rest goes on ARQ.
 - **First block**: about two minutes at ARQ's goodput (`FIRST_BLOCK_S`,
@@ -244,6 +247,40 @@ files. B/min, on / off (on over off):
   little faster than ARQ's own MFSK there).
 - One seed per cell: the fading cells vary by about 1.3× between seeds
   (the lab); ratios within a few percent are not significant.
+
+## The `ionos_table` on the final code
+
+`tests/ionos.rs` as the next write-ups ran it (400 kB queued, bytes
+delivered in 5 minutes, 2 seeds, `lab_runs/stream_gear/run.sh`): this
+branch (`gear_final2.txt`) over main 0.1.0-alpha.5 (`main_a5.txt`), B/min:
+
+| S:N | WGN | MPG | MPP | MPD |
+|---:|---|---|---|---|
+| +20 | 32572 / 32572 (1.00) | 23375 / 23375 (1.00) | 28390 / 28951 (0.98) | 23664 / 23664 (1.00) |
+| +10 | 14620 / 14620 (1.00) | 10319 / 10319 (1.00) | 12478 / 12478 (1.00) | 9520 / 9520 (1.00) |
+| +6 | 10710 / 10710 (1.00) | 7446 / 7446 (1.00) | 6052 / 6052 (1.00) | 5134 / 6307 (0.81) |
+| +3 | 6936 / 6936 (1.00) | 3240 / 3240 (1.00) | 3893 / 3893 (1.00) | 1280 / 1190 (1.08) |
+| 0 | 1768 / 1513 (1.17) | 932 / 856 (1.09) | 1332 / 1180 (1.13) | 584 / 562 (1.04) |
+| −3 | 698 / 702 (1.00) | 426 / 426 (1.00) | 554 / 554 (1.00) | 538 / 517 (1.04) |
+| −6 | 770 / 783 (0.98) | 417 / 379 (1.10) | 315 / 467 (0.67) | 338 / 394 (0.86) |
+
+- With `ION_STREAM=0` this branch reproduces main byte for byte in every
+  cell tried (`check_regress.txt`): the ARQ path is unchanged.
+- MPP +20 seed 0 and MPD +6 seed 0 never streamed (no period), yet
+  differ from main: the ConnReq and ConnAck carry one more cap bit, so the
+  link's first bursts differ and the session takes another path through
+  the same channel. That is one realisation of the channel, not the gear.
+- MPP −6 and MPD −6 stream from about 100 s in, and 5 minutes catch them
+  with a block in flight whose lost pieces hold back the rest until it
+  decodes. Over 15 minutes the same seed of MPP −6 delivers 1.09× the
+  gear-off link (mixed sizes, above). Six seeds (`six_seeds.txt`, gear on
+  against `ION_STREAM=0`, 5 minutes): MPP −6 dB 0.75, MPD −6 dB 0.80
+  (every seed behind), MPD +6 dB 0.94 (one seed of six diverged, no
+  stream), MPP +6 dB 1.00. At −6 dB on fading the gear is behind for the
+  first 5 minutes in every seed: its crossover there is 8–9 minutes, which
+  is why the break-even went to 600 s.
+- The table's 5-minute snapshot of a 400 kB transfer is the measure the
+  gear suits least: its gain shows on whole transfers (mixed sizes).
 
 ## What is not known (first on-air test)
 

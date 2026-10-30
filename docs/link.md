@@ -400,14 +400,15 @@ when all of these hold (calibrated on IONOS SIM,
 - ARQ's goodput is under `stream::REGION_BPS` (1850 B/min): the stream
   wins where ARQ is slow (0 dB and below) and not above;
 - what is left would take ARQ longer than `stream::BREAK_EVEN_S`
-  (450 s) at that goodput: the gear-on link overtook the gear-off one
+  (600 s) at that goodput: the gear-on link overtook the gear-off one
   82–374 s into 0 dB sessions and 191–551 s into −6 dB ones;
 - the SNR the gear aims by is below `stream::BELOW_DB` (2 dB in 2.4 kHz);
 - the peer asks for neither the turn nor a goodbye, and no CW ID is due
   within two periods.
 
 With frames still in flight, the data bursts send only those until they
-are acknowledged. The same test runs at each block's end: what is left
+are acknowledged, for at most `stream::DRAIN_S` (40 s; then no stream for
+5 minutes). The same test runs at each block's end: what is left
 under break-even (the tail) finishes on ARQ. From a run's second block on,
 a block slower than ARQ was goes back to ARQ for 5 minutes. The first
 block of a run starts no faster than an option of four times ARQ's

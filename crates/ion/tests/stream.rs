@@ -157,7 +157,7 @@ fn the_receiver_with_data_gets_the_turn_after_the_block() {
 
 #[test]
 fn a_cw_id_ends_the_block_and_it_goes_on_after() {
-    let data = payload(16_000, 9);
+    let data = payload(30_000, 9);
     let mut sim = model(-6.0, true, true, 12);
     for s in &mut sim.stations {
         s.set_ids(120.0, 3.0);
