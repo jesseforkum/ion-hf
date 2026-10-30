@@ -966,6 +966,12 @@ impl Station {
         {
             s.pause_from = Some(t);
         }
+        if self.last_tx_code == CONTROL
+            && let Some(r) = self.stream_rx.as_mut()
+            && r.live
+        {
+            r.go_out = true;
+        }
         if self.close_after_tx {
             self.close_after_tx = false;
             self.state = State::Disconnected;

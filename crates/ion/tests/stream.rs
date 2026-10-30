@@ -218,3 +218,68 @@ fn on_ionos_at_0_db_the_stream_delivers() {
     assert!(periods(&sim) > 3);
     assert!(sim.stations[1].stats().stream_blocks >= 1);
 }
+
+/// Two `Node`s on one continuous audio timeline (as the app and its
+/// loopback peer): the sender's tone watch, the receiver's clock across
+/// its own answers, the timekeeping without a simulator's help.
+#[test]
+fn two_nodes_stream_over_continuous_audio() {
+    use ion::link::Node;
+    use ion_dsp::dsp::{NoiseGen, noise_sigma};
+    const CHUNK: usize = 960;
+    let n = 9_000;
+    let data = payload(n, 21);
+    let mut nodes = [
+        Node::new(Node::config("N0JLF"), 0.2),
+        Node::new(Node::config("N0CALL"), 0.2),
+    ];
+    nodes[1].station_mut().listen();
+    nodes[0].station_mut().connect("N0CALL", 0.0);
+    nodes[0].station_mut().send(&data);
+    let mut out: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    let mut noise = NoiseGen::new(5);
+    // About 0 dB in 2.4 kHz against a steady carrier at TX_LEVEL.
+    let sigma = noise_sigma(ion_dsp::TX_LEVEL * ion_dsp::TX_LEVEL / 2.0, 0.0, 2400.0, 48_000.0);
+    let mut t = 0.0;
+    let mut tones = 0;
+    while t < 1_500.0 && nodes[1].station().stats().bytes_received < n as u64 {
+        t += CHUNK as f64 / 48_000.0;
+        let mut played = [vec![0.0f32; CHUNK], vec![0.0f32; CHUNK]];
+        for (i, node) in nodes.iter_mut().enumerate() {
+            if out[i].is_empty()
+                && let Some(a) = node.poll(t)
+            {
+                out[i] = a;
+            }
+            let k = out[i].len().min(CHUNK);
+            played[i][..k].copy_from_slice(&out[i][..k]);
+            out[i].drain(..k);
+            if k > 0 && out[i].is_empty() {
+                node.tx_done(t);
+            }
+        }
+        for i in 0..2 {
+            let heard: Vec<f32> = played[1 - i].iter().map(|x| x + sigma * noise.gaussian()).collect();
+            nodes[i].push_audio(&heard, t);
+        }
+        for (i, node) in nodes.iter_mut().enumerate() {
+            for j in node.take_journal() {
+                if std::env::var("ION_DUMP").is_ok() {
+                    eprintln!(
+                        "{t:7.2} {i} {} {} {:?}",
+                        if j.tx { "tx" } else { "rx" },
+                        j.what,
+                        j.snr_db
+                    );
+                }
+                tones += (["DONE", "SLOWER", "FASTER"].contains(&j.what.as_str()) && !j.tx) as usize;
+            }
+        }
+    }
+    let acq = nodes[1].stream_acq();
+    let got = nodes[1].station_mut().take_received();
+    assert!(got == data, "{} of {n} B in {t:.0} s, {acq:?}", got.len());
+    assert!(nodes[1].station().stats().stream_blocks >= 1, "{acq:?}");
+    assert!(acq.found >= 3 && acq.missed <= acq.periods / 4, "{acq:?}");
+    assert!(tones >= 1, "the sender heard no answer");
+}

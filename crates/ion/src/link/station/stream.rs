@@ -78,6 +78,8 @@ pub(super) struct StreamRx {
     /// Streaming now (a control burst from the sender ends it; a Start
     /// for the same block resumes it).
     pub live: bool,
+    /// Our Go has gone out: the periods are timed from its end.
+    pub go_out: bool,
     /// Counts the Starts heard (each one restarts the timekeeping).
     pub epoch: u32,
     pub snr_db: f32,
@@ -155,7 +157,7 @@ impl Station {
         let r = self
             .stream_rx
             .as_ref()
-            .filter(|r| r.live && self.state == State::Connected)?;
+            .filter(|r| r.live && r.go_out && self.state == State::Connected)?;
         let mut opts = vec![r.opt];
         opts.extend(r.alt);
         Some(Listen {
@@ -391,6 +393,7 @@ impl Station {
                         seen: 0,
                         last_ok: false,
                         live: true,
+                        go_out: false,
                         epoch: 0,
                         snr_db: inc.snr_db,
                         queued: None,
@@ -399,6 +402,7 @@ impl Station {
                 let mine = stream::start_pick(self.report_snr());
                 let r = self.stream_rx.as_mut().unwrap();
                 r.live = true;
+                r.go_out = false;
                 r.epoch += 1;
                 // The bolder of the sender's pick (from its reports) and
                 // ours (from the Start): a pick too bold costs two periods
@@ -753,7 +757,7 @@ impl Station {
     /// receiving side (the sender has gone back to the link).
     pub(super) fn stream_rx_interrupted(&mut self, inc: &Incoming, frames: &[Option<Frame>]) {
         let ctl = frames.iter().flatten().any(|f| f.kind == Kind::Stream);
-        if inc.code == STREAM || inc.code == TONES || ctl {
+        if inc.code == STREAM || inc.code == TONES || ctl || stream::is_period_user(inc.user, self.session) {
             return;
         }
         if let Some(r) = self.stream_rx.as_mut() {

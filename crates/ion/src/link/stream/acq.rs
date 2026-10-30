@@ -120,7 +120,18 @@ impl Acq {
 
     /// Our own transmission ended at clock sample `at` (now if `None`).
     pub fn note_tx_end(&mut self, at: Option<u64>) {
-        self.last_tx_end = Some(at.unwrap_or(self.clock));
+        let at = at.unwrap_or(self.clock);
+        self.last_tx_end = Some(at);
+        // Our Go went after the station started listening: the first
+        // period is timed from it.
+        if let Some(l) = self.listen.as_ref()
+            && self.k == 0
+            && self.track.anchors() <= 1
+            && self.cur.as_ref().is_none_or(|c| !c.searched)
+        {
+            self.track.seed(0.0, at as f64 + l.after_tx_s * FS);
+            self.cur = None;
+        }
     }
 
     /// The station's view (`Station::stream_listen`), before each block of
