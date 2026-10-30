@@ -11,7 +11,8 @@ top. It drives the radio over TCI
 ```text
 ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
       [--setup] [--log] [--shots DIR] [--quit S] [--gear goodput|ladder]
-      [--size WxH] [--shot-set NAME --shot-at S]
+      [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
+      [--shot-every S]
 ```
 
 - `--loopback`: no radio; simulated stations answer (below). `--loop-snr`
@@ -24,6 +25,9 @@ ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
   after `S` seconds (screenshots, scripted checks).
 - `--gear`: the link's choice of level for this run, over the `gear`
   setting (below).
+- `--stream on|off`: the stream gear for this run, over the `stream`
+  setting (below).
+- `--shot-every S` (with `--shots`): every `S` seconds instead of 15.
 - `--size WxH`: the window at so many pixels, one point to a pixel
   whatever the display's scaling (the saved window size is left alone).
 - `--shot-set NAME --shot-at S` (with `--shots`): instead of the 15 s
@@ -52,6 +56,12 @@ burst's level: `"goodput"` (the default) by expected throughput,
 `"ladder"` up and down the ladder as Ion HF 0.1.0-alpha.4 did, for an A/B
 on the air ([link.md](link.md), Gear shifting). Each end chooses for the
 bursts it sends; it takes effect from the next link.
+
+`stream` (`true` by default; no screen of its own) offers the stream gear
+([link.md](link.md), Stream gear): big transfers at low S:N go as a
+stream of coded periods answered by tones. `false`: the station does not
+offer it and every link is plain ARQ, as with Ion HF 0.1.0-alpha.5 and
+before (which never offer it). It takes effect from the next link.
 **Log file.** Everything the Log shows goes to `logs/ionhf.log` as it
 happens, one line each (`2026-10-29 19:38:53Z RX   CONACK +15 dB`), kept
 across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;
@@ -83,12 +93,15 @@ Only WARN does anything when clicked (the Log, errors only).
 | HOST | blue: a host program is on the command port; faint: the port is open, no program |
 | RIG | green: the radio link is up; amber: a radio setting will stop Ion (mode, filter) |
 | ARQ | a link is up or being set up (green) |
+| STREAM | the link is in its stream gear (green) |
 | BCAST | a host program has broadcast groups open (violet); faint while a link holds the channel |
 | HARQ | for 3 s after we send a HARQ increment or a codeword decodes thanks to one (amber) |
 | RETRY | for 3 s after frames are sent again (amber) |
 | LOST | for 3 s after a codeword is lost after combining (red) |
 | WARN | for 60 s after a warning or error (amber) |
 | MFSK R0, MFSK R1, SLICE, LONG, OFDM | the waveform of the level on the air: blue ours, orange the peer's |
+| CUE | for 3 s after an MFSK cue is sent or heard (amber) |
+| DONE, SLOWER, FASTER | for 2 s after that stream answer is sent (blue) or heard (orange) |
 
 ### Level
 
@@ -99,6 +112,11 @@ burst of it. Under it the ladder L0–L16: the levels up to the current one
 lit, the ceiling the peer's reports allow marked above (▼), and below our
 level (blue ▲) and the peer's (orange ▲).
 
+While the stream gear runs, a line under S/N, Rate and Data gives
+**Stream** (its option, blue ours, orange the peer's), **Period** (periods
+so far in this block) and, receiving, **Have** (pieces held of those the
+block needs).
+
 ### Decode plot
 
 The last three data bursts heard (link or broadcast), older ones fainter. OFDM: the
@@ -107,6 +125,7 @@ levels) over the constellation's points. MFSK: per symbol, the share of
 its likeliest tone value (up) against 1 less the runner-up's (across),
 from the tone metrics, as Data2G plots its tones; clean symbols sit top
 right. Under it, the burst, its S/N and **OK** or **LOST n** codewords.
+Points past the frame (low S:N) are cut off at its edge.
 The Ion worker makes plots only while the modem screen shows
 (`ion::link::node::Node::set_plot`).
 

@@ -88,8 +88,10 @@ fn the_peers_next_burst_is_expected() {
         (true, 1, 3.0),
         (true, 2, 8.0),
     ] {
+        // The link's own bursts: the stream gear has its own receiver.
         let cfg = |call: &str| Config {
             cue,
+            stream: false,
             ..Config::new(call)
         };
         let a = Station::new(cfg("N0ABC"), air.clone());

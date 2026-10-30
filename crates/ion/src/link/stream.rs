@@ -42,11 +42,12 @@ pub const BURST_S: f64 = 9.8;
 /// receiver's turnaround, its lead, the two tones and slack.
 pub const SLOT_S: f64 = 11.4;
 /// A block takes about this long at the start option (seconds of
-/// nominal rate), between [`BLOCK_MIN`] and [`BLOCK_MAX`] bytes: long
-/// enough that the handshake and the overshoot are small, short enough
-/// that each block delivers in a few minutes.
-const BLOCK_TARGET_S: f32 = 120.0;
-pub const BLOCK_MIN: usize = 4096;
+/// nominal rate; in practice one and a half to twice that), between
+/// [`BLOCK_MIN`] and [`BLOCK_MAX`] bytes: long enough that the handshake
+/// and the overshoot are small, short enough that a block (whose bytes
+/// all arrive at its end) delivers within a couple of minutes.
+const BLOCK_TARGET_S: f32 = 60.0;
+pub const BLOCK_MIN: usize = 2048;
 pub const BLOCK_MAX: usize = 16384;
 /// The sender gives a block up after sending this many times its pieces.
 pub const GIVE_UP_X: usize = 4;

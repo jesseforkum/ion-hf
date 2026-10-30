@@ -307,3 +307,32 @@ fn after_the_turn_the_other_side_streams_too() {
         "the side that took the turn did not stream"
     );
 }
+
+/// A traced session on IONOS SIM: `ION_MODE` (WGN), `ION_SNR` (0),
+/// `ION_SECS` (300), `ION_SEED` (900): every burst on the air and the
+/// receiving side's view of each period.
+#[test]
+#[ignore]
+fn stream_trace() {
+    let env = |k: &str| std::env::var(k).ok();
+    let mode = env("ION_MODE")
+        .and_then(|m| Mode::ALL.iter().copied().find(|x| x.name().eq_ignore_ascii_case(&m)))
+        .unwrap_or(Mode::Wgn);
+    let snr: f32 = env("ION_SNR").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let secs: f64 = env("ION_SECS").and_then(|v| v.parse().ok()).unwrap_or(300.0);
+    let seed: u64 = env("ION_SEED").and_then(|v| v.parse().ok()).unwrap_or(900);
+    let mut sim = ionos(mode, snr, 400_000, seed);
+    sim.run_until(secs, |_| false);
+    dump(&sim);
+    for p in &sim.stations[1].stats().stream_log {
+        eprintln!(
+            "{:<9} {}/{} {:+.1} dB -> {}",
+            ion::link::stream::OPTS[p.0 as usize].name,
+            p.1,
+            p.2,
+            p.3,
+            p.4
+        );
+    }
+    eprintln!("received {} B", sim.stations[1].stats().bytes_received);
+}
