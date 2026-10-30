@@ -1,0 +1,34 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling ion v0.1.0 (C:\Users\jfork\Documents\GitHub\ion-hf-sg-run\crates\ion)
+    Finished `release` profile [optimized] target(s) in 33.83s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+WGN -6 dB seed 0: 4096 B, 819 B/min
+test ionos_table has been running for over 60 seconds
+WGN -6 dB seed 1: 4096 B, 819 B/min
+MPG -6 dB seed 0: 2048 B, 410 B/min
+MPG -6 dB seed 1: 2048 B, 410 B/min
+MPP -6 dB seed 0: 2048 B, 410 B/min
+MPP -6 dB seed 1: 2048 B, 410 B/min
+MPD -6 dB seed 0: 2048 B, 410 B/min
+MPD -6 dB seed 1: 2048 B, 410 B/min
+WGN -3 dB seed 0: 2652 B, 530 B/min
+WGN -3 dB seed 1: 2652 B, 530 B/min
+MPG -3 dB seed 0: 3536 B, 707 B/min
+MPG -3 dB seed 1: 2048 B, 410 B/min
+MPP -3 dB seed 0: 0 B, 0 B/min
+MPP -3 dB seed 1: 2652 B, 530 B/min
+MPD -3 dB seed 0: 3536 B, 707 B/min
+MPD -3 dB seed 1: 2652 B, 530 B/min
+WGN +0 dB seed 0: 8841 B, 1768 B/min
+WGN +0 dB seed 1: 7957 B, 1591 B/min
+MPG +0 dB seed 0: 0 B, 0 B/min
+MPG +0 dB seed 1: 5305 B, 1061 B/min
+MPP +0 dB seed 0: 7957 B, 1591 B/min
+MPP +0 dB seed 1: 5305 B, 1061 B/min
+MPD +0 dB seed 0: 5305 B, 1061 B/min
+MPD +0 dB seed 1: 0 B, 0 B/min
+WGN +3 dB seed 0: 28292 B, 5658 B/min
+WGN +3 dB seed 1: 28292 B, 5658 B/min

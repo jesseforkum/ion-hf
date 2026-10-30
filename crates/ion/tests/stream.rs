@@ -340,7 +340,7 @@ fn stream_trace() {
     while sim.t < secs {
         let t = sim.t + 1.0;
         sim.run_until(t, |_| false);
-        if sim.t as u64 % 30 == 0
+        if (sim.t as u64).is_multiple_of(30)
             && let Some(a) = sim.stations[0].aim_db()
         {
             aims.push(format!("{a:.1}"));

@@ -1,0 +1,16 @@
+stream=1 WGN +0 dB seed 900 900 s: 46022 B (3068 B/min); first period Some(15.0) s; air: periods+pauses 95% ARQ data 0% control 5%; blocks 3; arrivals [24s:140 35s:280 47s:476 58s:672 70s:1176 82s:1848 93s:2520 104s:3192 116s:3864 127s:4536 139s:5208 151s:5880 162s:6552 173s:7224 185s:7896 196s:8568 207s:9240 218s:9912 230s:10584 345s:16384 364s:17056 375s:17728 387s:18400 398s:19072 409s:19744 420s:20416 432s:21088 444s:21760 455s:22432 467s:23104 478s:23776 489s:24448 500s:25120 512s:25792 523s:26464 534s:27136 547s:27808 558s:28480 569s:29152 580s:29824 592s:30496 603s:30531 623s:31203 634s:31875 646s:32211 863s:44678 882s:45350 893s:46022]
+stream=1   10 kB at Some(230.0) s (2603 B/min), 50 kB at None s (- B/min)
+stream=1   options (periods ok/tried frames): {"QPSK 1/6": (70, 276, 280), "QPSK 1/8": (1, 3, 3), "R1 1/2": (2, 10, 10), "R1 2/3": (2, 14, 14)}
+stream=1   acquisition: Some(AcqStats { periods: 3, found: 3, fallback: 0, missed: 0, half_ms: 251.026, err_ms: 1.2515718 })
+stream=1 MPG +0 dB seed 900 900 s: 16384 B (1092 B/min); first period Some(15.0) s; air: periods+pauses 97% ARQ data 0% control 3%; blocks 1; arrivals [22s:56 34s:112 46s:196 57s:280 69s:420 81s:560 92s:756 104s:952 116s:1456 697s:16384]
+stream=1   10 kB at Some(697.0) s (861 B/min), 50 kB at None s (- B/min)
+stream=1   options (periods ok/tried frames): {"QPSK 1/4": (2, 0, 12), "QPSK 1/6": (16, 32, 64), "QPSK 1/8": (40, 80, 117), "R1 1/2": (2, 10, 10), "R1 1/3": (2, 6, 6), "R1 1/4": (2, 4, 4), "R1 2/3": (13, 91, 91)}
+stream=1   acquisition: Some(AcqStats { periods: 17, found: 17, fallback: 0, missed: 0, half_ms: 3.0, err_ms: -0.19275783 })
+stream=1 MPP +0 dB seed 900 900 s: 16384 B (1092 B/min); first period Some(32.0) s; air: periods+pauses 95% ARQ data 0% control 5%; blocks 1; arrivals [544s:16384]
+stream=1   10 kB at Some(544.0) s (1104 B/min), 50 kB at None s (- B/min)
+stream=1   options (periods ok/tried frames): {"QPSK 1/4": (1, 0, 6), "QPSK 1/6": (14, 23, 52), "QPSK 1/8": (49, 101, 141), "R1 2/3": (10, 70, 70)}
+stream=1   acquisition: Some(AcqStats { periods: 30, found: 28, fallback: 0, missed: 2, half_ms: 6.2262225, err_ms: -1.5136914 })
+stream=1 WGN -6 dB seed 894 900 s: 14139 B (943 B/min); first period Some(19.0) s; air: periods+pauses 95% ARQ data 0% control 5%; blocks 3; arrivals [28s:140 40s:280 51s:476 63s:672 74s:868 85s:1064 97s:1260 108s:1456 120s:1652 131s:1848 143s:2044 155s:2240 166s:2436 177s:2632 188s:2828 200s:2947 219s:3143 230s:3339 242s:3535 253s:3731 265s:3927 276s:4123 287s:4319 299s:4515 310s:4711 321s:4907 332s:5103 345s:5299 356s:5495 367s:5691 379s:5887 390s:6083 401s:6279 413s:6475 424s:6671 435s:6867 447s:7063 459s:7073 478s:7269 489s:7465 500s:7661 511s:7857 523s:8053 534s:8249 546s:8445 558s:8641 569s:8837 580s:9033 591s:9229 603s:9425 614s:9621 625s:9817 637s:10013 649s:10209 660s:10405 671s:10601 683s:10797 694s:10993 705s:11189 717s:11199 735s:11395 748s:11591 759s:11787 770s:11983 782s:12179 793s:12375 804s:12571 815s:12767 827s:12963 838s:13159 850s:13355 862s:13551 873s:13747 884s:13943 895s:14139]
+stream=1   10 kB at Some(637.0) s (941 B/min), 50 kB at None s (- B/min)
+stream=1   options (periods ok/tried frames): {"R1 1/2": (2, 10, 10), "R1 2/3": (73, 511, 511)}
+stream=1   acquisition: Some(AcqStats { periods: 16, found: 16, fallback: 0, missed: 0, half_ms: 3.0, err_ms: 0.0 })

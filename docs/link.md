@@ -421,7 +421,9 @@ Start → Go | period 0 | pause | … DONE → Start → Go | period 0 | … DON
   control frame's tries leaves the block to ARQ and holds the stream off 5
   minutes.
 - **Blocks follow one another**: at DONE, with enough still queued, the
-  sender opens the next block at once; its Go's delivered offset confirms
+  sender opens the next block at once (unless the block ended at QPSK 1/4
+  or faster, `stream::HIGH_OPT`: there the link's HARQ does as well or
+  better, so End, and ARQ for 5 minutes); its Go's delivered offset confirms
   the block before (if it does not, both go back to ARQ), and its flags
   carry the receiver's turn and goodbye wishes (if set, the new block goes
   back to the queue and the link hands over).
@@ -450,7 +452,7 @@ Start → Go | period 0 | pause | … DONE → Start → Go | period 0 | … DON
 
   QPSK is full-band normal-guard low-PAPR OFDM as ladder level 10; rates
   below 1/4 repeat the mother code (chase). Every QPSK option fills the
-  same 1440 symbols, so they share one head. Nominal: every piece
+  same data symbols, so they share one head. Nominal: every piece
   through, per slot.
 - **The pause** holds the receiver's turnaround and PTT lead, its two
   0.2 s tones, and slack for both sound cards' latency (at least 1.4 s

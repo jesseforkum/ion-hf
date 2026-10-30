@@ -1,0 +1,59 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling ion v0.1.0 (C:\Users\jfork\Documents\GitHub\ion-hf-sg-run\crates\ion)
+    Finished `release` profile [optimized] target(s) in 34.41s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+WGN -6 dB seed 0: 2048 B, 410 B/min
+test ionos_table has been running for over 60 seconds
+WGN -6 dB seed 1: 2048 B, 410 B/min
+MPG -6 dB seed 0: 2048 B, 410 B/min
+MPG -6 dB seed 1: 2048 B, 410 B/min
+MPP -6 dB seed 0: 2048 B, 410 B/min
+MPP -6 dB seed 1: 2048 B, 410 B/min
+MPD -6 dB seed 0: 2048 B, 410 B/min
+MPD -6 dB seed 1: 2048 B, 410 B/min
+WGN -3 dB seed 0: 2652 B, 530 B/min
+WGN -3 dB seed 1: 2652 B, 530 B/min
+MPG -3 dB seed 0: 3536 B, 707 B/min
+MPG -3 dB seed 1: 2048 B, 410 B/min
+MPP -3 dB seed 0: 0 B, 0 B/min
+MPP -3 dB seed 1: 2652 B, 530 B/min
+MPD -3 dB seed 0: 0 B, 0 B/min
+MPD -3 dB seed 1: 2652 B, 530 B/min
+WGN +0 dB seed 0: 8841 B, 1768 B/min
+WGN +0 dB seed 1: 10005 B, 2001 B/min
+MPG +0 dB seed 0: 5305 B, 1061 B/min
+MPG +0 dB seed 1: 5305 B, 1061 B/min
+MPP +0 dB seed 0: 5305 B, 1061 B/min
+MPP +0 dB seed 1: 5305 B, 1061 B/min
+MPD +0 dB seed 0: 5305 B, 1061 B/min
+MPD +0 dB seed 1: 0 B, 0 B/min
+WGN +3 dB seed 0: 21499 B, 4300 B/min
+WGN +3 dB seed 1: 21219 B, 4244 B/min
+MPG +3 dB seed 0: 6155 B, 1231 B/min
+MPG +3 dB seed 1: 14146 B, 2829 B/min
+MPP +3 dB seed 0: 14146 B, 2829 B/min
+MPP +3 dB seed 1: 14146 B, 2829 B/min
+MPD +3 dB seed 0: 9725 B, 1945 B/min
+MPD +3 dB seed 1: 8841 B, 1768 B/min
+WGN +6 dB seed 0: 36895 B, 7379 B/min
+WGN +6 dB seed 1: 36895 B, 7379 B/min
+MPG +6 dB seed 0: 23429 B, 4686 B/min
+MPG +6 dB seed 1: 18735 B, 3747 B/min
+MPP +6 dB seed 0: 14146 B, 2829 B/min
+MPP +6 dB seed 1: 23939 B, 4788 B/min
+MPD +6 dB seed 0: 17376 B, 3475 B/min
+MPD +6 dB seed 1: 23429 B, 4686 B/min
+WGN +10 dB seed 0: 73100 B, 14620 B/min
+WGN +10 dB seed 1: 73100 B, 14620 B/min
+MPG +10 dB seed 0: 33423 B, 6685 B/min
+MPG +10 dB seed 1: 44983 B, 8997 B/min
+MPP +10 dB seed 0: 57120 B, 11424 B/min
+MPP +10 dB seed 1: 67660 B, 13532 B/min
+MPD +10 dB seed 0: 50320 B, 10064 B/min
+error: test failed, to rerun pass `-p ion --test ionos`
+
+Caused by:
+  process didn't exit successfully: `C:/Users/jfork/Documents/GitHub/ion-hf-sg-run/target\release\deps\ionos-8d7cbdd3c691c64a.exe --ignored --nocapture` (exit code: 1)

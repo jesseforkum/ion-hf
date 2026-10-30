@@ -1,0 +1,15 @@
+stream=0 WGN -3 dB seed 897 300 s: 3622 B (724 B/min); first period None s; air: periods+pauses 0% ARQ data 80% control 20%; blocks 0; arrivals [17s:170 33s:340 43s:472 53s:598 79s:730 89s:856 98s:982 108s:1114 118s:1246 127s:1378 138s:1510 147s:1642 157s:1774 166s:1906 176s:2038 185s:2170 195s:2302 204s:2434 214s:2566 223s:2698 233s:2830 244s:2962 253s:3094 263s:3226 272s:3358 282s:3490 291s:3622]
+stream=0   10 kB at None s (- B/min), 50 kB at None s (- B/min)
+stream=0   options (periods ok/tried frames): {}
+stream=0   aim every 30 s: -8.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0 -2.0
+stream=0   acquisition: Some(AcqStats { periods: 0, found: 0, fallback: 0, missed: 0, half_ms: 0.0, err_ms: 0.0 })
+stream=0 MPG -3 dB seed 897 300 s: 2120 B (424 B/min); first period None s; air: periods+pauses 0% ARQ data 75% control 25%; blocks 0; arrivals [40s:132 51s:258 71s:390 81s:516 102s:538 112s:664 131s:812 142s:938 160s:1026 169s:1108 178s:1196 190s:1328 218s:1460 230s:1592 262s:1724 272s:1856 282s:1988 293s:2120]
+stream=0   10 kB at None s (- B/min), 50 kB at None s (- B/min)
+stream=0   options (periods ok/tried frames): {}
+stream=0   aim every 30 s: -16.0 -2.0 -1.0 -7.0 -1.0 -2.0 -1.0 -4.0 -6.0 1.0
+stream=0   acquisition: Some(AcqStats { periods: 0, found: 0, fallback: 0, missed: 0, half_ms: 0.0, err_ms: 0.0 })
+stream=0 MPP -3 dB seed 897 300 s: 2868 B (573 B/min); first period None s; air: periods+pauses 0% ARQ data 78% control 22%; blocks 0; arrivals [26s:132 36s:258 45s:390 90s:522 110s:654 121s:780 131s:846 152s:1120 162s:1240 172s:1372 182s:1416 191s:1614 210s:1768 220s:1834 229s:1966 240s:2098 249s:2230 259s:2362 268s:2406 278s:2604 287s:2736 297s:2868]
+stream=0   10 kB at None s (- B/min), 50 kB at None s (- B/min)
+stream=0   options (periods ok/tried frames): {}
+stream=0   aim every 30 s: -4.0 -2.0 -8.0 -1.0 -2.0 -2.0 -4.0 -8.0 -1.0 -2.0
+stream=0   acquisition: Some(AcqStats { periods: 0, found: 0, fallback: 0, missed: 0, half_ms: 0.0, err_ms: 0.0 })

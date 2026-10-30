@@ -84,7 +84,88 @@ timekeeping; program: [app.md](../app.md).
 
 ## Sessions
 
-RESULTS
+IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak,
+real PHYs (`AudioMedium`), seeds as `tests/ionos.rs` seed 0 (900 + S:N),
+400 kB queued at the start. `stream_trace` in `tests/stream.rs`
+(`lab_runs/stream_gear/trace.sh`) runs each cell with the gear and with
+`stream = false` (the link without it, whose ARQ is alpha.5's: the bytes
+at connect and every ARQ path are unchanged), same seed and length, and
+breaks the session down. Bytes are those the receiving side had
+delivered in order at the end. Simulation only; 1–2 threads.
+
+**Where the air time goes, and what each side delivers** (`final_300.txt`,
+`final_900.txt` against `cmp_300.txt`, `off_300_m3.txt`, `trace_900.txt`;
+B/min, the gear's periods with their pauses / ARQ data / control as % of
+the session):
+
+| S:N | channel | 5 min: gear | without | ratio | air | 15 min: gear | without | ratio |
+|---:|---|---:|---:|---:|---|---:|---:|---:|
+| −6 | WGN | 819 | 783 | 1.05 | 88 / 0 / 12 | 890 | 807 | 1.10 |
+| −6 | MPG | 415 | 410 | 1.01 | 91 / 0 / 9 | 410 | 386 | 1.06 |
+| −6 | MPP | 493 | 398 | 1.24 | 91 / 0 / 9 | 630 | 488 | 1.29 |
+| −3 | WGN | 765 | 724 | 1.06 | 86 / 0 / 14 | | | |
+| −3 | MPG | 707 | 424 | 1.67 | 87 / 0 / 13 | | | |
+| −3 | MPP | 0 | 573 | 0 | 89 / 0 / 11 | | | |
+| 0 | WGN | 2439 | 1597 | 1.53 | 89 / 0 / 11 | 2654 | 1655 | 1.60 |
+| 0 | MPG | 1060 | 816 | 1.30 | 92 / 0 / 8 | 1470 | 792 | 1.86 |
+| 0 | MPP | 1329 | 1081 | 1.23 | 86 / 0 / 14 | 1584 | 850 | 1.86 |
+| +3 | WGN | 6362 | 6933 | 0.92 | 19 / 74 / 7 | | | |
+| +3 | MPG | 2454 | 2262 | 1.08 | 53 / 33 / 14 | | | |
+| +3 | MPP | 3303 | 3908 | 0.85 | 42 / 48 / 11 | | | |
+
+- **The stream runs as designed.** From the first period (15–32 s in:
+  connect, then Start/Go) the link spends 86–95% of the air in periods
+  and their pauses, none in ARQ data; control (connect, Start/Go between
+  blocks) is the rest. The periods are found by the timekeeping, not by
+  their own header: in every session's last block (the counters start
+  again with each block) the search found the head over its mark
+  (`AcqStats::found`), the receiver's own header was never needed
+  (`fallback` 0), and at most one period was missed; the prediction's
+  half-window had settled at 3–7 ms.
+- **The threshold and the gate do not hold it back**: 400 kB queued, and
+  the aim is under 2 dB at every S:N up to +3 dB (it starts from the
+  ConnAck, read on the MFSK call, which does not tell 0 dB from +3 dB).
+- **Steady state is the lab's.** At 0 dB on WGN the stream sits at QPSK
+  1/6 with every codeword decoded (259 of 260 in 15 minutes): 24 pieces a
+  slot, 3537 B/min, against the lab's 3229–3459. At −6 dB on WGN it sits
+  at R1 2/3 with every frame (497 of 497): 7 pieces a slot, about 1030
+  B/min against the lab's 1105–1139.
+- **What the sessions lose against those figures**, in order of size:
+  - *Accounting*: bytes count when delivered in order. Source pieces are
+    delivered as they arrive, but after a lost one the rest of the block
+    waits for the block to decode; the block still in flight at the end
+    counts nothing. At 0 dB on fading that is most of the gap between
+    1470–1584 B/min and the pieces received (about 1700). MPP −3 dB
+    delivered nothing in 5 minutes: 113 of the 127 pieces its first
+    block needed were in at the end.
+  - *Start*: connect (15 s), then the first block starts at the more
+    cautious of the two sides' picks and climbs (MFSK steps after two
+    clean periods): 40–60 s before the stream runs at its option.
+  - *The slot*: 11.4 s whatever the option, so a 9.6 s QPSK burst fills
+    84% of it and a 9.0 s R1 2/3 burst 79%, against the lab's 91% (its
+    pause was 1 s with no PTT lead, its codewords ran across pauses).
+    The pause holds the PTT lead and both sound cards' latency for the
+    air; the fixed slot lets a receiver unsure of the option still find the
+    next period.
+  - *Blocks*: each costs a Start/Go (about 20 s in MFSK R1 control
+    frames) and the rest of the period after its last piece. Blocks are
+    one minute of nominal rate, two and a half after a block that needed
+    at most 1.05 times its pieces.
+- **Above 0 dB the link's own HARQ is as good or better** (+3 dB: 0.85,
+  1.08, 0.92), as in the lab (its stream drew with ARQ from +3 dB, 0.93 on
+  WGN). A block that ends at QPSK 1/4 or faster therefore hands the link
+  back to ARQ for 5 minutes (the +3 dB cells' 33–74% ARQ data).
+
+Each cell is one seed; fading cells vary by 1.3× between seeds (the lab).
+The 5-minute table of `tests/ionos.rs` (`lab_runs/stream_gear/run.sh`,
+2 seeds, WGN/MPG/MPP/MPD at −6 to +20 dB) was run on main
+(`main_a5.txt`) and on two earlier versions of this branch
+(`gear_partial_79db312.txt`, `old_*.txt`), not on the final one: the
+diagnosis above came first. Its 5-minute snapshot is the accounting
+problem above at its worst for the stream.
+
+**Clock, carrier offset and jitter**: `AudioMedium` has none of them, so
+the exp-sync impairment sets were not run on this code (see below).
 
 ## What is not known (first on-air test)
 

@@ -1,0 +1,44 @@
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling num-integer v0.1.47
+   Compiling strength_reduce v0.2.4
+   Compiling transpose v0.2.3
+   Compiling primal-check v0.3.4
+   Compiling num-complex v0.4.6
+   Compiling ion-dsp v0.1.0 (C:\Users\jfork\Documents\GitHub\ion-hf-sg-run\crates\ion-dsp)
+   Compiling ion v0.1.0 (C:\Users\jfork\Documents\GitHub\ion-hf-sg-run\crates\ion)
+   Compiling rustfft v6.4.1
+    Finished `release` profile [optimized] target(s) in 41.85s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+WGN -6 dB seed 0: 4096 B, 819 B/min
+test ionos_table has been running for over 60 seconds
+WGN -6 dB seed 1: 4096 B, 819 B/min
+MPG -6 dB seed 0: 0 B, 0 B/min
+MPG -6 dB seed 1: 0 B, 0 B/min
+MPP -6 dB seed 0: 0 B, 0 B/min
+MPP -6 dB seed 1: 0 B, 0 B/min
+MPD -6 dB seed 0: 0 B, 0 B/min
+MPD -6 dB seed 1: 0 B, 0 B/min
+WGN -3 dB seed 0: 0 B, 0 B/min
+WGN -3 dB seed 1: 0 B, 0 B/min
+MPG -3 dB seed 0: 0 B, 0 B/min
+MPG -3 dB seed 1: 0 B, 0 B/min
+MPP -3 dB seed 0: 0 B, 0 B/min
+MPP -3 dB seed 1: 0 B, 0 B/min
+MPD -3 dB seed 0: 0 B, 0 B/min
+MPD -3 dB seed 1: 0 B, 0 B/min
+WGN +0 dB seed 0: 10610 B, 2122 B/min
+WGN +0 dB seed 1: 10610 B, 2122 B/min
+MPG +0 dB seed 0: 0 B, 0 B/min
+MPG +0 dB seed 1: 0 B, 0 B/min
+MPP +0 dB seed 0: 0 B, 0 B/min
+MPP +0 dB seed 1: 0 B, 0 B/min
+MPD +0 dB seed 0: 0 B, 0 B/min
+MPD +0 dB seed 1: 0 B, 0 B/min
+WGN +3 dB seed 0: 24757 B, 4951 B/min
+error: test failed, to rerun pass `-p ion --test ionos`
+
+Caused by:
+  process didn't exit successfully: `C:/Users/jfork/Documents/GitHub/ion-hf-sg-run/target\release\deps\ionos-8d7cbdd3c691c64a.exe --ignored --nocapture` (exit code: 1)
