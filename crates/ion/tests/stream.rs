@@ -336,9 +336,15 @@ fn stream_trace() {
     let mut have = 0;
     // When the receiver first held 10 kB and 50 kB (the lab's measure).
     let mut at = [None; 2];
+    let mut aims = Vec::new();
     while sim.t < secs {
         let t = sim.t + 1.0;
         sim.run_until(t, |_| false);
+        if sim.t as u64 % 30 == 0
+            && let Some(a) = sim.stations[0].aim_db()
+        {
+            aims.push(format!("{a:.1}"));
+        }
         let got = sim.stations[1].stats().bytes_received;
         if got > have {
             arrivals.push(format!("{:.0}s:{}", sim.t, got));
@@ -413,5 +419,6 @@ fn stream_trace() {
         bpm(1, 50_000.0)
     );
     eprintln!("TRACE   options (periods ok/tried frames): {by_opt:?}");
+    eprintln!("TRACE   aim every 30 s: {}", aims.join(" "));
     eprintln!("TRACE   acquisition: {acq:?}");
 }

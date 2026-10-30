@@ -16,7 +16,7 @@ timekeeping; program: [app.md](../app.md).
   off, or with a peer that does not offer it (alpha.5 and before), the link
   is plain ARQ and its ConnReq/ConnAck bytes are alpha.5's.
 - **When**: 4 kB or more queued, nothing in flight, the gear's aim below
-  5 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
+  2 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
   within two periods. The queue then goes in blocks of 2–16 kB (about four
   minutes of the option's nominal rate), one after another: at DONE the
   next Start goes at once and its Go confirms the block before; End and
@@ -28,7 +28,7 @@ timekeeping; program: [app.md](../app.md).
   9.8 s of burst, pause), outer-coded 28-byte pieces (systematic Cauchy
   over GF(2^16)) in the option's frames: MFSK R0 and R1 at the GF(32)
   rates, or low-PAPR QPSK OFDM at rates 1/8 to 2/3 (chase below 1/4).
-  The lab's finer rates and 16/64QAM are left out (above 5 dB the stream is
+  The lab's finer rates and 16/64QAM are left out (above 2 dB the stream is
   not used).
 - **Tones**: DONE / SLOWER / FASTER as the lab's pairs (0.2 s, 45-bin
   grid, CFAR), at `TX_LEVEL`; the detector searches the answer's start in
@@ -50,8 +50,9 @@ timekeeping; program: [app.md](../app.md).
   10 kB; a block needs a minute or two to pay for its Start/Go and
   End/Report (two control round trips, 3–20 s by waveform) and its
   overshoot (about half a period and a pause).
-- **Gate** 5 dB aim (`stream::BELOW_DB`): the lab's stream drew with ARQ
-  above +3 dB IONOS S:N and lost a little on WGN at +3/+6 dB.
+- **Gate** 2 dB aim (`stream::BELOW_DB`, about +4 dB IONOS S:N): at +3 dB
+  the build drew with ARQ on fading and lost 12% on WGN (Sessions); the
+  lab's stream drew there too.
 - **Turn handling**: the simplest safe one. The stream is never
   interrupted; the receiving side's wish to send goes in its Report at the
   block's end (or, between blocks, in the next Go) and the sender then

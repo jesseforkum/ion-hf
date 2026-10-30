@@ -638,6 +638,11 @@ impl Station {
         self.level
     }
 
+    /// The SNR the gear aims by (dB in 2.4 kHz), once there is a report.
+    pub fn aim_db(&self) -> Option<f32> {
+        self.aim_db
+    }
+
     /// The level the peer's last SNR report allows.
     pub fn target_level(&self) -> usize {
         self.target

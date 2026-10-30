@@ -307,6 +307,12 @@ impl Station {
     /// DONE heard: the next block at once, if the stream is still wanted
     /// (its Go confirms this one); else End.
     fn stream_next(&mut self, now: f64) -> Outgoing {
+        // A block that ended at QPSK 1/4 or faster: the link's own HARQ
+        // does as well or better there, so back to it for a while.
+        if self.stream_tx.as_ref().is_some_and(|t| t.opt >= stream::HIGH_OPT) {
+            self.stream_hold_until = now + HOLD_S;
+            return self.stream_end(EndWhy::Done, now);
+        }
         let wanted = self.stream_prev.is_none()
             && self.stream_wanted(now)
             && self.inflight.is_empty()

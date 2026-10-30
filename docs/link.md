@@ -391,15 +391,17 @@ variant A; the build: [experiments/stream-gear.md](experiments/stream-gear.md)).
 
 **When.** On a link that agreed to `caps::STREAM`, with at least
 `stream::MIN_BYTES` (4 kB) queued and nothing in flight, while the SNR the
-gear aims by is below `stream::BELOW_DB` (5 dB in 2.4 kHz, about +7 dB
-IONOS S:N; above it the stream only draws with the link's HARQ), and not
+gear aims by is below `stream::BELOW_DB` (2 dB in 2.4 kHz, about +4 dB
+IONOS S:N; from +3 dB up the stream at best draws with the link's HARQ,
+[experiments/stream-gear.md](experiments/stream-gear.md)), and not
 while the peer asks for the turn or a goodbye, nor with a CW ID due
 within two periods. With more queued and frames still in flight, the
 data bursts send only what is in flight until it is acknowledged.
 
 **A block.** The sender takes the next 2–16 kB of its queue
-(`stream::block_bytes`: about four minutes of the option's nominal rate)
-and cuts it
+(`stream::block_bytes`: about four minutes of the option's nominal rate
+after a block that needed at most 1.1 times its pieces, one minute
+otherwise) and cuts it
 into 28-byte pieces, K of them. Pieces are numbered 0–65535: 0..K are the
 block itself, the rest repairs of a systematic Cauchy code over GF(2^16)
 (`stream::code`), any K distinct pieces giving the block back. The

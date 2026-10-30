@@ -27,6 +27,13 @@ pub const STREAM: usize = 61;
 /// Burst code of a tone answer.
 pub const TONES: usize = 60;
 
+/// A block that ends at this option or faster hands the link back to ARQ
+/// for a while: from about +3 dB IONOS S:N the link's HARQ does as well or
+/// better (`stream-gear.md`, Sessions), and the SNR reports at connect do
+/// not tell 0 dB from +3 dB.
+pub const HIGH_OPT: usize = 7;
+const _: () = assert!(matches!(OPTS[HIGH_OPT].fam, Fam::Ofdm) && OPTS[HIGH_OPT].n == fec::K * 4);
+
 /// Bytes queued (with nothing in flight) from which a transfer streams.
 pub const MIN_BYTES: usize = 4096;
 /// The stream is used while the SNR the gear aims by is below this (dB
@@ -50,10 +57,10 @@ pub const SLOT_S: f64 = 11.4;
 /// [`BLOCK_SHORT_S`] otherwise (lost pieces hold back what follows them
 /// until the block decodes).
 pub const BLOCK_SHORT_S: f32 = 60.0;
-pub const BLOCK_LONG_S: f32 = 240.0;
+pub const BLOCK_LONG_S: f32 = 150.0;
 /// A block whose K pieces took at most this many times K sent counts as
 /// clean.
-pub const CLEAN_EFF: f32 = 0.9;
+pub const CLEAN_EFF: f32 = 0.95;
 pub const BLOCK_MIN: usize = 2048;
 pub const BLOCK_MAX: usize = 16384;
 /// The sender gives a block up after sending this many times its pieces.
