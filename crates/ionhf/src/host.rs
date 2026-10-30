@@ -597,6 +597,26 @@ impl Host {
     }
 }
 
+/// A command port for a test whose data and KISS ports are free too:
+/// another on every call, and in every test process, as test runs go side
+/// by side (from other worktrees, say) and the user's Ion holds 8300.
+#[cfg(test)]
+pub(crate) fn free_port() -> u16 {
+    use std::sync::atomic::AtomicU32;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    for _ in 0..2_500 {
+        let k = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = 20_000 + (std::process::id().wrapping_add(k.wrapping_mul(7)) % 2_500) as u16 * 10;
+        if [port - 200, port, port + 1]
+            .iter()
+            .all(|&p| TcpListener::bind(("127.0.0.1", p)).is_ok())
+        {
+            return port;
+        }
+    }
+    panic!("no free host ports");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,8 +626,8 @@ mod tests {
     /// are free.
     #[test]
     fn a_busy_port_is_waited_for() {
-        for held in [18_700, 18_701] {
-            let port = 18_700;
+        let port = free_port();
+        for held in [port, port + 1] {
             let blocker = TcpListener::bind(("127.0.0.1", held)).unwrap();
             let (ion, ion_rx) = crossbeam_channel::unbounded();
             let (ui, ui_rx) = crossbeam_channel::unbounded();
@@ -641,7 +661,7 @@ mod tests {
     /// Turning the host off while it waits ends it at once.
     #[test]
     fn a_waiting_host_stops_promptly() {
-        let port = 18_710;
+        let port = free_port();
         let _blocker = TcpListener::bind(("127.0.0.1", port)).unwrap();
         let (ion, _ion_rx) = crossbeam_channel::unbounded();
         let (ui, _ui_rx) = crossbeam_channel::unbounded();
@@ -657,7 +677,7 @@ mod tests {
     /// at once, without waiting.
     #[test]
     fn a_port_in_time_wait_reopens_at_once() {
-        let port = 18_720;
+        let port = free_port();
         let (ion, _ion_rx) = crossbeam_channel::unbounded();
         let (ui, ui_rx) = crossbeam_channel::unbounded();
         let host = spawn(port, ion.clone(), ui.clone()).unwrap();
