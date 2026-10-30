@@ -403,6 +403,9 @@ pub struct Station {
     run_from: Option<f64>,
     run_bytes: u64,
     run_blocks: u32,
+    /// Since when data bursts have sent only what was in flight, so the
+    /// queue can stream.
+    drain_since: Option<f64>,
     tone_count: u32,
     last_tone: Option<(bool, crate::link::stream::Msg)>,
     // Sending side.
@@ -552,6 +555,7 @@ impl Station {
             run_from: None,
             run_bytes: 0,
             run_blocks: 0,
+            drain_since: None,
             tone_count: 0,
             last_tone: None,
             out: VecDeque::new(),
@@ -1245,6 +1249,7 @@ impl Station {
         self.run_from = None;
         self.run_bytes = 0;
         self.run_blocks = 0;
+        self.drain_since = None;
         self.reply_by = None;
         self.inflight.clear();
         self.next_offset = 0;

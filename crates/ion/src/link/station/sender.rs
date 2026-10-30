@@ -314,8 +314,20 @@ impl Station {
             .collect();
         let resent = pieces.len();
         let mut in_flight: usize = self.inflight.values().map(Vec::len).sum();
-        // While the queue waits for a stream, only what is in flight goes.
-        let draining = self.stream_wanted(self.last_heard.max(self.last_tx_end));
+        // While the queue waits for a stream, only what is in flight goes,
+        // for a while: frames that keep failing would hold the link back.
+        let now = self.last_heard.max(self.last_tx_end);
+        let mut draining = self.stream_wanted(now);
+        if draining {
+            let since = *self.drain_since.get_or_insert(now);
+            if now - since > crate::link::stream::DRAIN_S {
+                self.stream_hold_until = now + crate::link::stream::DRAIN_HOLD_S;
+                self.drain_since = None;
+                draining = false;
+            }
+        } else {
+            self.drain_since = None;
+        }
         while pieces.len() < room && !self.out.is_empty() && in_flight < WINDOW_BYTES && !draining {
             let n = self.out.len().min(max_payload);
             let chunk: Vec<u8> = self.out.drain(..n).collect();

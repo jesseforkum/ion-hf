@@ -48,6 +48,10 @@ pub const REGION_BPS: f64 = 1850.0 / 60.0;
 /// gear-off one 82–374 s into the 0 dB sessions, 191–551 s into the −6 dB
 /// ones; 450 s holds a margin over most of them.
 pub const BREAK_EVEN_S: f64 = 450.0;
+/// Data bursts send only what is in flight (so the queue can stream) for
+/// at most this long, seconds; then the stream waits [`DRAIN_HOLD_S`].
+pub const DRAIN_S: f64 = 40.0;
+pub const DRAIN_HOLD_S: f64 = 300.0;
 /// The first block of a run: about this long at the link's ARQ goodput (the
 /// stream should do at least as well), so it completes within a couple of
 /// minutes wherever the stream settles; seconds.
