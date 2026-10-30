@@ -211,7 +211,7 @@ impl Station {
         self.caps & caps::STREAM != 0
             && self.role == Role::Sender
             && self.state == State::Connected
-            && self.out.len() >= stream::MIN_BYTES
+            && self.stream_pays(now)
             && now >= self.stream_hold_until
             && !self.peer_wants_turn
             && !self.peer_wants_disc
@@ -219,6 +219,22 @@ impl Station {
             && self.cfg.pin_level.is_none()
             && self.aim_db.is_some_and(|a| a < stream::BELOW_DB)
             && !self.id_near(now)
+    }
+
+    /// ARQ's goodput so far on this link, bytes a second, once it has sent
+    /// data for [`stream::MEASURE_S`].
+    pub(super) fn arq_bps(&self, now: f64) -> Option<f64> {
+        let t = self.arq_time + self.arq_from.map_or(0.0, |f| (now - f).max(0.0));
+        (t >= stream::MEASURE_S).then(|| self.arq_bytes as f64 / t)
+    }
+
+    /// The stream pays here: ARQ is slow (below [`stream::REGION_BPS`]),
+    /// and what is queued would take it longer than the break-even
+    /// ([`stream::BREAK_EVEN_S`]).
+    fn stream_pays(&self, now: f64) -> bool {
+        let Some(arq) = self.arq_bps(now) else { return false };
+        let left = self.out.len() + self.inflight.values().map(Vec::len).sum::<usize>();
+        arq < stream::REGION_BPS && left as f64 > arq.max(1.0) * stream::BREAK_EVEN_S
     }
 
     /// Opens a block (or reopens one after an ID): the Start, awaiting Go.
@@ -243,7 +259,20 @@ impl Station {
             } else {
                 stream::BLOCK_SHORT_S
             };
-            let n = stream::block_bytes(self.out.len(), opt, target);
+            let mut n = stream::block_bytes(self.out.len(), opt, target);
+            // The first block of a run: small enough to complete in a
+            // couple of minutes wherever the stream settles.
+            if self.run_from.is_none() {
+                let arq = self.arq_bps(now).unwrap_or(0.0);
+                let first = (arq * stream::FIRST_BLOCK_S) as usize;
+                n = n.min(first.max(stream::BLOCK_MIN)).min(self.out.len());
+                if let Some(f) = self.arq_from.take() {
+                    self.arq_time += now - f;
+                }
+                self.run_from = Some(now);
+                self.run_bytes = 0;
+                self.run_blocks = 0;
+            }
             let block: Vec<u8> = self.out.drain(..n).collect();
             let offset = self.next_offset;
             self.next_offset = self.next_offset.wrapping_add(n as u32);
@@ -288,6 +317,7 @@ impl Station {
     /// The block, and one unconfirmed before it, go back to the ARQ queue
     /// in front, in order.
     fn stream_requeue(&mut self) {
+        self.run_from = None;
         for t in [self.stream_tx.take(), self.stream_prev.take()].into_iter().flatten() {
             for &b in t.block.iter().rev() {
                 self.out.push_front(b);
@@ -307,9 +337,22 @@ impl Station {
     /// DONE heard: the next block at once, if the stream is still wanted
     /// (its Go confirms this one); else End.
     fn stream_next(&mut self, now: f64) -> Outgoing {
+        if let Some(t) = self.stream_tx.as_ref() {
+            self.run_bytes += t.block.len() as u64;
+            self.run_blocks += 1;
+        }
         // A block that ended at QPSK 1/4 or faster: the link's own HARQ
         // does as well or better there, so back to it for a while.
         if self.stream_tx.as_ref().is_some_and(|t| t.opt >= stream::HIGH_OPT) {
+            self.stream_hold_until = now + HOLD_S;
+            return self.stream_end(EndWhy::Done, now);
+        }
+        // From the second block on: a run slower than ARQ was goes back to
+        // ARQ (the first block carries the run's start-up).
+        let run = self
+            .run_from
+            .map_or(0.0, |f| self.run_bytes as f64 / (now - f).max(1.0));
+        if self.run_blocks >= 2 && self.arq_bps(now).is_some_and(|arq| run < arq) {
             self.stream_hold_until = now + HOLD_S;
             return self.stream_end(EndWhy::Done, now);
         }
@@ -562,6 +605,9 @@ impl Station {
                     TxPhase::Ending(w) => w,
                     _ => EndWhy::GiveUp,
                 };
+                if why != EndWhy::Id {
+                    self.run_from = None;
+                }
                 if got {
                     let t = self.stream_tx.take().unwrap();
                     self.stream_acked(&t);

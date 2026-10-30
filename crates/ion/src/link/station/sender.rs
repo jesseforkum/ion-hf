@@ -180,6 +180,7 @@ impl Station {
             if got {
                 if let Some(p) = self.inflight.remove(&s.off) {
                     self.stats.bytes_acked += p.len() as u64;
+                    self.arq_bytes += p.len() as u64;
                 }
             } else if keep && s.held < harq::H_MAX && self.inflight.contains_key(&s.off) {
                 self.at_peer.push((s.off, s.held));

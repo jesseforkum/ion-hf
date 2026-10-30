@@ -393,6 +393,16 @@ pub struct Station {
     stream_hold_until: f64,
     /// The last block's pieces needed over pieces sent.
     stream_eff: f32,
+    /// ARQ goodput yardstick: data bytes ARQ got acknowledged, the seconds
+    /// it spent sending data, and when its current stretch began.
+    arq_bytes: u64,
+    arq_time: f64,
+    arq_from: Option<f64>,
+    /// The current run of stream blocks: when its first Start went, the
+    /// bytes of its blocks that heard DONE, and how many.
+    run_from: Option<f64>,
+    run_bytes: u64,
+    run_blocks: u32,
     tone_count: u32,
     last_tone: Option<(bool, crate::link::stream::Msg)>,
     // Sending side.
@@ -536,6 +546,12 @@ impl Station {
             stream_ids: seed,
             stream_hold_until: 0.0,
             stream_eff: 0.0,
+            arq_bytes: 0,
+            arq_time: 0.0,
+            arq_from: None,
+            run_from: None,
+            run_bytes: 0,
+            run_blocks: 0,
             tone_count: 0,
             last_tone: None,
             out: VecDeque::new(),
@@ -969,6 +985,7 @@ impl Station {
             let b = self.tiny(Tiny::Idle, wave);
             return Some(self.send_awaiting(b, Awaiting::Ack));
         }
+        self.arq_from.get_or_insert(now);
         let b = self.data_burst();
         Some(self.note_tx(b))
     }
@@ -1222,6 +1239,12 @@ impl Station {
         self.stream_rx = None;
         self.stream_hold_until = 0.0;
         self.stream_eff = 0.0;
+        self.arq_bytes = 0;
+        self.arq_time = 0.0;
+        self.arq_from = None;
+        self.run_from = None;
+        self.run_bytes = 0;
+        self.run_blocks = 0;
         self.reply_by = None;
         self.inflight.clear();
         self.next_offset = 0;

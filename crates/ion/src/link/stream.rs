@@ -34,8 +34,24 @@ pub const TONES: usize = 60;
 pub const HIGH_OPT: usize = 7;
 const _: () = assert!(matches!(OPTS[HIGH_OPT].fam, Fam::Ofdm) && OPTS[HIGH_OPT].n == fec::K * 4);
 
-/// Bytes queued (with nothing in flight) from which a transfer streams.
-pub const MIN_BYTES: usize = 4096;
+/// The link must have sent data on ARQ this long before it can judge
+/// whether to stream: its goodput is the yardstick (`stream-gear.md`,
+/// Decision).
+pub const MEASURE_S: f64 = 75.0;
+/// The stream is used only while the link's own ARQ goodput is below this,
+/// bytes a second (1850 B/min): measured on IONOS SIM, ARQ ran at most
+/// 1700 B/min at 0 dB, where the stream wins 1.2–1.9×, and at least 1976
+/// B/min at +3 dB, where it does not.
+pub const REGION_BPS: f64 = 1850.0 / 60.0;
+/// Break-even: the stream pays only for what would take ARQ longer than
+/// this at its measured goodput, seconds. The gear-on link overtook the
+/// gear-off one 82–374 s into the 0 dB sessions, 191–551 s into the −6 dB
+/// ones; 450 s holds a margin over most of them.
+pub const BREAK_EVEN_S: f64 = 450.0;
+/// The first block of a run: about this long at the link's ARQ goodput (the
+/// stream should do at least as well), so it completes within a couple of
+/// minutes wherever the stream settles; seconds.
+pub const FIRST_BLOCK_S: f64 = 120.0;
 /// The stream is used while the SNR the gear aims by is below this (dB
 /// in 2.4 kHz, as the ACKs report it; about +4 dB IONOS S:N). From +3 dB
 /// up the stream draws with the link's HARQ at best (`rateless-stream.md`,
@@ -61,7 +77,7 @@ pub const BLOCK_LONG_S: f32 = 150.0;
 /// A block whose K pieces took at most this many times K sent counts as
 /// clean.
 pub const CLEAN_EFF: f32 = 0.95;
-pub const BLOCK_MIN: usize = 2048;
+pub const BLOCK_MIN: usize = 1024;
 pub const BLOCK_MAX: usize = 16384;
 /// The sender gives a block up after sending this many times its pieces.
 pub const GIVE_UP_X: usize = 4;

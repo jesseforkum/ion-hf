@@ -54,8 +54,8 @@ fn periods(sim: &Sim) -> usize {
 
 #[test]
 fn a_big_transfer_streams_and_arrives_whole() {
-    let data = payload(20_000, 1);
-    let mut sim = model(0.0, true, true, 3);
+    let data = payload(30_000, 1);
+    let mut sim = model(-6.0, true, true, 3);
     sim.stations[0].send(&data);
     let done = sim.run_until(3_600.0, |s| s.stations[1].stats().bytes_received >= data.len() as u64);
     assert!(
@@ -136,8 +136,8 @@ fn the_conn_req_without_the_stream_is_alpha5s() {
 
 #[test]
 fn the_receiver_with_data_gets_the_turn_after_the_block() {
-    let data = payload(12_000, 4);
-    let mut sim = model(0.0, true, true, 8);
+    let data = payload(30_000, 4);
+    let mut sim = model(-6.0, true, true, 8);
     sim.stations[0].send(&data);
     sim.stations[1].send(b"reply from the other side\n");
     let done = sim.run_until(3_600.0, |s| {
@@ -158,7 +158,7 @@ fn the_receiver_with_data_gets_the_turn_after_the_block() {
 #[test]
 fn a_cw_id_ends_the_block_and_it_goes_on_after() {
     let data = payload(16_000, 9);
-    let mut sim = model(-3.0, true, true, 12);
+    let mut sim = model(-6.0, true, true, 12);
     for s in &mut sim.stations {
         s.set_ids(120.0, 3.0);
     }
@@ -198,9 +198,9 @@ fn ionos(mode: Mode, snr_db: f32, n: usize, seed: u64) -> Sim {
 
 #[test]
 fn on_ionos_at_0_db_the_stream_delivers() {
-    let n = 6_000;
+    let n = 20_000;
     let mut sim = ionos(Mode::Wgn, 0.0, n, 11);
-    let done = sim.run_until(1_200.0, |s| s.stations[1].stats().bytes_received >= n as u64);
+    let done = sim.run_until(1_500.0, |s| s.stations[1].stats().bytes_received >= n as u64);
     if std::env::var("ION_DUMP").is_ok() {
         dump(&sim);
         for p in &sim.stations[1].stats().stream_log {
@@ -233,7 +233,7 @@ fn two_nodes_stream_over_continuous_audio() {
     use ion::link::Node;
     use ion_dsp::dsp::{NoiseGen, noise_sigma};
     const CHUNK: usize = 960;
-    let n = 9_000;
+    let n = 20_000;
     let data = payload(n, 21);
     let mut nodes = [
         Node::new(Node::config("N0JLF"), 0.2),
@@ -248,7 +248,7 @@ fn two_nodes_stream_over_continuous_audio() {
     let sigma = noise_sigma(ion_dsp::TX_LEVEL * ion_dsp::TX_LEVEL / 2.0, 0.0, 2400.0, 48_000.0);
     let mut t = 0.0;
     let mut tones = 0;
-    while t < 1_500.0 && nodes[1].station().stats().bytes_received < n as u64 {
+    while t < 2_400.0 && nodes[1].station().stats().bytes_received < n as u64 {
         t += CHUNK as f64 / 48_000.0;
         let mut played = [vec![0.0f32; CHUNK], vec![0.0f32; CHUNK]];
         for (i, node) in nodes.iter_mut().enumerate() {
@@ -292,9 +292,9 @@ fn two_nodes_stream_over_continuous_audio() {
 
 #[test]
 fn after_the_turn_the_other_side_streams_too() {
-    let data = payload(10_000, 31);
-    let back = payload(10_000, 32);
-    let mut sim = model(0.0, true, true, 14);
+    let data = payload(20_000, 31);
+    let back = payload(20_000, 32);
+    let mut sim = model(-6.0, true, true, 14);
     sim.stations[0].send(&data);
     let done = sim.run_until(3_600.0, |s| s.stations[1].stats().bytes_received >= data.len() as u64);
     assert!(done);
@@ -421,4 +421,69 @@ fn stream_trace() {
     eprintln!("TRACE   options (periods ok/tried frames): {by_opt:?}");
     eprintln!("TRACE   aim every 30 s: {}", aims.join(" "));
     eprintln!("TRACE   acquisition: {acq:?}");
+}
+
+/// The mixed-size table: for `ION_MODE`/`ION_SNR` (seed 900 + S:N), each
+/// size in `ION_SIZES` (default 2000,10000,200000) queued alone, with the
+/// gear and without, timed until the receiving side holds it all, capped at
+/// `ION_SECS` (900); past the cap the time is projected from the rate so
+/// far (marked ~). The times for smaller sizes inside the largest run
+/// (`ION_ALSO`, default 50000) come out of that run, as the lab's did.
+#[test]
+#[ignore]
+fn stream_sizes() {
+    let env = |k: &str| std::env::var(k).ok();
+    let mode = env("ION_MODE")
+        .and_then(|m| Mode::ALL.iter().copied().find(|x| x.name().eq_ignore_ascii_case(&m)))
+        .unwrap_or(Mode::Wgn);
+    let snr: f32 = env("ION_SNR").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let cap: f64 = env("ION_SECS").and_then(|v| v.parse().ok()).unwrap_or(900.0);
+    let list = |k: &str, d: &str| -> Vec<usize> {
+        env(k)
+            .unwrap_or(d.into())
+            .split(',')
+            .filter(|v| !v.is_empty())
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let sizes = list("ION_SIZES", "2000,10000,200000");
+    let also = list("ION_ALSO", "50000");
+    let seed = (900 + snr as i64) as u64;
+    for &n in &sizes {
+        for on in [true, false] {
+            // SAFETY: set before the sim reads it, single-threaded test.
+            unsafe { std::env::set_var("ION_STREAM", if on { "1" } else { "0" }) };
+            let mut sim = ionos(mode, snr, n, seed);
+            let mut at: Vec<Option<f64>> = vec![None; also.len()];
+            while sim.t < cap && sim.stations[1].stats().bytes_received < n as u64 {
+                let t = sim.t + 1.0;
+                sim.run_until(t, |_| false);
+                let got = sim.stations[1].stats().bytes_received as usize;
+                for (a, &m) in at.iter_mut().zip(&also) {
+                    if a.is_none() && m < n && got >= m {
+                        *a = Some(sim.t);
+                    }
+                }
+            }
+            let held = sim.stations[1].stats().bytes_received as f64;
+            let time = |size: usize, t: Option<f64>| match t {
+                Some(t) => format!("{t:.0}"),
+                None if held > 0.0 => format!("~{:.0}", cap * size as f64 / held.min(size as f64)),
+                None => "inf".into(),
+            };
+            let done = (held >= n as f64).then_some(sim.t);
+            let arm = if on { "on" } else { "off" };
+            eprintln!(
+                "SIZE {} {snr:+} {n} {arm} {} periods {}",
+                mode.name(),
+                time(n, done),
+                sim.log.iter().filter(|e| e.code == STREAM).count()
+            );
+            for (a, &m) in at.iter().zip(&also) {
+                if m < n {
+                    eprintln!("SIZE {} {snr:+} {m} {arm} {} (in {n})", mode.name(), time(m, *a));
+                }
+            }
+        }
+    }
 }
