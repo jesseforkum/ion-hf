@@ -1113,6 +1113,68 @@ mod tests {
     }
 
     #[test]
+    fn a_tone_answer_is_no_louder_than_mfsk_and_leaves_the_ofdm_as_it_was() {
+        let peak = |a: &[f32]| a.iter().fold(0f32, |m, x| m.max(x.abs()));
+        let mfsk = phy_mfsk::modulate(CUE_MODE, 0x1234, 0x5678, &[], CENTER_HZ);
+        let plain = transmit_with(&data_burst(false), 1.0);
+        for m in stream::Msg::ALL {
+            let b = Outgoing {
+                wave: crate::level::FLOOR_WAVE,
+                code: stream::TONES,
+                user: super::super::station::user_bits(CONTROL, 0x5A, 0),
+                extra: m.code() | 7 << 8,
+                frames: Vec::new(),
+                spans: Vec::new(),
+                cue: false,
+            };
+            // At the most OFDM gain there is, and pre-corrected for an
+            // offset: the tones do not follow the OFDM gain.
+            for (gain, off) in [(1.0, 0.0), (ofdm_gain(OFDM_AIR_GAIN_MAX_DB), 0.0), (1.0, 15.0)] {
+                let mut t = transmit_with(&b, gain);
+                if off != 0.0 {
+                    t = transmit_tones(&b, off);
+                }
+                assert_eq!(t.len(), stream::tones::answer_samples());
+                assert!(peak(&t) <= peak(&mfsk) * 1.0001, "{m:?}");
+                assert!(peak(&t) <= ion_dsp::TX_LEVEL * 1.0001, "{m:?}");
+            }
+        }
+        // A stream period's OFDM is the level it borrows, gain and all.
+        let o = stream::opt_index("QPSK 1/4");
+        let period = Outgoing {
+            wave: Wave::Ofdm(Guard::Normal),
+            code: stream::STREAM,
+            user: stream::period_user(o, 0x5A),
+            extra: o as u16 | 7 << 8,
+            frames: vec![vec![0x6B; fec::K / 8]; stream::codewords(o)],
+            spans: vec![(0, stream::OPTS[o].n); stream::codewords(o)],
+            cue: false,
+        };
+        let g = ofdm_gain(OFDM_AIR_GAIN_DB);
+        let base = transmit_with(&period, 1.0);
+        let on_air = transmit_with(&period, g);
+        assert!(
+            on_air
+                .iter()
+                .zip(&base)
+                .all(|(a, b)| (a - (b * g).clamp(-1.0, 1.0)).abs() < 1e-6)
+        );
+        assert!(peak(&base) <= peak(&plain) * 1.05);
+        // An MFSK period is a steady carrier, as every MFSK burst.
+        let m = stream::opt_index("R1 1/2");
+        let mfsk_period = Outgoing {
+            wave: Wave::Mfsk(phy_mfsk::MfskMode::R1),
+            code: stream::STREAM,
+            user: stream::period_user(m, 0x5A),
+            extra: m as u16 | 7 << 8,
+            frames: vec![vec![0x11; fec::K_SHORT / 8]; stream::mfsk_frames(m)],
+            spans: Vec::new(),
+            cue: false,
+        };
+        assert!(peak(&transmit_with(&mfsk_period, ofdm_gain(OFDM_AIR_GAIN_MAX_DB))) <= ion_dsp::TX_LEVEL * 1.0001);
+    }
+
+    #[test]
     fn a_cued_burst_is_heard_with_its_extra() {
         let b = data_burst(true);
         let mut audio = vec![0.0; 4_800];

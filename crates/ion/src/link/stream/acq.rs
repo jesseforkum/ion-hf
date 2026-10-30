@@ -296,16 +296,6 @@ impl Acq {
                     deadline: (p.center + p.half + len as f64 + 0.3 * FS).max(0.0) as u64,
                 });
                 self.stats.half_ms = (p.half / 48.0) as f32;
-                if std::env::var("ION_ACQ_TRACE").is_ok() {
-                    eprintln!(
-                        "ACQ k {} opts {:?} center {:.3} half {:.1} ms clock {:.3}",
-                        self.k,
-                        l.opts,
-                        p.center / FS,
-                        p.half / 48.0,
-                        self.clock as f64 / FS
-                    );
-                }
             }
             let c = self.cur.as_ref().unwrap();
             if !c.searched && c.ofdm.is_some() {
@@ -321,9 +311,6 @@ impl Acq {
                 let o = l.opts[0];
                 self.stats.periods += 1;
                 self.stats.missed += 1;
-                if std::env::var("ION_ACQ_TRACE").is_ok() {
-                    eprintln!("ACQ missed k {} clock {:.3}", self.k, self.clock as f64 / FS);
-                }
                 out.push(self.incoming(&l, o, None, f32::NAN));
                 let _ = c;
                 self.k += 1;
@@ -345,11 +332,7 @@ impl Acq {
         let head = self.head(user, nsym);
         let lo = (center - half - PRE as f64).max(0.0) as u64;
         let (a0, audio) = self.since(lo);
-        let f0 = locate(&audio, center - a0 as f64, half, f_hz, &head);
-        if std::env::var("ION_ACQ_TRACE").is_ok() {
-            eprintln!("ACQ search {:?} at {:?}", f0, f0.map(|f| (a0 as f64 + f.at) / FS));
-        }
-        let found = f0.filter(|f| f.rho >= mark(f.lags));
+        let found = locate(&audio, center - a0 as f64, half, f_hz, &head).filter(|f| f.rho >= mark(f.lags));
         let (start, at) = match found {
             Some(f) => {
                 let at = a0 as f64 + f.at;
@@ -425,14 +408,6 @@ impl Acq {
     /// takes it, or gives the burst back.
     pub fn take_mfsk(&mut self, b: &phy_mfsk::MfskBurst, start: u64) -> Option<Incoming> {
         let l = self.listen.clone()?;
-        if std::env::var("ION_ACQ_TRACE").is_ok() {
-            eprintln!(
-                "ACQ mfsk burst user {:x} extra {:x} start {:.3}",
-                b.user,
-                b.extra,
-                start as f64 / FS
-            );
-        }
         if !super::is_period_user(b.user, l.session) || (b.extra >> 8) as u8 != l.id {
             return None;
         }
