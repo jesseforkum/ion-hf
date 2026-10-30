@@ -56,6 +56,8 @@ pub(super) struct StreamTx {
     pub resume_at: f64,
     /// DONE heard: the End goes after our turnaround.
     done_heard: bool,
+    /// When its Start first went.
+    started: f64,
 }
 
 /// The receiving side of a block.
@@ -253,7 +255,10 @@ impl Station {
             if !self.stream_wanted(now) || !self.inflight.is_empty() || self.stream_tx.is_some() {
                 return None;
             }
-            let opt = opt.unwrap_or_else(|| stream::start_pick(self.aim_db.unwrap_or(0.0)));
+            let opt = opt.unwrap_or_else(|| {
+                let pick = stream::start_pick(self.aim_db.unwrap_or(0.0));
+                self.arq_bps(now).map_or(pick, |a| pick.min(stream::start_cap(a)))
+            });
             let target = if self.stream_eff >= stream::CLEAN_EFF {
                 stream::BLOCK_LONG_S
             } else {
@@ -292,6 +297,7 @@ impl Station {
                 pause_from: None,
                 resume_at: 0.0,
                 done_heard: false,
+                started: now,
             });
         }
         let wave = if self.stream_prev.is_some() {
@@ -347,12 +353,13 @@ impl Station {
             self.stream_hold_until = now + HOLD_S;
             return self.stream_end(EndWhy::Done, now);
         }
-        // From the second block on: a run slower than ARQ was goes back to
-        // ARQ (the first block carries the run's start-up).
-        let run = self
-            .run_from
-            .map_or(0.0, |f| self.run_bytes as f64 / (now - f).max(1.0));
-        if self.run_blocks >= 2 && self.arq_bps(now).is_some_and(|arq| run < arq) {
+        // From the second block on: a block slower than ARQ was goes back to
+        // ARQ (the first carries the run's start-up and climb).
+        let block = self
+            .stream_tx
+            .as_ref()
+            .map_or(0.0, |t| t.block.len() as f64 / (now - t.started).max(1.0));
+        if self.run_blocks >= 2 && self.arq_bps(now).is_some_and(|arq| block < arq) {
             self.stream_hold_until = now + HOLD_S;
             return self.stream_end(EndWhy::Done, now);
         }

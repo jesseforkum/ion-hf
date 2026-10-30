@@ -418,6 +418,17 @@ pub fn model_threshold_db(o: usize) -> f32 {
 // -- block sizing and the start ------------------------------------------------
 
 /// Bytes of the next block for `queued` bytes at start option `o`.
+/// The fastest option a stream starts in on a link whose ARQ moves `arq`
+/// bytes a second: one whose nominal rate is at most four times that (the
+/// stream gains 1.2–1.9× where it runs; a start far above where it
+/// settles costs periods before SLOWER).
+pub fn start_cap(arq: f64) -> usize {
+    (0..OPTS.len())
+        .rev()
+        .find(|&o| (nominal_bps(o) as f64) <= 4.0 * arq)
+        .unwrap_or(0)
+}
+
 pub fn block_bytes(queued: usize, o: usize, target_s: f32) -> usize {
     let target = (nominal_bps(o) * target_s) as usize;
     queued.min(target.clamp(BLOCK_MIN, BLOCK_MAX))
@@ -459,9 +470,12 @@ fn i_half(o: usize) -> f32 {
     }
 }
 
-/// SNR (dB in 2.4 kHz, the receiver's estimate on MFSK) a period must show
-/// before the receiver asks to go up from MFSK into QPSK.
-const UP_SNR_QPSK: f32 = -1.0;
+/// SNR (dB in 2.4 kHz, the receiver's estimate on MFSK) the last two
+/// periods must both show before the receiver asks to go up from MFSK into
+/// QPSK: one period's estimate swings by several dB on fading, and each
+/// failed probe costs a period (the lab's −1 dB on one period probed
+/// every few periods at −3 dB).
+const UP_SNR_QPSK: f32 = 0.0;
 
 /// One period as the receiver saw it.
 #[derive(Clone, Debug, Default)]
@@ -556,7 +570,7 @@ impl Rule {
                 }
                 if let Some(h) = hi
                     && self.clean_run >= 2 << self.fails[h]
-                    && (!ofdm(h) || st.snr_db >= UP_SNR_QPSK)
+                    && (!ofdm(h) || self.hist.iter().take(2).all(|s| s.snr_db >= UP_SNR_QPSK))
                 {
                     return Some(Msg::Faster);
                 }
