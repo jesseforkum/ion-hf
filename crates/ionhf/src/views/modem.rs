@@ -68,8 +68,10 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
         Lamp::new("HOST", host),
         Lamp::new("RIG", rig),
     ];
+    let stream = st.is_some_and(|s| s.stream.on);
     let row2 = [
         Lamp::on("ARQ", arq, theme::OK),
+        Lamp::on("STREAM", stream, theme::OK),
         Lamp::new("BCAST", bcast),
         Lamp::on("HARQ", now < app.lit_until.harq, theme::WARN),
         Lamp::on("RETRY", now < app.lit_until.retry, theme::WARN),
@@ -82,7 +84,17 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
         let c = if sending { theme::US } else { theme::PEER };
         Lamp::on(f, family == Some(f), c)
     });
-    if panel::block(ui, &[&row1, &row2, &row3], width, s, Some(2)) == Some("WARN") {
+    let tone = |legend, i: usize| {
+        let (until, ours) = app.lit_until.tone[i];
+        Lamp::on(legend, now < until, if ours { theme::US } else { theme::PEER })
+    };
+    let row4 = [
+        Lamp::on("CUE", now < app.lit_until.cue, theme::WARN),
+        tone("DONE", 0),
+        tone("SLOWER", 1),
+        tone("FASTER", 2),
+    ];
+    if panel::block(ui, &[&row1, &row2, &row3, &row4], width, s, Some(2)) == Some("WARN") {
         app.logbook.show_errors();
         app.log_view = true;
     }
@@ -164,6 +176,20 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
         &[("S/N", big(snr)), ("Rate", big(rate)), ("Data", big(data))],
         width,
     );
+    // The stream: its inner option, the period, and (receiving) the
+    // pieces held of those the block needs.
+    if let Some(x) = link.map(|l| &l.stream).filter(|x| x.on) {
+        let color = if x.sending { theme::US } else { theme::PEER };
+        let opt = x.opt.map_or("—", |o| ion::link::stream::OPTS[o].name);
+        let mut line = vec![
+            ("Stream", big(opt.to_string()).color(color)),
+            ("Period", big(x.period.to_string())),
+        ];
+        if !x.sending {
+            line.push(("Have", big(format!("{}/{}", x.have, x.need))));
+        }
+        pairs(ui, &line, width);
+    }
 
     let scale = s;
     if let Some(s) = st {

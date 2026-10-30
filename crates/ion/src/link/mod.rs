@@ -16,4 +16,4 @@ pub mod station;
 pub mod stream;
 
 pub use node::Node;
-pub use station::{Air, Config, Expected, Gear, Incoming, Outgoing, Role, State, Station};
+pub use station::{Air, Config, Expected, Gear, Incoming, Outgoing, Role, State, Station, StreamStatus};

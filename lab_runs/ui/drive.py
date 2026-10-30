@@ -1,7 +1,7 @@
 """Drives `ionhf --loopback` through its host ports for screenshots: an
 ARQ link to LOOP with text flowing both ways, or a broadcast group.
 
-python drive.py arq|bcast [--port 8400] [--secs 120]
+python drive.py arq|file|bcast [--port 8400] [--secs 120]
 """
 import socket, sys, time, threading
 
@@ -50,6 +50,17 @@ if mode == "arq":
         data.sendall(text.encode())
         n += 20
         time.sleep(2.0)
+elif mode == "file":
+    # One big transfer, no line ends (LOOP echoes whole lines only): the
+    # stream gear's case.
+    data = connect(port + 1)
+    threading.Thread(target=lambda: [data.recv(65536) for _ in iter(int, 1)], daemon=True).start()
+    say(f"CONNECT {me} LOOP")
+    # One line: LOOP sends it back whole, so the stream runs both ways.
+    text = "".join(f"block {i:05d} the quick brown fox jumps over the lazy dog 0123456789 " for i in range(150))
+    data.sendall((text + chr(10)).encode())
+    while time.time() < end:
+        time.sleep(1.0)
 elif mode == "bcast":
     say(f"BCAST OPEN NET40 FROM {me}")
     time.sleep(1.0)

@@ -31,6 +31,8 @@ pub enum IonIn {
     Audio(Vec<f32>),
     /// Our burst has finished playing (or was aborted).
     TxDone,
+    /// Received samples not passed on (we were keyed, or just after).
+    Gap(usize),
 }
 
 /// From the UI.
@@ -115,6 +117,10 @@ pub struct IonStatus {
     pub heard: Vec<(String, f32)>,
     /// Our CW ID is on the air.
     pub cw_id: bool,
+    /// The stream gear (`ion::link::stream`).
+    pub stream: ion::link::StreamStatus,
+    /// Cues we sent and heard so far.
+    pub cues: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +198,8 @@ struct Worker {
     bcast_id_at: f64,
     /// Decode plots wanted (kept across new nodes).
     plot: bool,
+    /// The stream was on at the last look (for the log).
+    streaming: bool,
     /// Broadcast bursts sent since the last status, for the log.
     bcast_sent: Vec<ion::link::node::BurstNote>,
 }
@@ -224,6 +232,7 @@ impl Worker {
             bcast_on_air: false,
             bcast_id_at: f64::NEG_INFINITY,
             plot: false,
+            streaming: false,
             bcast_sent: Vec::new(),
         }
     }
@@ -429,6 +438,24 @@ impl Worker {
         }
     }
 
+    /// A log line when the stream gear starts or stops.
+    fn stream_note(&mut self) {
+        let s = self.node.station().stream_status();
+        if s.on == self.streaming {
+            return;
+        }
+        self.streaming = s.on;
+        let opt = s.opt.map_or("", |o| ion::link::stream::OPTS[o].name);
+        self.note(if s.on {
+            format!(
+                "Ion: stream on, {} {opt}",
+                if s.sending { "sending" } else { "receiving" }
+            )
+        } else {
+            format!("Ion: stream off after {} periods", s.period)
+        });
+    }
+
     fn status(&mut self) -> IonStatus {
         let mut bursts = self.node.take_journal();
         bursts.append(&mut self.bcast_sent);
@@ -464,6 +491,8 @@ impl Worker {
             groups: self.bcast.groups(),
             heard: self.bcast.heard(self.now()),
             cw_id: self.id_on_air,
+            stream: s.stream_status(),
+            cues: st.cued_bursts as u64 + self.node.cues_heard(),
         }
     }
 
@@ -503,6 +532,7 @@ impl Worker {
                 match m {
                     IonIn::Audio(samples) => self.node.push_audio(&samples, now),
                     IonIn::TxDone => self.node.tx_done(now),
+                    IonIn::Gap(n) => self.node.push_gap(n),
                 }
             }
             let now = self.now();
@@ -580,6 +610,7 @@ impl Worker {
                     None => self.event(IonEvent::Received(got)),
                 }
             }
+            self.stream_note();
             let state = self.node.station().state();
             if state != self.last_state {
                 match state {

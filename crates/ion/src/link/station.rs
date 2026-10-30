@@ -764,6 +764,7 @@ impl Station {
         self.out.len()
             + self.inflight.values().map(Vec::len).sum::<usize>()
             + self.unsent.iter().map(Vec::len).sum::<usize>()
+            + self.stream_tx.as_ref().map_or(0, |t| t.block.len())
     }
 
     /// End the link now: drop what is still queued and say goodbye. A peer
@@ -1052,9 +1053,6 @@ impl Station {
         if self.answering && !frames.iter().flatten().any(|f| f.kind == Kind::ConnReq) {
             self.answering = false;
         }
-        if self.stream_rx_routed(inc, &frames, now) {
-            return;
-        }
 
         if self.state == State::Disconnecting {
             match tiny {
@@ -1096,6 +1094,9 @@ impl Station {
             self.last_progress = now;
         }
 
+        if self.stream_rx_routed(inc, &frames, now) {
+            return;
+        }
         match self.role {
             Role::Sender => self.sender_rx(inc, tiny, &frames, now),
             Role::Receiver => self.receiver_rx(inc, tiny, &frames, now),

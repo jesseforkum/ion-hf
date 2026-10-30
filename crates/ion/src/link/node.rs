@@ -482,6 +482,11 @@ impl Node {
         }
     }
 
+    /// MFSK cues our receivers have heard.
+    pub fn cues_heard(&self) -> u64 {
+        self.rx.cues_heard()
+    }
+
     /// The stream acquisition's counters (receiving side).
     pub fn stream_acq(&self) -> stream::acq::AcqStats {
         self.rx.stream_state().1

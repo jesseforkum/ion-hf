@@ -46,6 +46,8 @@ struct Args {
     /// Save a screenshot to this folder every 15 s; quit after `quit` s.
     shots: Option<String>,
     quit: Option<f64>,
+    /// With `shots`: seconds between screenshots (15).
+    shot_every: Option<f64>,
     /// Loopback only: the simulated channel's SNR, dB.
     loop_snr: Option<f32>,
     /// The link's gear for this run, over the setting.
@@ -70,6 +72,7 @@ fn parse_args() -> Args {
         setup: false,
         shots: None,
         quit: None,
+        shot_every: None,
         loop_snr: None,
         gear: None,
         stream: None,
@@ -87,6 +90,7 @@ fn parse_args() -> Args {
             "--setup" => args.setup = true,
             "--shots" => args.shots = it.next(),
             "--quit" => args.quit = it.next().and_then(|v| v.parse().ok()),
+            "--shot-every" => args.shot_every = it.next().and_then(|v| v.parse().ok()),
             "--loop-snr" => args.loop_snr = it.next().and_then(|v| v.parse().ok()),
             "--gear" => match it.next().as_deref().and_then(config::Gear::parse) {
                 Some(g) => args.gear = Some(g),
@@ -271,6 +275,9 @@ fn main() -> eframe::Result {
             app.shot_set = args.shot_set.zip(args.shot_at);
             app.pixel_size = args.size;
             app.quit_after = args.quit;
+            if let Some(e) = args.shot_every {
+                app.shot_every = e.max(0.5);
+            }
             Ok(Box::new(app))
         }),
     )

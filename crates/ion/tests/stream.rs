@@ -283,3 +283,27 @@ fn two_nodes_stream_over_continuous_audio() {
     assert!(acq.found >= 3 && acq.missed <= acq.periods / 4, "{acq:?}");
     assert!(tones >= 1, "the sender heard no answer");
 }
+
+#[test]
+fn after_the_turn_the_other_side_streams_too() {
+    let data = payload(10_000, 31);
+    let back = payload(10_000, 32);
+    let mut sim = model(0.0, true, true, 14);
+    sim.stations[0].send(&data);
+    let done = sim.run_until(3_600.0, |s| s.stations[1].stats().bytes_received >= data.len() as u64);
+    assert!(done);
+    sim.stations[1].send(&back);
+    let done = sim.run_until(sim.t + 3_600.0, |s| {
+        s.stations[0].stats().bytes_received >= back.len() as u64
+    });
+    assert!(done);
+    assert!(
+        sim.stations[1].stats().stream_blocks >= 1,
+        "{:?}",
+        sim.stations[1].stats().stream_blocks
+    );
+    assert!(
+        sim.log.iter().any(|e| e.from == 1 && e.code == STREAM),
+        "the side that took the turn did not stream"
+    );
+}

@@ -215,14 +215,17 @@ impl Engine {
             return false;
         };
         let (a, b) = chunk.as_slices();
-        if let Some(h) = self.ion.as_ref()
-            && !self.keyed
-            && Instant::now() >= self.quiet_until
-        {
-            let mut v = Vec::with_capacity(a.len() + b.len());
-            v.extend_from_slice(a);
-            v.extend_from_slice(b);
-            let _ = h.send(IonIn::Audio(v));
+        if let Some(h) = self.ion.as_ref() {
+            if !self.keyed && Instant::now() >= self.quiet_until {
+                let mut v = Vec::with_capacity(a.len() + b.len());
+                v.extend_from_slice(a);
+                v.extend_from_slice(b);
+                let _ = h.send(IonIn::Audio(v));
+            } else {
+                // Muted, but counted: the stream's timekeeping runs on the
+                // receive clock.
+                let _ = h.send(IonIn::Gap(a.len() + b.len()));
+            }
         }
         self.spectrum.push(a);
         self.spectrum.push(b);
