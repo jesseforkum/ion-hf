@@ -117,8 +117,14 @@ pub struct IonStatus {
     pub heard: Vec<(String, f32)>,
     /// Our CW ID is on the air.
     pub cw_id: bool,
-    /// The stream gear (`ion::link::stream`).
-    pub stream: ion::link::StreamStatus,
+    /// The stream gear and the cues.
+    pub stream: Box<StreamView>,
+}
+
+/// What the stream and cue lamps need.
+#[derive(Clone, Debug, Default)]
+pub struct StreamView {
+    pub gear: ion::link::StreamStatus,
     /// Cues we sent and heard so far.
     pub cues: u64,
 }
@@ -491,8 +497,10 @@ impl Worker {
             groups: self.bcast.groups(),
             heard: self.bcast.heard(self.now()),
             cw_id: self.id_on_air,
-            stream: s.stream_status(),
-            cues: st.cued_bursts as u64 + self.node.cues_heard(),
+            stream: Box::new(StreamView {
+                gear: s.stream_status(),
+                cues: st.cued_bursts as u64 + self.node.cues_heard(),
+            }),
         }
     }
 

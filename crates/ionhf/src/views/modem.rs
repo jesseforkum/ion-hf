@@ -68,7 +68,7 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
         Lamp::new("HOST", host),
         Lamp::new("RIG", rig),
     ];
-    let stream = st.is_some_and(|s| s.stream.on);
+    let stream = st.is_some_and(|s| s.stream.gear.on);
     let row2 = [
         Lamp::on("ARQ", arq, theme::OK),
         Lamp::on("STREAM", stream, theme::OK),
@@ -178,7 +178,7 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
     );
     // The stream: its inner option, the period, and (receiving) the
     // pieces held of those the block needs.
-    if let Some(x) = link.map(|l| &l.stream).filter(|x| x.on) {
+    if let Some(x) = link.map(|l| &l.stream.gear).filter(|x| x.on) {
         let color = if x.sending { theme::US } else { theme::PEER };
         let opt = x.opt.map_or("—", |o| ion::link::stream::OPTS[o].name);
         let mut line = vec![

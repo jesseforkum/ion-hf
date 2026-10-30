@@ -331,11 +331,9 @@ pub fn decode_frame(ofdm: bool, id: u8, b: &[u8]) -> (Vec<(usize, [u8; code::PIE
             return (out, None);
         }
         let first = u16::from_be_bytes([body[2], body[3]]) as usize;
-        for (i, p) in body[OFDM_HEAD..OFDM_HEAD + OFDM_PIECES * code::PIECE]
-            .chunks_exact(code::PIECE)
-            .enumerate()
-        {
-            out.push((first + i, p.try_into().unwrap()));
+        let (pieces, _) = body[OFDM_HEAD..OFDM_HEAD + OFDM_PIECES * code::PIECE].as_chunks::<{ code::PIECE }>();
+        for (i, p) in pieces.iter().enumerate() {
+            out.push((first + i, *p));
         }
         (out, Some(body[1] as usize).filter(|&o| o < OPTS.len()))
     } else {
@@ -676,16 +674,16 @@ mod tests {
     #[test]
     fn periods_fit_their_slot() {
         let rate = ion_dsp::dsp::AUDIO_RATE as f64;
-        for o in 0..OPTS.len() {
+        for (o, opt) in OPTS.iter().enumerate() {
             let s = burst_samples(o) as f64 / rate;
-            assert!(s <= BURST_S + 1e-9, "{}: {s:.2} s", OPTS[o].name);
-            assert!(s >= 0.6 * BURST_S, "{}: only {s:.2} s", OPTS[o].name);
+            assert!(s <= BURST_S + 1e-9, "{}: {s:.2} s", opt.name);
+            assert!(s >= 0.6 * BURST_S, "{}: only {s:.2} s", opt.name);
             // With a 0.2 s lead, the pause holds a turnaround, a lead, the
             // tones and slack.
             assert!(
                 SLOT_S - 0.2 - s >= 0.3 + 0.2 + 2.0 * tones::TONE_S + 0.3,
                 "{}",
-                OPTS[o].name
+                opt.name
             );
         }
         // Every QPSK option fills the same symbols: one head for them all.
@@ -700,10 +698,10 @@ mod tests {
     #[ignore]
     fn option_table() {
         let rate = ion_dsp::dsp::AUDIO_RATE as f64;
-        for o in 0..OPTS.len() {
+        for (o, opt) in OPTS.iter().enumerate() {
             println!(
                 "| {} | {} | {} | {:.2} s | {:.0} B/min |",
-                OPTS[o].name,
+                opt.name,
                 frames(o),
                 frames(o) * pieces_per_frame(o),
                 burst_samples(o) as f64 / rate,

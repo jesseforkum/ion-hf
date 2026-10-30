@@ -29,8 +29,8 @@ fn tables() -> &'static Tables {
         let mut exp = vec![0u16; 2 * 65535];
         let mut log = vec![0u16; 65536];
         let mut x: u32 = 1;
-        for i in 0..65535 {
-            exp[i] = x as u16;
+        for (i, e) in exp.iter_mut().enumerate().take(65535) {
+            *e = x as u16;
             log[x as usize] = i as u16;
             x <<= 1;
             if x & 0x10000 != 0 {

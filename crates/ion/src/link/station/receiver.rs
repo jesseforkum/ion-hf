@@ -202,7 +202,7 @@ impl Station {
         let (off, data) = if skip > 0 {
             (self.delivered, &payload[skip as usize..])
         } else {
-            (off, &payload[..])
+            (off, payload)
         };
         let keep = self.rx_pending.get(&off).is_none_or(|v| v.len() < data.len());
         if keep {

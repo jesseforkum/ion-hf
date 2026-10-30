@@ -408,11 +408,11 @@ impl App {
             if rose(old.codewords_failed, s.codewords_failed) {
                 self.lit_until.lost = now + FLASH_S;
             }
-            if s.cues > old.cues {
+            if s.stream.cues > old.stream.cues {
                 self.lit_until.cue = now + FLASH_S;
             }
-            if s.stream.tones != old.stream.tones
-                && let Some((ours, m)) = s.stream.last_tone
+            if s.stream.gear.tones != old.stream.gear.tones
+                && let Some((ours, m)) = s.stream.gear.last_tone
             {
                 self.lit_until.tone[m.code() as usize] = (now + TONE_FLASH_S, ours);
             }
