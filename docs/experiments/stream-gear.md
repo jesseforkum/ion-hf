@@ -17,8 +17,10 @@ timekeeping; program: [app.md](../app.md).
   is plain ARQ and its ConnReq/ConnAck bytes are alpha.5's.
 - **When**: 4 kB or more queued, nothing in flight, the gear's aim below
   5 dB (2.4 kHz, effective), no turn or goodbye asked, no CW ID due
-  within two periods. The queue then goes in blocks of 2–16 kB (about a
-  minute of the start option's nominal rate).
+  within two periods. The queue then goes in blocks of 2–16 kB (about four
+  minutes of the option's nominal rate), one after another: at DONE the
+  next Start goes at once and its Go confirms the block before; End and
+  Report close the stream. Source pieces are delivered as they arrive.
 - **Handshake and ending**: Start / Go and End / Report control frames
   (`Kind::Stream`). The Report alone acknowledges a block; DONE only stops
   the periods. A block given up goes back to ARQ.
@@ -52,8 +54,8 @@ timekeeping; program: [app.md](../app.md).
   above +3 dB IONOS S:N and lost a little on WGN at +3/+6 dB.
 - **Turn handling**: the simplest safe one. The stream is never
   interrupted; the receiving side's wish to send goes in its Report at the
-  block's end and the sender then hands over by the link's rules. Blocks
-  are sized to a minute or two so nobody waits long.
+  block's end (or, between blocks, in the next Go) and the sender then
+  hands over by the link's rules: the peer waits at most one block.
 - **Pause timing with PTT lead and tail**: the slot is fixed (11.4 s) so a
   receiver unsure of the option still knows when the next period comes.
   With the 0.2 s lead the pause is at least 1.4 s of air: the receiver's
@@ -83,6 +85,34 @@ timekeeping; program: [app.md](../app.md).
 
 RESULTS
 
-## What is not known
+## What is not known (first on-air test)
 
-UNKNOWN
+- **The receive clock across our own transmissions.** The timekeeping
+  counts every sample; the engine reports what it mutes while keyed. If
+  a radio stops sending receive audio while it transmits (TCI, a USB
+  codec), those samples are never counted and the receiver's clock jumps
+  back by its tone answer (about 0.6 s) each time it answers. The
+  tracker would see that as jitter; the window (up to ±0.6 s) and the
+  receiver's own header may cover it, may not. Check on the air: the
+  receiving side's periods found against those heard by header.
+- **Decoding time against the pause.** Three to six LDPC decodes at rate
+  1/8 must end within the receiver's 0.3 s turnaround plus 0.1 s, or the
+  answer waits a pause (the speed loop runs one period late, 10–35% in
+  the lab). Not measured on the target machines.
+- **The sender's start jitter** (engine tick, PTT confirmation per
+  period): independent per period, taken by the window; its size on a real
+  radio is unknown.
+- **The sender's listening window** (1.15 s from its end of transmission)
+  must hold the receiver's turnaround, PTT lead, tones and both latencies.
+  A radio with a long TX-to-RX switch or a large sound-card buffer may
+  push the tones out of it: then no answer is heard, the stream runs on at
+  its start option, and a block ends only by giving up (back to ARQ;
+  nothing is lost).
+- **Carrier offset before the first anchor**: the first answers are not
+  pre-corrected; the detector's bins are 6 Hz apart.
+- **The simulator has no clock or carrier offset and no jitter**
+  (`AudioMedium` carries each burst on exact time): the exp-sync
+  impairment sets were not run on this code. The two-node test runs the
+  timekeeping on a continuous timeline with the real Node and tone watch,
+  but with ideal clocks.
+- **CW ID** handling is covered by a model-channel test only.

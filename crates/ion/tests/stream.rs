@@ -180,8 +180,14 @@ fn a_cw_id_ends_the_block_and_it_goes_on_after() {
 /// are heard, the block arrives whole.
 fn ionos(mode: Mode, snr_db: f32, n: usize, seed: u64) -> Sim {
     let air: Arc<dyn Air> = Arc::new(PhyAir);
-    let a = Station::new(Config::new("N0JLF"), air.clone());
-    let mut b = Station::new(Config::new("N0CALL"), air.clone());
+    // ION_STREAM=0: the same link without the gear (alpha.5's ARQ).
+    let on = std::env::var("ION_STREAM").map_or(true, |v| v != "0");
+    let cfg = |call: &str| Config {
+        stream: on,
+        ..Config::new(call)
+    };
+    let a = Station::new(cfg("N0JLF"), air.clone());
+    let mut b = Station::new(cfg("N0CALL"), air.clone());
     b.listen();
     let medium = AudioMedium::ionos(mode, 2, Reference::Peak, snr_db, seed);
     let mut sim = Sim::new(a, b, Box::new(medium), air);
@@ -309,30 +315,103 @@ fn after_the_turn_the_other_side_streams_too() {
 }
 
 /// A traced session on IONOS SIM: `ION_MODE` (WGN), `ION_SNR` (0),
-/// `ION_SECS` (300), `ION_SEED` (900): every burst on the air and the
-/// receiving side's view of each period.
+/// `ION_SECS` (300), `ION_SEED` (900 + S:N, as `tests/ionos.rs` seed 0),
+/// `ION_DUMP=1` for every burst. Prints where the air time went, when each
+/// block arrived, and what the receiver's timekeeping did.
 #[test]
 #[ignore]
 fn stream_trace() {
+    use ion::level::LADDER;
     let env = |k: &str| std::env::var(k).ok();
     let mode = env("ION_MODE")
         .and_then(|m| Mode::ALL.iter().copied().find(|x| x.name().eq_ignore_ascii_case(&m)))
         .unwrap_or(Mode::Wgn);
     let snr: f32 = env("ION_SNR").and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let secs: f64 = env("ION_SECS").and_then(|v| v.parse().ok()).unwrap_or(300.0);
-    let seed: u64 = env("ION_SEED").and_then(|v| v.parse().ok()).unwrap_or(900);
+    let seed: u64 = env("ION_SEED")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or((900 + snr as i64) as u64);
     let mut sim = ionos(mode, snr, 400_000, seed);
-    sim.run_until(secs, |_| false);
-    dump(&sim);
-    for p in &sim.stations[1].stats().stream_log {
-        eprintln!(
-            "{:<9} {}/{} {:+.1} dB -> {}",
-            ion::link::stream::OPTS[p.0 as usize].name,
-            p.1,
-            p.2,
-            p.3,
-            p.4
-        );
+    let mut arrivals = Vec::new();
+    let mut have = 0;
+    // When the receiver first held 10 kB and 50 kB (the lab's measure).
+    let mut at = [None; 2];
+    while sim.t < secs {
+        let t = sim.t + 1.0;
+        sim.run_until(t, |_| false);
+        let got = sim.stations[1].stats().bytes_received;
+        if got > have {
+            arrivals.push(format!("{:.0}s:{}", sim.t, got));
+            have = got;
+        }
+        for (a, size) in at.iter_mut().zip([10_000u64, 50_000]) {
+            if a.is_none() && got >= size {
+                *a = Some(sim.t);
+            }
+        }
     }
-    eprintln!("received {} B", sim.stations[1].stats().bytes_received);
+    let bpm = |k: usize, size: f64| at[k].map_or("-".to_string(), |t: f64| format!("{:.0}", size * 60.0 / t));
+    if env("ION_DUMP").is_some() {
+        dump(&sim);
+        for p in &sim.stations[1].stats().stream_log {
+            eprintln!(
+                "{:<9} {}/{} {:+.1} dB -> {}",
+                ion::link::stream::OPTS[p.0 as usize].name,
+                p.1,
+                p.2,
+                p.3,
+                p.4
+            );
+        }
+    }
+    // Air time: each period owns its slot up to the next burst (its pause
+    // and the answer in it); data bursts and control the same up to the
+    // next burst; before the first burst nothing.
+    let (mut period, mut data, mut ctl, mut first) = (0.0, 0.0, 0.0, None);
+    for (k, e) in sim.log.iter().enumerate() {
+        let next = sim.log.get(k + 1).map_or(sim.t, |n| n.start);
+        let span = next - e.start;
+        match e.code {
+            STREAM => {
+                period += span;
+                first.get_or_insert(e.start);
+            }
+            TONES => period += span,
+            c if c < LADDER.len() => data += span,
+            _ => ctl += span,
+        }
+    }
+    let total = sim.t;
+    let log = &sim.stations[1].stats().stream_log;
+    let mut by_opt = std::collections::BTreeMap::new();
+    for p in log {
+        let e = by_opt
+            .entry(ion::link::stream::OPTS[p.0 as usize].name)
+            .or_insert((0, 0, 0));
+        e.0 += 1;
+        e.1 += p.1 as u32;
+        e.2 += p.2 as u32;
+    }
+    let acq = sim.medium.stream_stats(1);
+    eprintln!(
+        "TRACE {} {snr:+} dB seed {seed} {secs:.0} s: {} B ({:.0} B/min); first period {:?} s; air: periods+pauses {:.0}% ARQ data {:.0}% control {:.0}%; blocks {}; arrivals [{}]",
+        mode.name(),
+        have,
+        have as f64 * 60.0 / total,
+        first.map(|f: f64| f.round()),
+        100.0 * period / total,
+        100.0 * data / total,
+        100.0 * ctl / total,
+        sim.stations[1].stats().stream_blocks,
+        arrivals.join(" ")
+    );
+    eprintln!(
+        "TRACE   10 kB at {:?} s ({} B/min), 50 kB at {:?} s ({} B/min)",
+        at[0].map(|t: f64| t.round()),
+        bpm(0, 10_000.0),
+        at[1].map(|t: f64| t.round()),
+        bpm(1, 50_000.0)
+    );
+    eprintln!("TRACE   options (periods ok/tried frames): {by_opt:?}");
+    eprintln!("TRACE   acquisition: {acq:?}");
 }

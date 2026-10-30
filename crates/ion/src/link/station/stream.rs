@@ -238,7 +238,12 @@ impl Station {
                 return None;
             }
             let opt = opt.unwrap_or_else(|| stream::start_pick(self.aim_db.unwrap_or(0.0)));
-            let n = stream::block_bytes(self.out.len(), opt);
+            let target = if self.stream_eff >= stream::CLEAN_EFF {
+                stream::BLOCK_LONG_S
+            } else {
+                stream::BLOCK_SHORT_S
+            };
+            let n = stream::block_bytes(self.out.len(), opt, target);
             let block: Vec<u8> = self.out.drain(..n).collect();
             let offset = self.next_offset;
             self.next_offset = self.next_offset.wrapping_add(n as u32);
@@ -296,6 +301,7 @@ impl Station {
     fn stream_acked(&mut self, t: &StreamTx) {
         self.stats.bytes_acked += t.block.len() as u64;
         self.stats.stream_blocks += 1;
+        self.stream_eff = t.enc.k() as f32 / t.pieces_sent.max(1) as f32;
     }
 
     /// DONE heard: the next block at once, if the stream is still wanted
@@ -754,8 +760,16 @@ impl Station {
             self.last_progress = now;
             r.snr_db = inc.snr_db;
         }
+        // A source piece is the block's own bytes, checked by its frame's
+        // CRC: delivered at once (in order, as the link delivers), so a
+        // block's bytes need not all wait for its end.
+        let mut early = Vec::new();
         for (i, p) in &pieces {
-            r.dec.add(*i, p);
+            if r.dec.add(*i, p) && *i < r.dec.k() {
+                let from = i * code::PIECE;
+                let n = code::PIECE.min(r.dec.len().saturating_sub(from));
+                early.push((r.offset.wrapping_add(from as u32) & 0xFF_FFFF, p[..n].to_vec()));
+            }
         }
         r.seen += 1;
         r.last_ok = st.ok > 0;
@@ -766,6 +780,10 @@ impl Station {
             // Neither rate decoded: we cannot tell; keep both in mind.
         }
         r.alt = None;
+        for (off, b) in std::mem::take(&mut early) {
+            self.accept_bytes(off, &b);
+        }
+        let r = self.stream_rx.as_mut().unwrap();
         let log = (st.opt as u8, st.ok as u8, st.tried as u8, st.snr_db);
         r.rule.push(st);
         self.stats.stream_periods += 1;

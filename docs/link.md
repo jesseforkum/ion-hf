@@ -398,23 +398,31 @@ within two periods. With more queued and frames still in flight, the
 data bursts send only what is in flight until it is acknowledged.
 
 **A block.** The sender takes the next 2–16 kB of its queue
-(`stream::block_bytes`: about a minute of the start option's nominal
-rate, one and a half to two in practice; a block's bytes all arrive at
-its end) and cuts it
+(`stream::block_bytes`: about four minutes of the option's nominal rate)
+and cuts it
 into 28-byte pieces, K of them. Pieces are numbered 0–65535: 0..K are the
 block itself, the rest repairs of a systematic Cauchy code over GF(2^16)
-(`stream::code`), any K distinct pieces giving the block back.
+(`stream::code`), any K distinct pieces giving the block back. The
+receiver delivers each source piece as it arrives (in order, as the link
+delivers anything), and the rest once K are in.
 
 ```text
-Start (control) → Go (control) | period 0 | pause | period 1 | pause | … DONE → End (control) → Report (control)
+Start → Go | period 0 | pause | … DONE → Start → Go | period 0 | … DONE → End → Report
 ```
 
 - **Start**: stream id, start option, the block's offset (24 bits),
   length and CRC-32, in a control frame in the link's waveform; **Go**
-  answers with the option (the bolder of the sender's pick from its last
-  reports and the receiver's from the Start's SNR). A Go that does not come
-  after the control frame's tries leaves the block to ARQ and holds the
-  stream off 5 minutes.
+  answers with the option (for the first block the more cautious of the
+  sender's pick from its last reports and the receiver's from the Start's
+  SNR; later blocks go on in the option the last ended in) and how far
+  the receiver's stream is delivered. A Go that does not come after the
+  control frame's tries leaves the block to ARQ and holds the stream off 5
+  minutes.
+- **Blocks follow one another**: at DONE, with enough still queued, the
+  sender opens the next block at once; its Go's delivered offset confirms
+  the block before (if it does not, both go back to ARQ), and its flags
+  carry the receiver's turn and goodbye wishes (if set, the new block goes
+  back to the queue and the link hands over).
 - **Periods** start every `SLOT_S` (11.4 s) on the sender's clock from its
   turnaround after the Go, whatever the option, so a receiver unsure of
   the option still knows when the next one starts. Each holds at most
@@ -460,14 +468,14 @@ Start (control) → Go (control) | period 0 | pause | period 1 | pause | … DON
   decoded: SLOWER, whatever the prediction (exp-sync's fix). A SLOWER or
   FASTER may not have been heard: the receiver then tries the next
   period at both options.
-- **End**: after DONE (or when it gives up: four times K pieces sent, or
-  four minutes with no answer and twice K sent) the sender sends End, in
+- **End**: after the last DONE (or when it gives up: four times K pieces
+  sent, or four minutes with no answer and twice K sent) the sender sends End, in
   an OFDM control frame from QPSK 1/3 up, MFSK below. The receiver's
   **Report** says whether it has the block, how far its stream is
   delivered, the SNR it heard the periods at, and (in the frame's flags)
-  whether it wants the turn or a goodbye. Only the Report acknowledges the
-  block: a DONE heard where none was sent costs the End and Report, and
-  the block goes on. A block given up goes back to the front of the queue
+  whether it wants the turn or a goodbye. Only a Report or the next Go
+  acknowledges a block: a DONE heard where none was sent costs the End and
+  Report, and the block goes on. A block given up goes back to the front of the queue
   for ARQ.
 - **CW ID.** A block never runs over an ID time: the sender ends it with
   End/Report when an ID falls due within two slots, both sides' IDs go
@@ -476,7 +484,7 @@ Start (control) → Go (control) | period 0 | pause | period 1 | pause | … DON
   puts an ID ahead of a period or an answer.
 
 **Turns.** A stream is not interrupted: the receiving side cannot ask
-for the turn mid-block, so a block is kept to a minute or two; its
+for the turn mid-block, so it waits up to a block (a few minutes); its
 Report carries the wish, and the sender does not open another block
 while the peer wants the turn (`the_receiver_with_data_gets_the_turn_after_the_block`,
 `after_the_turn_the_other_side_streams_too`).

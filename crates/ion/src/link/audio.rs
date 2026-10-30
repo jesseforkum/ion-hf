@@ -1001,6 +1001,10 @@ impl Medium for AudioMedium {
         self.receivers[to].stream_listen(l);
     }
 
+    fn stream_stats(&self, to: usize) -> Option<stream::acq::AcqStats> {
+        Some(self.receivers[to].stream_state().1)
+    }
+
     fn carry(&mut self, from: usize, burst: &Outgoing, start: f64, end: f64) -> Option<Incoming> {
         // Our own burst: the stream's first period is timed from the end
         // of our Go.

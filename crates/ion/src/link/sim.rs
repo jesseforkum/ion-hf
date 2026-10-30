@@ -27,6 +27,11 @@ pub trait Medium {
     /// What station `to`'s stream timekeeping needs
     /// ([`Station::stream_listen`]), before each burst it may receive.
     fn stream(&mut self, _to: usize, _l: Option<Listen>) {}
+
+    /// Station `to`'s stream acquisition counters, if this medium runs one.
+    fn stream_stats(&self, _to: usize) -> Option<stream::acq::AcqStats> {
+        None
+    }
 }
 
 /// Air-time arithmetic from a handful of numbers per waveform, roughly what

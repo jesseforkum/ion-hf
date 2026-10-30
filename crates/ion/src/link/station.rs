@@ -391,6 +391,8 @@ pub struct Station {
     stream_rx: Option<stream::StreamRx>,
     stream_ids: u8,
     stream_hold_until: f64,
+    /// The last block's pieces needed over pieces sent.
+    stream_eff: f32,
     tone_count: u32,
     last_tone: Option<(bool, crate::link::stream::Msg)>,
     // Sending side.
@@ -533,6 +535,7 @@ impl Station {
             stream_rx: None,
             stream_ids: seed,
             stream_hold_until: 0.0,
+            stream_eff: 0.0,
             tone_count: 0,
             last_tone: None,
             out: VecDeque::new(),
@@ -1213,6 +1216,7 @@ impl Station {
         self.stream_prev = None;
         self.stream_rx = None;
         self.stream_hold_until = 0.0;
+        self.stream_eff = 0.0;
         self.reply_by = None;
         self.inflight.clear();
         self.next_offset = 0;

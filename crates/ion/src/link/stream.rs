@@ -30,9 +30,10 @@ pub const TONES: usize = 60;
 /// Bytes queued (with nothing in flight) from which a transfer streams.
 pub const MIN_BYTES: usize = 4096;
 /// The stream is used while the SNR the gear aims by is below this (dB
-/// in 2.4 kHz, as the ACKs report it; about +7 dB IONOS S:N). Above it the
-/// stream only draws with the link's HARQ (`rateless-stream.md`, section 2).
-pub const BELOW_DB: f32 = 5.0;
+/// in 2.4 kHz, as the ACKs report it; about +4 dB IONOS S:N). From +3 dB
+/// up the stream draws with the link's HARQ at best (`rateless-stream.md`,
+/// section 2; `stream-gear.md`).
+pub const BELOW_DB: f32 = 2.0;
 /// Longest data burst of a period, audio seconds (the PTT lead comes on
 /// top).
 pub const BURST_S: f64 = 9.8;
@@ -41,12 +42,18 @@ pub const BURST_S: f64 = 9.8;
 /// still knows when the next period starts. The pause holds the
 /// receiver's turnaround, its lead, the two tones and slack.
 pub const SLOT_S: f64 = 11.4;
-/// A block takes about this long at the start option (seconds of
-/// nominal rate; in practice one and a half to twice that), between
-/// [`BLOCK_MIN`] and [`BLOCK_MAX`] bytes: long enough that the handshake
-/// and the overshoot are small, short enough that a block (whose bytes
-/// all arrive at its end) delivers within a couple of minutes.
-const BLOCK_TARGET_S: f32 = 60.0;
+/// A block takes about this long at its option's nominal rate, between
+/// [`BLOCK_MIN`] and [`BLOCK_MAX`] bytes: [`BLOCK_LONG_S`] after a block
+/// that needed little more than its own pieces (its source pieces arrive
+/// in order and are delivered as they come, so a long block costs
+/// nothing and saves Start/Go exchanges, about 20 s each in MFSK R1),
+/// [`BLOCK_SHORT_S`] otherwise (lost pieces hold back what follows them
+/// until the block decodes).
+pub const BLOCK_SHORT_S: f32 = 60.0;
+pub const BLOCK_LONG_S: f32 = 240.0;
+/// A block whose K pieces took at most this many times K sent counts as
+/// clean.
+pub const CLEAN_EFF: f32 = 0.9;
 pub const BLOCK_MIN: usize = 2048;
 pub const BLOCK_MAX: usize = 16384;
 /// The sender gives a block up after sending this many times its pieces.
@@ -388,8 +395,8 @@ pub fn model_threshold_db(o: usize) -> f32 {
 // -- block sizing and the start ------------------------------------------------
 
 /// Bytes of the next block for `queued` bytes at start option `o`.
-pub fn block_bytes(queued: usize, o: usize) -> usize {
-    let target = (nominal_bps(o) * BLOCK_TARGET_S) as usize;
+pub fn block_bytes(queued: usize, o: usize, target_s: f32) -> usize {
+    let target = (nominal_bps(o) * target_s) as usize;
     queued.min(target.clamp(BLOCK_MIN, BLOCK_MAX))
 }
 
