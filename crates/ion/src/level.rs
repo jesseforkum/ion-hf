@@ -149,6 +149,11 @@ pub const AIR_MEAN_DB: [f32; 17] = [
     0.0, 0.0, 0.0, 0.0, 0.0, -2.7, -2.5, -2.4, -2.4, -2.5, -2.5, -2.5, -3.4, -5.2, -5.1, -7.3, -7.3,
 ];
 
+/// [`AIR_MEAN_DB`] with the whole-burst clipper (`ION_TDCLIP=1`).
+pub const AIR_MEAN_TD_DB: [f32; 17] = [
+    0.0, 0.0, 0.0, 0.0, 0.0, -0.8, -0.8, -0.8, -1.1, -0.8, -0.8, -1.3, -1.6, -3.2, -3.5, -6.0, -5.1,
+];
+
 pub fn thresholds_db() -> Vec<f32> {
     THRESHOLDS_DB.to_vec()
 }

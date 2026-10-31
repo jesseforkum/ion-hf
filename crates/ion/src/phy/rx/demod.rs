@@ -8,7 +8,7 @@ use ion_dsp::dsp::Complex;
 use crate::chan::{self, ChannelMeas, Eesm};
 use crate::phy::est;
 use crate::phy::frame::*;
-use crate::phy::tx::tx_distortion_db;
+use crate::phy::tx::{td_clip_on, tx_distortion_db};
 use crate::phy::{Constellation, DataMode};
 
 use super::{BLANK_ERASE, BurstGrid, CellDebug, PhyRx, RxBurst, known};
@@ -338,6 +338,7 @@ impl PhyRx {
         let kappa = 10f32.powf(-tx_distortion_db(cons, mode, self.num) / 10.0);
         let mut sig2 = self.sigma2;
         let mut sig2_rep = self.sigma2;
+        let (mut band_a, mut band_h) = (0f32, 0f32);
         for c in 0..nc {
             let (mut a, mut n, mut h) = (0f32, 0f32, 0f32);
             for k in c.saturating_sub(l.dd_half)..(c + l.dd_half + 1).min(nc) {
@@ -348,6 +349,8 @@ impl PhyRx {
             if n > 0.0 {
                 sig2[c] = sig2[c].max(a / n);
                 sig2_rep[c] = sig2_rep[c].max((a - kappa * h) / n);
+                band_a += a / n;
+                band_h += h / n;
             }
         }
 
@@ -488,9 +491,16 @@ impl PhyRx {
 
         let snr_db = self.snr_db(pre, ng, &sig2_rep[..nc]);
         let excess_db = {
-            let dd: f32 = sig2_rep[..nc].iter().sum();
             let pre_n: f32 = self.sigma2[..nc].iter().sum();
-            10.0 * (dd / pre_n.max(1e-30)).max(1e-6).log10()
+            if td_clip_on() {
+                // The whole-burst clipper's distortion is uneven over the
+                // carriers: the band's total against the preamble's noise
+                // and the expected distortion, not carrier by carrier.
+                10.0 * (band_a / (pre_n + kappa * band_h).max(1e-30)).max(1e-6).log10()
+            } else {
+                let dd: f32 = sig2_rep[..nc].iter().sum();
+                10.0 * (dd / pre_n.max(1e-30)).max(1e-6).log10()
+            }
         };
         let mut chan = self.measure(&zdd, nsym, snr_db, &eesm, excess_db);
         if self.weak_sync {

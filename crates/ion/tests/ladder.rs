@@ -1652,7 +1652,11 @@ fn slice_levels_average_full_ofdm_power() {
             );
         }
         // The gear shift's table of the same (`level::AIR_MEAN_DB`).
-        let table = ion::level::AIR_MEAN_DB[l];
+        let table = if phy::td_clip_on() {
+            ion::level::AIR_MEAN_TD_DB[l]
+        } else {
+            ion::level::AIR_MEAN_DB[l]
+        };
         assert!(
             (mean - table).abs() < 0.3,
             "L{l}: {mean:+.2} dB on the air, {table:+.1} in AIR_MEAN_DB"
@@ -1878,4 +1882,120 @@ fn td_clip_raises_mean_power_and_decodes() {
         cer_with(&set, &td, lv.constellation, lv.rate, Profile::Awgn, 15.0, 2, 1),
         0.0
     );
+}
+
+/// In-band distortion each OFDM level's link options leave on the data
+/// cells, as the receiver's SNR estimate sees it: AWGN at 60 dB against the
+/// burst's mean, 4 bursts. Run with `ION_RX_DIST=none` so the receiver
+/// takes none out; `ION_TDCLIP=1` for the whole-burst clipper's picks.
+#[test]
+#[ignore]
+fn td_clip_distortion() {
+    for (l, lv) in LADDER.iter().enumerate() {
+        let Wave::Ofdm(g) = lv.wave else { continue };
+        let num = audio::numerology(g);
+        let center = num.center_hz();
+        let opt = audio::tx_options(l);
+        let mut rs = Vec::new();
+        for seed in 0..4u64 {
+            let bits: Vec<u8> = payload(
+                phy::capacity_bits_with(num, lv.pilots, lv.constellation, 40) / 8,
+                70 + seed as u32,
+            )
+            .iter()
+            .flat_map(|b| (0..8).map(move |i| (b >> i) & 1))
+            .collect();
+            let tx = phy::modulate_full(num, lv.constellation, 0, 0, &bits, center, &opt);
+            let power = tx.iter().map(|x| x * x).sum::<f32>() / tx.len() as f32;
+            let mut out = vec![0.0; 4800];
+            out.extend(&tx);
+            out.resize(out.len() + 4800, 0.0);
+            let mut noise = NoiseGen::new(seed ^ 91);
+            add_awgn(&mut out, noise_sigma(power, 60.0, 2400.0, AUDIO_RATE), &mut noise);
+            let mut rx = PhyRx::with_numerology(num, center);
+            let mut found = Vec::new();
+            rx.process(&out, &mut found);
+            if let Some(b) = found.first() {
+                rs.push(b.snr_db);
+            }
+        }
+        let r = rs.iter().sum::<f32>() / rs.len().max(1) as f32;
+        let d = -10.0 * (10f32.powf(-r / 10.0) - 10f32.powf(-3.4)).max(1e-6).log10();
+        println!(
+            "| {l} {:?} {} | {:?} | {} | {r:.1} | {d:.1} |",
+            lv.constellation,
+            rate_name(lv.rate),
+            g,
+            rs.len()
+        );
+    }
+}
+
+/// The channel report's delay and Doppler spread under the link's options
+/// (`ION_TDCLIP=1`: the whole-burst clipper's): 12 bursts per point,
+/// SNR against each burst's mean.
+#[test]
+#[ignore]
+fn td_clip_chan() {
+    println!("| Level | Channel | SNR | heard | delay ms | Doppler Hz | echo | doppler |");
+    for l in std::env::var("ION_LEVELS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect::<Vec<usize>>())
+        .unwrap_or(vec![9, 10, 11, 13, 14])
+    {
+        let lv = LADDER[l];
+        let Wave::Ofdm(g) = lv.wave else { continue };
+        let num = audio::numerology(g);
+        let center = num.center_hz();
+        let opt = audio::tx_options(l);
+        for profile in [Profile::Awgn, Profile::CcirPoor, Profile::MidDisturbedNvis] {
+            for snr in [6.0f32, 12.0, 25.0] {
+                let mut ch = Channel::from_profile(profile, 5);
+                let mut noise = NoiseGen::new(17);
+                let mut rx = PhyRx::with_numerology(num, center);
+                let (mut d, mut f, mut n, mut echo, mut dop) = (Vec::new(), Vec::new(), 0, 0, 0);
+                let (mut ex, mut sp) = (Vec::new(), Vec::new());
+                for b in 0..12u32 {
+                    let bits: Vec<u8> = payload(
+                        phy::capacity_bits_with(num, lv.pilots, lv.constellation, 40) / 8,
+                        300 + b,
+                    )
+                    .iter()
+                    .flat_map(|x| (0..8).map(move |i| (x >> i) & 1))
+                    .collect();
+                    let tx = phy::modulate_full(num, lv.constellation, 0, 0, &bits, center, &opt);
+                    let power = tx.iter().map(|x| x * x).sum::<f32>() / tx.len() as f32;
+                    let mut input = vec![0.0; 4800];
+                    input.extend(&tx);
+                    input.resize(input.len() + ch.latency() + 4800, 0.0);
+                    let mut out = vec![0.0; input.len()];
+                    ch.process(&input, &mut out);
+                    add_awgn(&mut out, noise_sigma(power, snr, 2400.0, AUDIO_RATE), &mut noise);
+                    let mut found = Vec::new();
+                    rx.process(&out, &mut found);
+                    if let Some(r) = found.first() {
+                        n += 1;
+                        sp.push(r.chan.raw[2]);
+                        ex.push(r.chan.raw[3]);
+                        if r.chan.delay_ms.is_finite() {
+                            d.push(r.chan.delay_ms);
+                            echo += (r.chan.delay_ms > ion::chan::ECHO_MS) as usize;
+                        }
+                        if r.chan.doppler_hz.is_finite() {
+                            f.push(r.chan.doppler_hz);
+                            dop += (r.chan.doppler_hz > ion::chan::DOPPLER_HZ) as usize;
+                        }
+                    }
+                }
+                let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+                println!(
+                    "| {l} | {profile:?} | {snr} | {n} | {:.2} | {:.2} | {echo} | {dop} | span {:.2} excess {:.1} |",
+                    mean(&d),
+                    mean(&f),
+                    mean(&sp),
+                    mean(&ex)
+                );
+            }
+        }
+    }
 }

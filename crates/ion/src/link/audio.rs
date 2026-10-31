@@ -86,11 +86,17 @@ pub fn tx_options(code: usize) -> TxOptions {
 /// Experiment (`ION_TDCLIP=1`): the whole-burst clipper's headroom (dB) and
 /// spreading for ladder level `code`, as picked in PR #1's ladder table.
 fn td_clip_pick(code: usize) -> Option<(f32, bool)> {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("ION_TDCLIP").is_ok_and(|v| v == "1")) {
+    if !phy::td_clip_on() {
         return None;
     }
-    Some(match code {
+    static SHIFT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let shift = *SHIFT.get_or_init(|| {
+        std::env::var("ION_TD_SHIFT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    });
+    let (h, spread) = match code {
         5..=7 | 9 | 10 => (-3.0, true),
         8 => (-1.0, true),
         11 => (0.0, true),
@@ -100,7 +106,8 @@ fn td_clip_pick(code: usize) -> Option<(f32, bool)> {
         15 => (7.0, false),
         16 => (6.0, false),
         _ => return None,
-    })
+    };
+    Some((h + shift, spread))
 }
 
 /// Air time from the PHYs' burst arithmetic.
@@ -186,6 +193,7 @@ pub fn ofdm_gain(db: f32) -> f32 {
 /// stay as they are.
 pub fn level_trim_db(code: usize) -> f32 {
     match LADDER.get(code) {
+        Some(l) if l.wave == Wave::Ofdm(Guard::Slice) && phy::td_clip_on() => TD_SLICE_TRIM_DB,
         Some(l) if l.wave == Wave::Ofdm(Guard::Slice) => match l.rate {
             fec::Rate::R1_3 => 0.6,
             fec::Rate::R1_2 => 0.95,
@@ -194,6 +202,9 @@ pub fn level_trim_db(code: usize) -> f32 {
         _ => 0.0,
     }
 }
+
+/// [`level_trim_db`] of the slice levels under the whole-burst clipper.
+const TD_SLICE_TRIM_DB: f32 = 0.45;
 
 /// [`transmit`] as it goes on the air: OFDM bursts scaled by `ofdm_gain`
 /// and their level's [`level_trim_db`], together never more than
