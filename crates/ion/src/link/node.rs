@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::audio::{self, PhyAir, Receivers, RxPlot};
-use super::frame::{AckInfo, Frame, Kind, Tiny};
+use super::frame::{AckInfo, Frame, Kind, Life, Tiny};
 use super::station::{Air, CONTROL, Config, Incoming, Station, TINY, user_hi, user_session};
 use super::stream::{self, Ctl, STREAM, TONES};
 use crate::level::{LADDER, Wave};
@@ -45,8 +45,24 @@ pub struct BurstPlot {
 type Described = (String, Option<(String, String)>, Option<f32>);
 
 /// What a burst is, from its header and (control bursts) first frame.
-fn describe(code: usize, user: u16, extra: u16, first: Option<&[u8]>, frames: usize) -> Described {
+fn describe(wave: Wave, code: usize, user: u16, extra: u16, first: Option<&[u8]>, frames: usize) -> Described {
     let mut reported = None;
+    if wave == Wave::Lifeline && code == TINY {
+        let what = match Life::decode(user_hi(user), extra) {
+            Some(Life::Probe { snr_db }) => {
+                reported = snr_db;
+                snr_db.map_or("PROBE".into(), |s| format!("PROBE {s:+.0} dB"))
+            }
+            Some(Life::Report { snr_db }) => {
+                reported = Some(snr_db);
+                format!("REPORT {snr_db:+.0} dB")
+            }
+            Some(Life::Bye { weak }) => if weak { "BYE WEAK" } else { "BYE" }.into(),
+            Some(Life::ByeAck) => "BYEACK".into(),
+            None => "LIFELINE".into(),
+        };
+        return (what, None, reported);
+    }
     let what = match code {
         TINY => match Tiny::decode(user_hi(user), extra) {
             Some(Tiny::Ack {
@@ -266,6 +282,7 @@ impl Node {
         self.bursts.clear();
         self.rx.expect(&self.station.expected());
         self.rx.stream_listen(self.station.stream_listen());
+        self.rx.follow(self.station.session());
         self.rx.process(samples, &mut self.bursts);
         self.watch_tones(samples, now);
         let mut plots = self.rx.take_plots().into_iter();
@@ -288,7 +305,7 @@ impl Node {
             let lost = long_failed.max(short_failed);
             self.codewords_failed += lost;
             let first = inc.frames.first().and_then(|f| f.as_deref());
-            let (what, calls, reported_db) = describe(inc.code, inc.user, inc.extra, first, inc.frames.len());
+            let (what, calls, reported_db) = describe(inc.wave, inc.code, inc.user, inc.extra, first, inc.frames.len());
             if let Some(plot) = plot.filter(|_| inc.code < LADDER.len()) {
                 if self.plots.len() >= 8 {
                     self.plots.remove(0);
@@ -389,11 +406,14 @@ impl Node {
         std::mem::take(&mut self.group_in)
     }
 
-    /// Receiving a burst, or transmitting one: not the moment to key.
+    /// Receiving a burst, or transmitting one: not the moment to key. The
+    /// lifeline's receiver counts only while the link holds.
     pub fn busy(&self) -> bool {
         // While streaming the schedule is the stream's: a receiver chasing
         // noise must not hold a period or an answer back.
-        self.on_air || (self.rx.busy() && !self.station.streaming())
+        self.on_air
+            || (self.rx.busy() && !self.station.streaming())
+            || self.station.holding() && self.rx.lifeline_busy()
     }
 
     /// The slot meter: the third of the passband our receivers would have
@@ -449,7 +469,7 @@ impl Node {
         self.on_air = true;
         self.last_key = now;
         let first = b.frames.first().map(Vec::as_slice);
-        let (mut what, calls, reported_db) = describe(b.code, b.user, b.extra, first, b.frames.len());
+        let (mut what, calls, reported_db) = describe(b.wave, b.code, b.user, b.extra, first, b.frames.len());
         if b.cue {
             what.push_str(" CUE");
         }

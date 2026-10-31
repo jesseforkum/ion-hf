@@ -37,6 +37,47 @@ impl MfskMode {
     pub const ALL: [MfskMode; 2] = [MfskMode::R0, MfskMode::R1];
 }
 
+/// Time–frequency scale of the waveform: every duration × `k`, every
+/// tone's offset from the centre ÷ `k`. [`MfskLayout::FULL`] (k = 1) is
+/// the full-band R0 and R1 the link uses; R1 at k = 7 fits a 400 Hz slot
+/// (`docs/mfsk.md`, Below the floor). The receiver decimates k times more
+/// and sees the same waveform in its own samples, so a channel with delay
+/// spread τ and Doppler spread σ looks to it like (τ/k, k·σ).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MfskLayout {
+    pub k: usize,
+    /// Frequency sweep between tones and the end ramps, audio samples.
+    pub sweep: usize,
+    /// Detector frequency hypotheses: ±`hmax` steps of half the preamble's
+    /// tone spacing (25/k Hz).
+    pub hmax: i32,
+}
+
+impl MfskLayout {
+    pub const FULL: MfskLayout = MfskLayout {
+        k: 1,
+        sweep: TRANSITION,
+        hmax: 3,
+    };
+
+    /// Stretched `k` times, the sweep with it; the detector searches ±75 Hz
+    /// or as far as its spectrum allows (±225/k Hz).
+    pub const fn scaled(k: usize) -> MfskLayout {
+        assert!(k >= 1);
+        let h = 3 * k as i32;
+        MfskLayout {
+            k,
+            sweep: TRANSITION * k,
+            hmax: if h < 9 { h } else { 9 },
+        }
+    }
+
+    /// Baseband decimation from 48 kHz audio.
+    pub(crate) const fn dec(self) -> usize {
+        DEC * self.k
+    }
+}
+
 /// Fixed numbers the link layer needs for timing and sizing.
 #[derive(Clone, Copy, Debug)]
 pub struct MfskInfo {
@@ -63,8 +104,6 @@ pub const SPACING_HZ: f32 = 50.0;
 /// Frequency sweep between tones and the start/end ramps, audio samples
 /// (1 ms; it eats into the guard, so keep it short).
 pub(crate) const TRANSITION: usize = 48;
-/// Audio after the last symbol: the ramp-down.
-const TAIL: usize = TRANSITION;
 
 /// Baseband frequency of preamble (R0 grid) bin `b`.
 pub(crate) fn bin_hz(b: i32) -> f32 {
@@ -77,24 +116,34 @@ pub fn symbol_s(mode: MfskMode) -> f32 {
 }
 
 pub fn info(mode: MfskMode) -> MfskInfo {
+    info_with(MfskLayout::FULL, mode)
+}
+
+/// [`info`] of `mode` in `layout`.
+pub fn info_with(layout: MfskLayout, mode: MfskMode) -> MfskInfo {
     let fmt = Fmt::of(mode);
+    let k = layout.k as f32;
     MfskInfo {
-        raw_bps: fmt.bps() as f32 / symbol_s(mode),
-        overhead_s: PRE_LEN as f32 * SYMBOL_S
-            + frame::header_symbols(mode, Kind::Data) as f32 * symbol_s(mode)
-            + TAIL as f32 / 48_000.0,
-        bandwidth_hz: (fmt.nbins + 1) as f32 * fmt.spacing_hz(),
+        raw_bps: fmt.bps() as f32 / symbol_s(mode) / k,
+        overhead_s: k * (PRE_LEN as f32 * SYMBOL_S + frame::header_symbols(mode, Kind::Data) as f32 * symbol_s(mode))
+            + layout.sweep as f32 / 48_000.0,
+        bandwidth_hz: (fmt.nbins + 1) as f32 * fmt.spacing_hz() / k,
     }
 }
 
 /// Audio samples of the MFSK part of a composite burst ([`modulate_cue`]).
 pub fn cue_samples(mode: MfskMode) -> usize {
-    PRE_LEN * SYMBOL_SAMPLES + frame::header_symbols(mode, Kind::Cue) * Fmt::of(mode).sym * DEC + TAIL
+    PRE_LEN * SYMBOL_SAMPLES + frame::header_symbols(mode, Kind::Cue) * Fmt::of(mode).sym * DEC + TRANSITION
 }
 
 /// Duration of a header-only burst (`modulate` with no bits), seconds.
 pub fn header_only_s(mode: MfskMode) -> f32 {
     burst_samples(mode, 0) as f32 / 48_000.0
+}
+
+/// [`header_only_s`] in `layout`.
+pub fn header_only_s_with(layout: MfskLayout, mode: MfskMode) -> f32 {
+    burst_samples_with(layout, mode, 0) as f32 / 48_000.0
 }
 
 /// Most data bits one burst can carry.
@@ -104,9 +153,14 @@ pub fn max_bits(mode: MfskMode) -> usize {
 
 /// Audio samples (48 kHz) of the burst `modulate` makes for `nbits` bits.
 pub fn burst_samples(mode: MfskMode, nbits: usize) -> usize {
+    burst_samples_with(MfskLayout::FULL, mode, nbits)
+}
+
+/// [`burst_samples`] in `layout`.
+pub fn burst_samples_with(layout: MfskLayout, mode: MfskMode, nbits: usize) -> usize {
     let kind = if nbits == 0 { Kind::HeaderOnly } else { Kind::Data };
     let syms = frame::header_symbols(mode, kind) + frame::data_symbols(mode, nbits);
-    PRE_LEN * SYMBOL_SAMPLES + syms * Fmt::of(mode).sym * DEC + TAIL
+    layout.k * (PRE_LEN * SYMBOL_SAMPLES + syms * Fmt::of(mode).sym * DEC) + layout.sweep
 }
 
 /// Tones of one symbol: up to three baseband frequencies (Hz from
@@ -123,6 +177,18 @@ struct SymTones {
 /// `extra` (32 bits), used for tiny ACKs at the floor. 48 kHz audio
 /// centred on `center_hz`, peak about `ion_dsp::TX_LEVEL`.
 pub fn modulate(mode: MfskMode, user: u16, extra: u16, bits: &[u8], center_hz: f32) -> Vec<f32> {
+    modulate_with(MfskLayout::FULL, mode, user, extra, bits, center_hz)
+}
+
+/// [`modulate`] in `layout`.
+pub fn modulate_with(
+    layout: MfskLayout,
+    mode: MfskMode,
+    user: u16,
+    extra: u16,
+    bits: &[u8],
+    center_hz: f32,
+) -> Vec<f32> {
     assert!(
         bits.len() <= max_bits(mode),
         "phy_mfsk: {} bits exceed the {} a burst can carry",
@@ -131,7 +197,7 @@ pub fn modulate(mode: MfskMode, user: u16, extra: u16, bits: &[u8], center_hz: f
     );
     let data = frame::data_values(mode, bits);
     let kind = if bits.is_empty() { Kind::HeaderOnly } else { Kind::Data };
-    build(mode, kind, user, extra, bits.len(), data, center_hz)
+    build(layout, mode, kind, user, extra, bits.len(), data, center_hz)
 }
 
 /// The MFSK part of a composite burst: preamble and a header carrying
@@ -139,7 +205,7 @@ pub fn modulate(mode: MfskMode, user: u16, extra: u16, bits: &[u8], center_hz: f
 /// waveform that follows it directly ([`cue_samples`] after its start).
 /// The receiver hands it out with [`MfskBurst::cue`] set.
 pub fn modulate_cue(mode: MfskMode, user: u16, extra: u16, center_hz: f32) -> Vec<f32> {
-    let out = build(mode, Kind::Cue, user, extra, 0, Vec::new(), center_hz);
+    let out = build(MfskLayout::FULL, mode, Kind::Cue, user, extra, 0, Vec::new(), center_hz);
     debug_assert_eq!(out.len(), cue_samples(mode));
     out
 }
@@ -150,6 +216,18 @@ pub fn modulate_cue(mode: MfskMode, user: u16, extra: u16, center_hz: f32) -> Ve
 /// the tone metrics in code-symbol order ([`MfskBurst::symbols`]). The
 /// burst is as long as `modulate`'s for `5 × syms.len()` bits.
 pub fn modulate_symbols(mode: MfskMode, user: u16, extra: u16, syms: &[u8], center_hz: f32) -> Vec<f32> {
+    modulate_symbols_with(MfskLayout::FULL, mode, user, extra, syms, center_hz)
+}
+
+/// [`modulate_symbols`] in `layout`.
+pub fn modulate_symbols_with(
+    layout: MfskLayout,
+    mode: MfskMode,
+    user: u16,
+    extra: u16,
+    syms: &[u8],
+    center_hz: f32,
+) -> Vec<f32> {
     let nbits = 5 * syms.len();
     assert!(
         nbits <= max_bits(mode),
@@ -157,15 +235,26 @@ pub fn modulate_symbols(mode: MfskMode, user: u16, extra: u16, syms: &[u8], cent
         syms.len()
     );
     if syms.is_empty() {
-        return modulate(mode, user, extra, &[], center_hz);
+        return modulate_with(layout, mode, user, extra, &[], center_hz);
     }
     let data = frame::data_values_sym(mode, syms);
-    build(mode, Kind::Data, user, extra, nbits | frame::SYM_FLAG, data, center_hz)
+    build(
+        layout,
+        mode,
+        Kind::Data,
+        user,
+        extra,
+        nbits | frame::SYM_FLAG,
+        data,
+        center_hz,
+    )
 }
 
 /// Preamble, header (length field `nbits_field`, 0 for header-only) and
 /// the data symbols' tone values.
+#[allow(clippy::too_many_arguments)]
 fn build(
+    layout: MfskLayout,
     mode: MfskMode,
     kind: Kind,
     user: u16,
@@ -175,38 +264,39 @@ fn build(
     center_hz: f32,
 ) -> Vec<f32> {
     let fmt = Fmt::of(mode);
+    let k = layout.k as f32;
     let nbits = nbits_field & !frame::SYM_FLAG;
-    let info = frame::header_bits(mode, kind, user, extra, nbits_field);
+    let info = frame::header_bits(layout.k, mode, kind, user, extra, nbits_field);
     let mut values = frame::header_values(mode, kind, &info);
     values.extend(data);
 
     let mut syms: Vec<SymTones> = (0..PRE_LEN)
         .map(|i| SymTones {
             n: 1,
-            hz: [bin_hz(frame::costas_bin(i) as i32), 0.0, 0.0],
-            len: SYMBOL_SAMPLES,
+            hz: [bin_hz(frame::costas_bin(i) as i32) / k, 0.0, 0.0],
+            len: SYMBOL_SAMPLES * layout.k,
         })
         .collect();
     for (i, v) in values.iter().enumerate() {
         let h = fmt.hop(i);
         let mut hz = [0f32; 3];
         for (t, f) in hz.iter_mut().enumerate().take(fmt.tones) {
-            *f = fmt.bin_hz(fmt.tone_bin(h, t, v[t] as usize) as i32);
+            *f = fmt.bin_hz(fmt.tone_bin(h, t, v[t] as usize) as i32) / k;
         }
         syms.push(SymTones {
             n: fmt.tones,
             hz,
-            len: fmt.sym * DEC,
+            len: fmt.sym * DEC * layout.k,
         });
     }
-    let out = synthesize(&syms, center_hz);
-    debug_assert!(kind == Kind::Cue || out.len() == burst_samples(mode, nbits));
+    let out = synthesize(&syms, center_hz, layout.sweep);
+    debug_assert!(kind == Kind::Cue || out.len() == burst_samples_with(layout, mode, nbits));
     out
 }
 
-fn ramp() -> Vec<f64> {
-    (0..TRANSITION)
-        .map(|s| 0.5 - 0.5 * (core::f64::consts::PI * (s as f64 + 0.5) / TRANSITION as f64).cos())
+fn ramp(len: usize) -> Vec<f64> {
+    (0..len)
+        .map(|s| 0.5 - 0.5 * (core::f64::consts::PI * (s as f64 + 0.5) / len as f64).cos())
         .collect()
 }
 
@@ -223,9 +313,9 @@ fn freqs(s: &SymTones, prev: &[f64; 3], center_hz: f32) -> [f64; 3] {
 /// Envelope peak of each symbol's steady part (unit tone amplitude; 1 for
 /// single-tone symbols), replaying the generator phases the way
 /// `synthesize` advances them.
-fn plan_peaks(syms: &[SymTones], center_hz: f32) -> Vec<f64> {
+fn plan_peaks(syms: &[SymTones], center_hz: f32, sweep: usize) -> Vec<f64> {
     let fs = 48_000.0f64;
-    let ramp = ramp();
+    let ramp = ramp(sweep);
     let mut phase = [0f64; 3];
     let mut freq = [0f64; 3];
     let mut on = [false; 3];
@@ -248,7 +338,7 @@ fn plan_peaks(syms: &[SymTones], center_hz: f32) -> Vec<f64> {
             let mut peak = 1f64;
             if s.n > 1 {
                 peak = 0.0;
-                for m in 0..(s.len - TRANSITION) / 4 {
+                for m in 0..(s.len - sweep) / 4 {
                     let t = (4 * m) as f64 / fs;
                     let (mut re, mut im) = (0f64, 0f64);
                     for k in 0..s.n {
@@ -261,7 +351,7 @@ fn plan_peaks(syms: &[SymTones], center_hz: f32) -> Vec<f64> {
                 peak = peak.sqrt();
             }
             for k in 0..3 {
-                let steady = (s.len - TRANSITION) as f64 * f_new[k] / fs;
+                let steady = (s.len - sweep) as f64 * f_new[k] / fs;
                 phase[k] = p_end[k] + steady;
                 phase[k] -= phase[k].floor();
                 on[k] = k < s.n;
@@ -274,18 +364,18 @@ fn plan_peaks(syms: &[SymTones], center_hz: f32) -> Vec<f64> {
 
 /// Generates the audio. Every tone generator keeps its phase across
 /// symbols; at a symbol start its frequency and amplitude move along a
-/// raised cosine over `TRANSITION` samples. A limiter on the analytic
+/// raised cosine over `sweep` samples. A limiter on the analytic
 /// envelope keeps the peak at `TX_LEVEL` where several tones briefly line
 /// up inside a sweep.
-fn synthesize(syms: &[SymTones], center_hz: f32) -> Vec<f32> {
+fn synthesize(syms: &[SymTones], center_hz: f32, sweep: usize) -> Vec<f32> {
     let fs = 48_000.0f64;
-    let total = syms.iter().map(|s| s.len).sum::<usize>() + TAIL;
+    let total = syms.iter().map(|s| s.len).sum::<usize>() + sweep;
     let mut out = Vec::with_capacity(total);
     let mut phase = [0f64; 3];
     let mut freq = [0f64; 3];
     let mut amp = [0f64; 3];
-    let ramp = ramp();
-    let plan = plan_peaks(syms, center_hz);
+    let ramp = ramp(sweep);
+    let plan = plan_peaks(syms, center_hz, sweep);
     let cap = TX_LEVEL as f64;
     let emit = |re: f64, im: f64, out: &mut Vec<f32>| {
         let e = (re * re + im * im).sqrt();

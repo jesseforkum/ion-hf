@@ -108,7 +108,7 @@ fn only_ofdm_is_raised_and_never_past_the_cap() {
             let j = ((b.start_s + b.dur_s) * 48_000.0) as usize;
             let p = peak(&a[i..j.min(a.len())]);
             let limit = match b.wave {
-                ion::level::Wave::Mfsk(_) => tx,
+                ion::level::Wave::Mfsk(_) | ion::level::Wave::Lifeline => tx,
                 ion::level::Wave::Ofdm(_) => {
                     let trim = ion::link::audio::level_trim_db(b.code);
                     tx * 10f32.powf((want + trim).min(cap) / 20.0)

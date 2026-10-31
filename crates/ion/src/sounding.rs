@@ -50,6 +50,7 @@ pub fn level_name(code: usize, wave: Wave) -> String {
         Wave::Ofdm(Guard::Slice) => "OFDM slice",
         Wave::Ofdm(Guard::Long) => "OFDM long",
         Wave::Ofdm(Guard::Normal) => "OFDM",
+        Wave::Lifeline => "MFSK R1/7",
     };
     if code == TINY {
         return format!("{w} header-only");

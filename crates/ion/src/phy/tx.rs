@@ -364,6 +364,24 @@ pub(super) fn b_time(l: &Layout) -> Vec<Complex> {
     u
 }
 
+/// The receiver's template for B's matched filter: B, or only its carriers
+/// that A leaves empty ([`Layout::mf_a_free`]).
+pub(super) fn b_sync(l: &Layout) -> Vec<Complex> {
+    let tw = twiddles(l.n);
+    let x: Vec<Complex> = (0..l.nc)
+        .map(|c| {
+            if l.mf_a_free && !l.a_empty(c) {
+                Complex::ZERO
+            } else {
+                l.b_value(c, 1.0)
+            }
+        })
+        .collect();
+    let mut u = vec![Complex::ZERO; l.n];
+    idft(l, &x, &tw, &mut u);
+    u
+}
+
 /// A (with its ramp) followed by B (with its CP), as transmitted.
 pub(super) fn preamble_template(l: &Layout) -> Vec<Complex> {
     let a = a_period(l);

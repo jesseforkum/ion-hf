@@ -484,6 +484,7 @@ impl Station {
                 },
             ) => {
                 self.last_progress = now;
+                self.last_moved = now;
                 let same = self
                     .stream_rx
                     .as_ref()
@@ -538,6 +539,7 @@ impl Station {
             }
             (Role::Receiver, Ctl::End { id }) => {
                 self.last_progress = now;
+                self.last_moved = now;
                 let (done, snr) = match self.stream_rx.as_mut().filter(|r| r.id == id) {
                     Some(r) => {
                         r.live = false;
@@ -573,6 +575,7 @@ impl Station {
                     }
                 }
                 self.last_progress = now;
+                self.last_moved = now;
                 // The peer wants the turn or to leave: this block waits.
                 if self.peer_wants_turn || self.peer_wants_disc {
                     self.clear_wait();
@@ -588,6 +591,7 @@ impl Station {
                 t.last_tone = now;
                 self.clear_wait();
                 self.last_progress = now;
+                self.last_moved = now;
             }
             (
                 Role::Sender,
@@ -603,6 +607,7 @@ impl Station {
                 }
                 self.clear_wait();
                 self.last_progress = now;
+                self.last_moved = now;
                 self.note_turn_ask(f.flags & flags::WANT_TURN != 0, now);
                 self.peer_wants_disc = f.flags & flags::WANT_DISC != 0;
                 self.aim_db = Some(snr_db);
@@ -721,6 +726,7 @@ impl Station {
         }
         t.last_tone = now;
         self.last_progress = now;
+        self.last_moved = now;
         match m {
             Msg::Slower => t.opt = stream::down(t.opt).unwrap_or(t.opt),
             Msg::Faster => t.opt = stream::up(t.opt).unwrap_or(t.opt),
@@ -818,6 +824,7 @@ impl Station {
         }
         if st.heard {
             self.last_progress = now;
+            self.last_moved = now;
             r.snr_db = inc.snr_db;
         }
         // A source piece is the block's own bytes, checked by its frame's

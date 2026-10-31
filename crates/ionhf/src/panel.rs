@@ -133,7 +133,7 @@ pub fn family(l: usize) -> &'static str {
         Some(Wave::Ofdm(Guard::Slice)) => "SLICE",
         Some(Wave::Ofdm(Guard::Long)) => "LONG",
         Some(Wave::Ofdm(Guard::Normal)) => "OFDM",
-        None => "",
+        Some(Wave::Lifeline) | None => "",
     }
 }
 
@@ -178,6 +178,8 @@ pub struct Readout {
     pub peer: Option<usize>,
     /// The highest level the peer's reports allow us.
     pub ceiling: Option<usize>,
+    /// The link holds below the floor (`ion` docs/link.md, Lifeline).
+    pub hold: bool,
 }
 
 /// The current level, large, with its name and rate, over the ladder:
@@ -189,6 +191,7 @@ pub fn readout(ui: &mut egui::Ui, r: &Readout, width: f32, s: f32) {
     let p = ui.painter_at(rect.expand(2.0));
     let color = if r.sending { theme::US } else { theme::PEER };
     let (big, name, sub) = match r.level {
+        _ if r.hold => ("Hold".into(), String::new(), String::new()),
         Some(l) => {
             let short = theme::level_short(l);
             let name = short
@@ -205,7 +208,7 @@ pub fn readout(ui: &mut egui::Ui, r: &Readout, width: f32, s: f32) {
     let g = p.layout_no_wrap(
         big,
         FontId::monospace(34.0 * s),
-        if r.level.is_some() {
+        if r.level.is_some() || r.hold {
             color
         } else {
             theme::MUTED.lerp_to_gamma(theme::BG, 0.4)

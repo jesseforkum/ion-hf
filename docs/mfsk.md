@@ -4,9 +4,10 @@
 (burst layout and header), `phy_mfsk/conv.rs` (header code),
 `phy_mfsk/rx.rs` with `rx/detect.rs`, `rx/acquire.rs`, `rx/model.rs` and
 `rx/data.rs` (receiver), `phy_mfsk/id.rs` (frame decoding),
-`phy_mfsk/util.rs`. This is the robust floor of the Ion ladder: every link
-connects here and climbs to the OFDM levels ([phy.md](phy.md)) when the
-channel allows.
+`phy_mfsk/util.rs`. `MfskLayout` stretches both modes in time for a
+narrower band (Below the floor, a study). This is the robust floor of
+the Ion ladder: every link connects here and climbs to the OFDM levels
+([phy.md](phy.md)) when the channel allows.
 
 The OFDM levels need coherent channel estimates, and those fail on flutter
 and long echoes: on CCIR flutter and the disturbed ITU channels no OFDM
@@ -101,7 +102,11 @@ the burst, so a fade hits a few bits of many codewords.
 The mode and the header type are not sent as bits: they select the CRC's
 initial value (CRC-16-CCITT, polynomial 0x1021; four initial values), and
 the receiver tries all four hypotheses. A header decoded under the wrong
-hypothesis fails its CRC.
+hypothesis fails its CRC. A time-scaled layout (Below the floor) XORs a
+value of its own k into the initial value (none at k = 1, so the full
+band's headers are as they were), so a receiver of one layout never takes
+another's header: R1/7, the link's lifeline, and the full band cannot
+mistake each other's bursts (`tests/lifeline.rs`).
 
 **Code.** A K = 15 tail-biting convolutional code whose every trellis step
 emits a whole tone: 5 output bits = one 32-ary symbol, one information bit
@@ -478,6 +483,7 @@ spurious 295 ppm.
 | `tests/apriori.rs`, `tests/slotted.rs` | A priori and expected-slot reception of check-ins ([net.md](net.md)) |
 | `tests/blanker.rs` | Clean bursts keep their bits and timing through the blanker; bursts with clicks survive with it |
 | ignored | `tables`, `papr_and_spectrum`, `cpu_cost`, `diag_*` (single bursts, detection, noise, drift, `diag_ldpc_threshold`, `diag_bicm_id`) |
+| `tests/phy_mfsk_narrow.rs` | Scaled layouts: burst lengths, constant envelope, round trips in the outer slots and at half band, repeated codewords; ignored: the tables of Below the floor and `diag_full_band_hash` |
 
 ## Design numbers
 
@@ -500,6 +506,311 @@ the GF(32) code recovers (3.9 dB on AWGN, [fec.md](fec.md)). At SNR in
 +18.3 dB for the whole 28 ms symbol, so R0 with the GF(32) code should
 decode from about −14 dB on AWGN; it measures 0.80 at −14 dB and 1.00 at
 −13 dB.
+
+## Below the floor (study)
+
+A study of weak-signal options for the worst HF below R0, in two
+families; R1/7 has since become the link's lifeline ([link.md](link.md),
+Lifeline). **Narrow:** the same noncoherent 32-ary MFSK in one
+400 Hz slot of the six in [phy.md](phy.md) (Six slices, centres 500–2500
+Hz), room for five other stations. **Full band:** something more robust
+than R0 in the whole channel (longer symbols, repetition).
+`crates/ion/tests/phy_mfsk_narrow.rs`; everything simulated, nothing on
+the air.
+
+### Time-scaled layouts
+
+`MfskLayout` stretches a whole burst k times in time and divides every
+tone's offset from the centre by k (`modulate_with`,
+`modulate_symbols_with`, `MfskRx::with_layout`; `MfskLayout::FULL` is
+k = 1). The receiver decimates by 6k instead of 6, so in its own samples
+it sees exactly an R0 or R1 burst: detector, sync, burst model, metrics,
+discriminator and drift gate run unchanged, and so do the header code,
+the GF(32) code and the Costas preamble. What changes with k:
+
+- **Front end.** 510k + 1 taps (the full band's filter in the receiver's
+  own samples), cut-off widened with the detector range; the cost per
+  second stays that of the full band's filter.
+- **Detector range** ±`hmax` half-bins (25/k Hz each): 3k up to 9, so
+  ±75 Hz for k ≤ 3 and ±225/k Hz beyond (±32 Hz at k = 7). Its 121-bin
+  spectrum holds no more.
+- **Sweep** k ms, proportional (`sweep`; a 2k ms variant was measured).
+- **Reported units:** `snr_db` (the window's noise bandwidth is (8000/k)/w
+  Hz), `freq_offset_hz`, the channel report's delay and Doppler are in
+  real units again.
+
+So R1/k on a channel with delay spread τ and Doppler spread σ behaves as
+R1 on (τ/k, k·σ), 10·log10(k) dB lower on AWGN, at 1/k of the rate. The
+full band is untouched: hashes of R0 and R1 bursts and of the receiver's
+output (LLRs, metrics, SNR, offset, start, clock) on CCIR poor with an
+offset are the same before and after the change (`diag_full_band_hash`),
+and the rest of the `ion` tests pass. Every layout keeps the constant
+envelope at `TX_LEVEL`: the same peak and the same mean power as the full
+band (`scaled_layout_numbers`); no level's power changes.
+
+### Candidates
+
+| | R0 | R1 | R1/6 | R1/7 | R1/8 | R0/2 | R1/2 | R0 ×2 | Sixth QPSK 1/4 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Tone spacing, Hz | 50 | 71.4 | 11.9 | 10.2 | 8.9 | 25 | 35.7 | 50 | 25 (13 carriers) |
+| Data symbol, ms | 28 | 14 | 84 | 98 | 112 | 56 | 28 | 28 | 50 |
+| Preamble symbol, ms | 28 | 28 | 168 | 196 | 224 | 56 | 56 | 28 | OFDM, 308 ms A ([phy.md](phy.md)) |
+| Occupied, data / preamble, Hz | 2450 | 2357 / 2450 | 393 / 408 | 337 / 350 | 295 / 306 | 1225 | 1179 / 1225 | 2450 | 325 |
+| Raw bit/s | 178.6 | 357.1 | 59.5 | 51.0 | 44.6 | 89.3 | 178.6 | 178.6 | — |
+| Header-only burst, s | 1.79 | 1.12 | 6.73 | 7.85 | 8.97 | 3.59 | 2.24 | 1.79 | 2.21 |
+| One 32-byte frame (205 tones), burst s | 7.98 | 4.22 | 25.29 | 29.50 | 33.72 | 15.96 | 8.43 | 13.72 | 15.71 ¹ |
+| Net bit/s, one frame per burst | 32.1 | 60.7 | 10.1 | 8.7 | 7.6 | 16.0 | 30.4 | 18.7 | 91.6 ¹ |
+| Mean power against a steady carrier at the same peak | 0 dB | 0 dB | 0 dB | 0 dB | 0 dB | 0 dB | 0 dB | 0 dB | −7.2 dB ² |
+
+(`narrow_numbers`.) ¹ Sixth carries one K = 1440 codeword (a 180-byte
+long frame), as in the Six slices study. ² The Six slices study's
+waveform (link clip, no air gain). The link sends its slice levels
+low-PAPR and up to 3 dB over the carriers, −2.5 to −2.7 dB (Air mean in
+[link.md](link.md)); Sixth was not measured that way.
+
+R1/k puts R1's 32 tones in a slot; R1/7 leaves 25 Hz to the slot edge on
+either side (preamble 350 Hz), R1/6 overfills the slot with its preamble
+(408 Hz), R1/8 leaves 47 Hz. R0/k would need k = 8 to fit (306 Hz) and
+then sends 22 bit/s raw, a 64 s burst per frame: not measured. R0/2 and
+R1/2 occupy half the band, centred. **R0 ×2** sends the GF(32) codeword
+twice in one R0 burst (410 tones, interleaved over the burst as usual)
+and adds the two copies' tone metrics before decoding; ×4 likewise.
+
+### Thresholds
+
+`narrow_table`: real detection, sync and header, one GF(32) short frame
+(rate 1/4) per burst, symbol-mapped as the link sends it, 40 bursts per
+point on a 1 dB grid, 0.5k s of noise before and 0.6k s after each burst.
+Narrow layouts at 1300 Hz (the slot next to the centre), R0, R1 and the
+half-band layouts at 1500 Hz, Sixth at 1300 Hz. SNR is the burst's mean
+power against white noise in 2.4 kHz, as everywhere on this page; for the
+MFSK layouts that is also the SNR of a steady carrier at the same drive.
+IONOS MPD is `ion_dsp::ionos` (2 paths, 4 ms, 2 Hz, 3 kHz filter) with
+its own noise off and the same white noise added. Each cell is the lowest
+SNR with ≥ 90% right headers / ≥ 90% decoded frames. At 40 bursts a cell
+is good to about ±1 dB (a point near 0.9 flips on ±0.05): R0 on CCIR poor
+comes out −9 here, −11 in the 40-burst tables above (0.88 at −11 and −10
+here). Read differences of 1 dB as noise.
+
+| Wave | AWGN | CCIR moderate (1 ms, 0.5 Hz) | CCIR poor (2 ms, 1 Hz) | CCIR flutter (0.5 ms, 10 Hz) | NVIS disturbed (7 ms, 1 Hz) | ITU low-lat disturbed (6 ms, 10 Hz) | ITU high-lat disturbed (7 ms, 30 Hz) | IONOS MPD (4 ms, 2 Hz) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| R0 | −13 / −13 | −10 / −9 | −9 / −9 | −12 / −12 | −10 / −9 | −12 / −11 | −10 / −10 | −12 / −12 |
+| R1 | −11 / −11 | −7 / −6 | −8 / −7 | −10 / −9 | −6 / −4 | −9 / −7 | −8 / −6 | −8 / −8 |
+| Sixth QPSK 1/4 | −8 / −8 | −7 / −2 ³ | −6 / −6 | none ⁴ | −2 / +5 ³ | | | −6 / −6 |
+| **R1/6** | −19 / −18 | −17 / −16 | −17 / −17 | −16 / −15 | −17 / −16 | | | −19 / −18 |
+| **R1/7** | −20 / −19 | −17 / −17 | −18 / −17 | −16 / −15 | −18 / −17 | −16 / −15 | −11 / −11 | −19 / −18 |
+| **R1/8** | −20 / −20 | −17 / −17 | −18 / −18 | −16 / −16 | −19 / −17 | −16 / −16 | −14 / −13 | −20 / −19 |
+| **R0/2** | −17 / −16 | −13 / −13 | −14 / −14 | −15 / −14 | −14 / −14 | −15 / −14 | −12 / −12 | −16 / −16 |
+| **R1/2** | −14 / −13 | −10 / −10 | −12 / −11 | −13 / −12 | −11 / −10 | −13 / −11 | −11 / −10 | −13 / −12 |
+| R0, expected header | −15 / −14 | −11 / −10 | −12 / −10 | −14 / −12 | −12 / −10 | | | −14 / −12 |
+| R0 ×2 | −14 / −14 | −10 / −10 | −10 / −10 | −12 / −12 | −9 / −9 | | | −12 / −12 |
+| R0 ×2, expected header | −15 / −15 | −12 / −12 | −12 / −12 | −14 / −14 | −12 / −12 | | | −14 / −14 |
+| R0 ×4, expected header | −15 / −15 | −12 / −12 | −12 / −12 | −14 / −14 | −12 / −12 | | | −15 / −15 |
+| *Data2G c16r25, r1/3 (theirs)* ⁵ | −14.3 | | | −11.2 ᵇ | −9.9 ᵇ | | | −11.9 |
+| *Data2G c8r50, r1/3 (theirs)* ⁵ | −11.1 ᵇ | | | | | | | −8.1 ᵇ |
+
+³ Not thresholds: Sixth's loss floor on slow fading (Six slices in
+[phy.md](phy.md)); NVIS frames run 0.62–0.95 from −3 to +14 dB, CCIR
+moderate 0.77–0.88 from −7 to −3 dB. ⁴ Headers ≤ 0.55 and frames ≤ 0.05
+up to +14 dB. ⁵ Not measured here: Data2G's end-to-end 10%-failure points
+(`scripts/cpm_floor_study.py` at 12d1235), converted from mean power in
+2.5 kHz by +0.18 dB; c16r25 is 16 tones at 25 Hz (400 Hz), c8r50 8 tones
+at 50 Hz, both rate 1/3 with their GF(M) code where they quote it (AWGN,
+MPD; ᵇ marks their binary-code numbers, before the GF(M) code moved
+their points 0.3–1.7 dB lower). Their MPD is the
+same IONOS profile; their MPP (−11.3 c16r25, −7.6 c8r50) is IONOS's
+2 ms/1 Hz, not this page's Watterson CCIR poor.
+
+**Header-only bursts** (`r0h` … in `narrow_table`, 40 per point; the
+burst delivered with the right fields):
+
+| Wave | AWGN | CCIR poor | CCIR flutter | NVIS disturbed | IONOS MPD |
+|---|---:|---:|---:|---:|---:|
+| R0 (1.79 s) | −14 | −9 | −12 | −10 | −12 |
+| R1 (1.12 s) | −11 | −8 | −10 | −8 | −8 |
+| R1/7 (7.85 s) | −20 | −18 | −16 | −18 | −20 |
+| R0/2 (3.59 s) | −17 | −14 | −15 | −14 | −16 |
+| R1/2 (2.24 s) | −14 | −12 | −12 | −11 | −13 |
+
+**What the table says.**
+
+- **R1/k does what the scaling predicts on AWGN** (R1 −11 dB less
+  10·log10(k): −18.8, −19.5, −20.0; measured −18, −19, −20) and loses
+  only 1–4 dB to fading on every channel with Doppler up to 10 Hz:
+  −17 ± 1 on CCIR moderate and poor, NVIS disturbed and IONOS MPD, −15 on
+  flutter and low-latitude disturbed. Ladder-style (midway AWGN / CCIR
+  poor) R1/7 sits at −18 dB, 6 dB under R0's −12, at a quarter of its
+  speed per frame (both inputs ±1 dB; R0's own CCIR poor point reads
+  −9 here and −11 above). Its header-only burst decodes at the frame's SNR.
+- **Long symbols and Doppler.** The worry was 10 Hz tones against 10 Hz
+  of Doppler. The receiver's five-bin model (Receiver, step 5) collects the
+  leaked energy in ±2 bins; over a 98 ms window a fast-fading tone keeps a
+  steady energy, so fast fading costs noise (more bins) rather than deep
+  fades. On one Rayleigh path (`narrow_doppler`, frame thresholds):
+
+  | Doppler spread (2σ) | 0.5 Hz | 1 Hz | 2 Hz | 4 Hz | 8 Hz | 16 Hz |
+  |---|---:|---:|---:|---:|---:|---:|
+  | R1 | −4 | −6 | −7 | −9 | −8 | −9 |
+  | R1/7 | −16 | −17 | −17 | −17 | −16 | −14 |
+  | R0/2 | −12 | −13 | −14 | −15 | −14 | −13 |
+
+  Flat slow fading (0.5 Hz) is where a long burst helps most: R1's 4 s
+  burst sits in one fade, R1/7's 29 s burst sees many. At 30 Hz (ITU
+  high-latitude disturbed) R1/7 still decodes from −11 dB, level with R0
+  (R1/8: −13; the two differ within the noise of a flat curve, 0.85–0.88
+  from −14 to −12 dB).
+- **Energy per bit.** Eb/N0 = SNR + 10·log10(2400 / information rate
+  during the data): on AWGN R0, R1, R1/7, R0/2, R1/2 and Data2G's c16r25
+  all need 3.3–4.3 dB (c16r25 taken as 4 bits per 40 ms at rate 1/3); on
+  IONOS MPD R1/7 needs 4.8 dB, R0/2 4.3, R0 5.3,
+  R1/2 5.3, R1 6.3, c16r25 6.7; on CCIR poor R1/7 5.8, R0/2 and R1/2 6.3,
+  R0 6.3–8.3, R1 7.3. The narrow layouts are not less efficient than the
+  full band; on fading they are a little more.
+- **R0/2 and R1/2.** R0/2 is 3 dB under R0 on AWGN and 2–5 dB on fading,
+  at half R0's speed. R1/2 carries R0's 32 bytes in 8.43 s (R0 7.98 s)
+  in half the band and matches or beats R0 within the noise (CCIR poor
+  −11 against R0's −9 here and −11 in the tables above).
+- **Repetition is header-limited.** R0 ×2 decodes its frame wherever its
+  header decodes (frame = header at every point of every curve), so the
+  burst's threshold is R0's header: −14 / −10 / −9 dB (AWGN, CCIR poor,
+  NVIS), no gain. With the receiver told when the burst starts and what
+  its header holds (`Expect`, the net's primed reception), the
+  expected-header test floors at −15 dB AWGN and −12 dB on fading, and ×2
+  and ×4 both stop there: 1–2 dB over plain R0 with an expected header
+  (−14 / −10), at half or a quarter of the speed. Going lower needs a
+  longer preamble and header, which time stretching gives and repetition
+  does not. HARQ (`link::harq`) is for long OFDM frames only and does not
+  apply to the floor's short frames.
+
+### Acquisition, drift, neighbours
+
+**Frequency offset, drift, sample clock** (`narrow_offsets`, AWGN at −16
+dB, 3 dB above R1/7's frame threshold, 20 bursts per point; header /
+frame):
+
+| | R1/7 | R1/8 |
+|---|---|---|
+| Offset decoded (all 20) | −35 … +35 Hz | −30 … +30 Hz |
+| Offset lost (0 of 20) | ±40, ±50 Hz | ±35 Hz and beyond |
+| Frequency drift ±0.1, ±0.2 Hz/s (from 0 Hz) | 1.00 / 1.00 | 1.00 / 1.00 |
+| Frequency drift −0.5 / +0.5 Hz/s | 1.00 / 0.30, 1.00 / 0.10 | 1.00 / 0.25, 1.00 / 0.20 |
+| Sample clock −200, −100, +100, +200 ppm | 1.00 / 1.00 each | 1.00 / 1.00 each |
+
+The pull-in is the detector's ±9 half-bins (±32 Hz at k = 7, ±28 Hz at
+k = 8) plus the sync's ±16 receiver-Hz; beyond it nothing is found.
+Within it the offset costs nothing at 3 dB margin; how much it costs at
+the threshold was not measured (Data2G finds 0.75 dB for a 4 Hz error on
+c16r25, whose receiver does not track frequency the same way). A drift of
+0.5 Hz/s moves a 29 s burst 15 Hz and the discriminator (every 16
+symbols) loses it; 0.2 Hz/s (6 Hz over the burst) is fine. The clock
+gate needs six 0.9k s blocks, so it starts 38 s into an R1/7 burst, after
+the burst has ended: these bursts run untracked, and ±200 ppm (±6 ms over
+29 s, against 98 ms symbols) does not matter.
+
+**Spectrum** (`narrow_spectrum`, averaged periodogram of 6-frame bursts at
+1300 Hz; dB per 10 Hz against the strongest 10 Hz, at offsets above the
+centre, and the share of the power beyond ±200 Hz, in the next slots):
+
+| | +175 Hz | +200 Hz | +225 Hz | +250 Hz | +300 Hz | +400 Hz | Beyond ±200 Hz |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R1/6 | −1 | −17 | −25 | −31 | −41 | −55 | −27 dB |
+| R1/7 | −17 | −29 | −34 | −40 | −48 | −63 | −36 dB |
+| R1/7, 14 ms sweep | −18 | −31 | −38 | −47 | −58 | −77 | −41 dB |
+| R1/8 | −26 | −35 | −40 | −46 | −55 | −71 | −43 dB |
+
+**Six slots side by side** (`narrow_neighbours`: a burst in every slot,
+staggered so all six overlap for most of their length, a receiver in
+every slot of unit power, noise against one slot; 10 runs per case):
+
+| Case | R1/6 | R1/7 | R1/7, 14 ms sweep |
+|---|---|---|---|
+| One slot alone, six equal: −15 and −10 dB | — | 10/10, 60/60 | 10/10, 60/60 |
+| 900 Hz slot +20 dB, on its centre and 10 Hz towards 500 Hz: −15, −10 dB | — | 50/50 each | 50/50 each |
+| Six equal at −17 dB | 60/60 | 60/60 | 60/60 |
+| 900 Hz slot +30 dB, −17 dB | 39/50 | 50/50 | 50/50 |
+| 900 Hz slot +30 dB and 20 Hz towards 500 Hz, −17 dB | 40/50 | 50/50 | 50/50 |
+
+No receiver delivered another slot's burst. R1/7 keeps every frame next
+to a neighbour 30 dB stronger and 20 Hz closer, 2 dB above its threshold;
+R1/6, whose preamble fills the slot, loses one in five there. The 14 ms
+sweep cleans the skirts by 5 dB but was not needed. Not tested: a
+stronger neighbour of another waveform (OFDM, full-band MFSK) or real
+clicks, where the blanker (full band, before the mix-down) may zero up to
+20 ms of a weak slot when a strong neighbour starts.
+
+**False triggers** (`narrow_noise`, 600 s of white noise per receiver):
+
+| | Detector triggers | Synced | Headers | Bursts | `busy()` |
+|---|---:|---:|---:|---:|---:|
+| R1 (full band) | 180 | 170 | 0 | 0 | 0% |
+| R1/7 | 64 | 60 | 0 | 0 | 0% |
+| R0/2 | 183 | 171 | 0 | 0 | 0% |
+
+R1/7's detector runs every 49 ms instead of 7 ms, over 19 frequency
+hypotheses instead of 7: about a third of the full band's triggers.
+
+**CPU** (`narrow_cpu`, release, one thread; 120 s of noise with one-frame
+bursts 40 s apart, 10 ms chunks; the machine was busy with another job,
+so the absolute numbers are about 2.7× those of the CPU table above and
+only the ratios count):
+
+| | RX per second of audio | Worst 10 ms chunk | TX per second of burst |
+|---|---:|---:|---:|
+| R0 | 53.6 ms | 102 ms | 2.1 ms |
+| R1 | 49.0 ms | 101 ms | 2.2 ms |
+| R1/7 | 7.8 ms | 52 ms | 2.0 ms |
+| R0/2 | 30.7 ms | 112 ms | 2.2 ms |
+
+An R1/7 receiver costs a seventh of R0's (everything after the front end
+runs k times less often, and the front end's taps grow as its output rate
+falls); six of them, one per slot, about one R0 receiver.
+
+### Not built, not measured
+
+- **16 and 8 tones in a slot** (25 Hz × 16, 50 Hz × 8): not built. The
+  header code emits one 32-ary tone per trellis step and the GF(32) code
+  one per code symbol; fewer tones need a new header labelling and the
+  binary short code with iterative demapping (1–2 dB worse, Data
+  mapping). Data2G's c16r25 and c8r50 (table rows above) are the
+  reference: c16r25 sends 2.6× R1/7's information rate for 5 dB more on
+  AWGN and 6 dB more on MPD, about the same Eb/N0 on AWGN and 2 dB more
+  on fading.
+- **A purpose-built slot preamble.** R1/k keeps R0's preamble: 16 symbols
+  of 28k ms (3.1 s at k = 7) on a 48-bin grid. A preamble on R1/k's own
+  grid with 100 ms symbols would save about 1.5 s per burst (a fifth of a
+  header-only burst).
+- **Lower code rates** (a rate-1/8 GF(32) code) and **header repetition**
+  (a fifth header hypothesis summing two copies before the Viterbi
+  decoder): not built; repetition shows the header, not the data, sets
+  the threshold, and stretching does both at once.
+- Expected-header reception, LLR calibration, the channel report and
+  clock tracking in scaled layouts; offsets and drift on fading channels;
+  cross-detection between layouts (since settled: the header CRC now
+  names the layout, Header);
+  Doppler beyond 16 Hz on one path; burst-to-burst behaviour in a link
+  (ARQ timing, 7.85 s ACKs, connect). Nothing on the air.
+
+### Recommendation
+
+- **R1/7 as a slot mode and as a deep floor.** Frames from −19 dB on
+  AWGN and −17 ± 1 dB on every slow- and moderate-Doppler channel, −15 dB
+  on 10 Hz flutter, about −11 to −13 dB at 30 Hz (a flat curve, see
+  above); ladder threshold about −18 dB (midway AWGN −19 and CCIR poor
+  −17, each ±1 dB), about 6 dB under R0's −12. It fits 350 Hz, sits beside five others and a neighbour
+  30 dB stronger, pulls in ±35 Hz, costs a seventh of an R0 receiver.
+  Price: 8.7 bit/s net per 32-byte frame (a 29.5 s burst) and a 7.85 s
+  header-only ACK. R1/8 is the same within the noise with 47 Hz to the
+  slot edge and 13% slower; R1/6 overfills the slot.
+- **Not repetition** for the full band: header-limited, at most 1–2 dB
+  with an expected header.
+- **R0/2 as an intermediate rung** (−16 / −14 dB, 16 bit/s), and **R1/2**
+  as a half-band equal of R0 (same speed, same or better thresholds),
+  both worth a 120-burst rerun before anyone relies on the 1–2 dB
+  differences.
+- Sixth stays where the Six slices study left it: ten times R1/7's speed
+  in the same slot, but 11 dB more SNR on AWGN and CCIR poor (another
+  7 dB at the same peak), a loss floor on slow fading and nothing on
+  flutter.
 
 ## Sources
 

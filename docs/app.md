@@ -119,7 +119,8 @@ last broadcast burst's when groups are open and no link is up), with its
 modulation and code rate, its waveform and the payload rate of a full
 burst of it. Under it the ladder L0–L16: the levels up to the current one
 lit, the ceiling the peer's reports allow marked above (▼), and below our
-level (blue ▲) and the peer's (orange ▲).
+level (blue ▲) and the peer's (orange ▲). While the link holds in the
+lifeline it reads **Hold**.
 
 While the stream gear runs, a line under S/N, Rate and Data gives
 **Stream** (its option, blue ours, orange the peer's), **Period** (periods
@@ -162,6 +163,33 @@ far end has not yet acknowledged (Pat waits for 0 before closing).
 gives the S/N of the last burst heard. `ABORT` also drops what broadcast
 frames are queued.
 
+`DATA2G ON` (answered `OK`; off with `DATA2G OFF` or when the command
+client leaves) is how a client made for Data2G's host (Ragtime) says it
+knows that host's extensions. Ion offers one of them: `DISCONNECTED`
+says why the link ended, in Data2G's words (`DISCONNECTED reason
+[detail] [unconfirmed]`, its `docs/arq.md` §9):
+
+| Reason | When |
+|---|---|
+| `CLIENT` | this end's `DISCONNECT` (or a call given up); `unconfirmed` if the goodbye went unacknowledged |
+| `PEER` | the far end closed it |
+| `ABORT` | `ABORT`, or the link stopped in Ion itself |
+| `LINK_LOST` | nothing heard from the far end for too long |
+| `LINK_FAILED weak path` | the lifeline's hold ran out: the path stayed below the floor for 15 minutes and both ends closed by agreement ([link.md](link.md), Lifeline) |
+| `NO_ANSWER` | the call went unanswered |
+
+Without `DATA2G ON` it stays plain `DISCONNECTED`. Data2G's other
+`DATA2G ON` extensions (`CLEANTXBUFFER` with offsets, `TIMEOUT`,
+`TXPOWER`) are answered `WRONG`, as before.
+
+**Holding below the floor.** When the link falls below its slowest level
+it holds in the lifeline ([link.md](link.md), Lifeline) and stays
+`CONNECTED`: `BUFFER` keeps counting what is unacknowledged (nothing
+moves until the link resumes), `PTT ON/OFF` follows the lifeline's 8 s
+bursts and `BUSY` the far end's. The level readout shows **Hold**. A
+client with its own timeout (Pat's, a Winlink session's) may
+give up first; the lifeline holds for up to 15 minutes.
+
 Broadcast groups ([broadcast.md](broadcast.md)), as Data2G's host offers
 them, on the KISS port 200 below the command port (8100):
 
@@ -194,7 +222,9 @@ and once at its end (§97.119). The station that did not close the link
 waits for the other's CW ID plus 1.5 s before it transmits. Both ends time
 the mid-link IDs from the same instant, so each waits out the other's ID
 instead of polling into it (`cw_id_breaks_do_not_cost_polls` in
-`crates/ion/tests/node.rs`).
+`crates/ion/tests/node.rs`). A link holding in the lifeline probes right
+after each ID time, so the ID still goes on time
+(`cw_ids_stay_on_time_through_a_hold` in `crates/ion/tests/lifeline.rs`).
 
 **Radio notes.**
 

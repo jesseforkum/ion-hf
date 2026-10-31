@@ -6,7 +6,7 @@ use super::model::{Params, estimate, header_prior, header_prior_r1, metric, mutu
 use super::{Active, Cand, EXT, Energies, Known, MARGIN, MfskRx, NE, RING, gi};
 use crate::phy_mfsk::frame::{self, Fmt, HYPS, Kind, PRE_LEN};
 use crate::phy_mfsk::util::lse;
-use crate::phy_mfsk::{DEC, MfskMode, SYM, TRANSITION, bin_hz, conv};
+use crate::phy_mfsk::{MfskMode, SYM, bin_hz, conv};
 
 /// Timing search range around the coarse estimate, baseband samples.
 const DSEARCH: i32 = 64;
@@ -121,7 +121,7 @@ impl MfskRx {
         let dmax = *c.d.iter().max().unwrap() as i64;
         let mut pending = false;
         for (hi, &(mode, kind)) in HYPS.iter().enumerate() {
-            if c.tried[hi] {
+            if c.tried[hi] || !self.modes[gi(mode)] {
                 continue;
             }
             let hs = frame::header_symbols(mode, kind);
@@ -242,7 +242,7 @@ impl MfskRx {
             }
             debug_assert_eq!(steps, nbits);
             let bits = conv::decode(steps, |j, l| lam[frame::header_slot(fmt, kind, j) * vals + l]);
-            if let Some((user, extra, nb, sym)) = frame::parse_header(mode, kind, &bits) {
+            if let Some((user, extra, nb, sym)) = frame::parse_header(self.layout.k, mode, kind, &bits) {
                 return Some(self.start_burst(c, mode, kind, user, extra, (nb, sym), &bits));
             }
         }
@@ -281,8 +281,9 @@ impl MfskRx {
         let fmt = g.fmt;
         // The length field as sent: a symbol-mapped burst flags it.
         let field = h.nbits | if h.symbols && h.nbits > 0 { frame::SYM_FLAG } else { 0 };
+        let k = self.layout.k;
         let values_of = |user: u16, extra: u16| {
-            frame::header_values(mode, kind, &frame::header_bits(mode, kind, user, extra, field))
+            frame::header_values(mode, kind, &frame::header_bits(k, mode, kind, user, extra, field))
         };
         let cand_values: Vec<Vec<[u16; 3]>> = cands.iter().map(|&(u, x)| values_of(u, x)).collect();
         let hs = cand_values[0].len();
@@ -360,7 +361,7 @@ impl MfskRx {
             return None;
         }
         self.stats.known_headers += 1;
-        let info = frame::header_bits(mode, kind, bu, bx, field);
+        let info = frame::header_bits(self.layout.k, mode, kind, bu, bx, field);
         Some(self.start_burst(c, mode, kind, bu, bx, (h.nbits, h.symbols && h.nbits > 0), &info))
     }
 
@@ -460,11 +461,14 @@ impl MfskRx {
         );
         let (_, _, wi, dsel, params) = best.unwrap();
         let w = wins[wi];
-        let snr_db = 10.0 * (fmt.tones as f32 * params.gtot).max(1e-6).log10() - 10.0 * (0.3 * w as f32).log10();
+        // The window's noise bandwidth is (8000/k)/w Hz: 2400 Hz is 0.3·k·w
+        // of it.
+        let k = self.layout.k as f32;
+        let snr_db = 10.0 * (fmt.tones as f32 * params.gtot).max(1e-6).log10() - 10.0 * (0.3 * k * w as f32).log10();
         // The whole-symbol window peaks half a frequency sweep late (the
         // next symbol's sweep starts on the current tone).
         let dstart = if mode == MfskMode::R0 { d[2] } else { c.d[2] };
-        let t0 = c.t0c + dstart as i64 - (TRANSITION / DEC / 2) as i64;
+        let t0 = c.t0c + dstart as i64 - (self.layout.sweep / self.layout.dec() / 2) as i64;
         let start_sample = self.audio_start(t0).max(0) as u64;
         Active {
             mode,

@@ -108,15 +108,16 @@ fn small_transfers_and_high_snr_stay_on_arq() {
     assert_eq!(periods(&sim), 0);
 }
 
-/// The ConnReq's caps with the gear off are what alpha.5 sent (CUE only),
-/// and with it on one bit more.
+/// The ConnReq's caps with the gear and the lifeline off are what alpha.5
+/// sent (CUE only), and with each on one bit more.
 #[test]
 fn the_conn_req_without_the_stream_is_alpha5s() {
     let air: Arc<dyn Air> = Arc::new(ModelAir::default());
-    let req = |on: bool| -> Outgoing {
+    let req = |stream: bool, lifeline: bool| -> Outgoing {
         let mut s = Station::new(
             Config {
-                stream: on,
+                stream,
+                lifeline,
                 ..Config::new("N0JLF")
             },
             air.clone(),
@@ -125,13 +126,16 @@ fn the_conn_req_without_the_stream_is_alpha5s() {
         s.poll_tx(0.0).unwrap()
     };
     let flags_of = |b: &Outgoing| Frame::decode(&b.frames[0]).unwrap();
-    let (off, on) = (req(false), req(true));
-    let (f_off, f_on) = (flags_of(&off), flags_of(&on));
+    let (off, on, life) = (req(false, false), req(true, false), req(false, true));
+    let (f_off, f_on, f_life) = (flags_of(&off), flags_of(&on), flags_of(&life));
     assert_eq!(f_off.kind, Kind::ConnReq);
     assert_eq!(f_off.flags, caps::CUE << flags::CAPS_SHIFT);
     assert_eq!(f_on.flags, f_off.flags | caps::STREAM << flags::CAPS_SHIFT);
+    assert_eq!(f_life.flags, f_off.flags | caps::LIFELINE << flags::CAPS_SHIFT);
     assert_eq!(f_on.payload, f_off.payload);
+    assert_eq!(f_life.payload, f_off.payload);
     assert_eq!((off.wave, off.code, off.user), (on.wave, on.code, on.user));
+    assert_eq!((off.wave, off.code, off.user), (life.wave, life.code, life.user));
 }
 
 #[test]

@@ -1,6 +1,8 @@
 //! Receiving side: data bursts in, ACKs out.
 
-use super::{FLOOR_WAVE, Incoming, Outgoing, Role, STALL_S, Station, TINY, TINY_ALL, more_robust, user_hi, wave_down};
+use super::{
+    End, FLOOR_WAVE, Incoming, Outgoing, Role, STALL_S, Station, TINY, TINY_ALL, more_robust, user_hi, wave_down,
+};
 use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::link::frame::{AckInfo, Frame, Kind, TINY_ACK_FRAMES, Tiny, caps, flags};
 use crate::link::harq;
@@ -96,6 +98,9 @@ impl Station {
                     self.stats.codewords_failed += 1;
                 }
             }
+            if bitmap != 0 {
+                self.last_moved = now;
+            }
             let stored = !self.harq.is_empty();
             self.last_ack = (user_hi(inc.user) & 3, bitmap, frames.len(), stored);
             let mut ack = self.ack_burst(inc.wave);
@@ -127,12 +132,14 @@ impl Station {
                     self.ack_cap = Some(self.ack_cap.map_or(down, |c| more_robust(c, down)));
                 } else {
                     self.last_progress = now;
+                    self.last_moved = now;
                 }
                 let wave = self.capped_ack_wave(inc.wave, now);
                 self.reply = Some(self.ack_burst(wave));
             }
             Some(Tiny::Turn { snr_db: report }) => {
                 self.last_progress = now;
+                self.last_moved = now;
                 // Our turn to send: start where the peer was getting
                 // through, capped by what we hear. With nothing queued,
                 // check in at once so the peer sees we took over.
@@ -171,6 +178,7 @@ impl Station {
             Some(Tiny::DiscReq) => {
                 self.reply = Some(self.tiny(Tiny::DiscAck, inc.wave));
                 self.close_after_tx = true;
+                self.close_end = End::Peer;
             }
             _ => {}
         }

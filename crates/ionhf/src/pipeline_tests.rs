@@ -362,8 +362,8 @@ fn winlink_host_drives_a_ion_link() {
 
 /// A client made for Data2G's host (Ragtime) comes up on Ion: it opens the
 /// KISS port beside the command and data ports, sends its start-up
-/// commands, gets its broadcast group and Ion's one mode (and is refused
-/// only `DATA2G ON`), and holds a session.
+/// commands, gets its broadcast group and Ion's one mode, holds a session,
+/// and (with `DATA2G ON`) is told why it ended.
 #[test]
 fn ragtime_style_client_comes_up_and_holds_a_session() {
     let mut rig = Rig::new();
@@ -390,7 +390,7 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
         [
             "OK",
             "OK",
-            "WRONG",
+            "OK",
             "OK",
             "OK",
             "BCAST PORT 1",
@@ -417,7 +417,7 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
     assert!(c.read_until(&mut rig, 5, sn), "{:?}", c.said);
     c.send("DISCONNECT");
     assert!(
-        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED")),
+        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED CLIENT")),
         "{:?}",
         c.said
     );

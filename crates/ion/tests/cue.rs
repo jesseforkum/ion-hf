@@ -48,8 +48,10 @@ fn link(cue_a: bool, cue_b: bool, snr_db: f32) -> (Sim, Arc<Mutex<Seen>>) {
     let cfg = |call: &str, cue: bool| {
         let mut c = audio::config(call);
         c.cue = cue;
-        // Cues alone: the stream gear has its own tests (`tests/stream.rs`).
+        // Cues alone: the stream gear and the lifeline have their own tests
+        // (`tests/stream.rs`, `tests/lifeline.rs`).
         c.stream = false;
+        c.lifeline = false;
         c
     };
     let a = Station::new(cfg("N0JLF", cue_a), air.clone());

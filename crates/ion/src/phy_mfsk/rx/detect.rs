@@ -14,8 +14,6 @@ pub(super) const NK: usize = 121;
 const K0: i32 = -60;
 /// Detector columns kept.
 pub(super) const NCOL: usize = 128;
-/// Frequency hypotheses of the detector: ±HMAX × 25 Hz.
-const HMAX: i32 = 3;
 /// Detector threshold on the normalised Costas energy (mean 1 on noise).
 const Z_DET: f32 = 1.9;
 /// Cap on one preamble symbol's contribution to the detector statistic,
@@ -51,7 +49,8 @@ impl MfskRx {
             // the raw one locates the peak (the clamp flattens it at high
             // SNR).
             let mut best = (f32::MIN, f32::MIN, 0i32);
-            for h in -HMAX..=HMAX {
+            let hmax = self.layout.hmax;
+            for h in -hmax..=hmax {
                 let (mut z, mut zr) = (0.0, 0.0);
                 for i in 0..PRE_LEN {
                     let c = (self.n_col - 4 * (PRE_LEN as u64 - 1 - i as u64)) as usize % NCOL;

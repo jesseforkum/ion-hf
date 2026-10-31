@@ -20,6 +20,13 @@
 //! `BCAST n HEARD [call] snr`, `BCAST n LOST k` and `BCAST n DROPPED k`.
 //! `MODES` lists one mode, `ION` (Ion picks its levels itself), and
 //! `BCAST MODE n ...` is answered `OK` for an open port.
+//!
+//! `DATA2G ON` (off again with `DATA2G OFF` or when the command client
+//! leaves): `DISCONNECTED` says why, as Data2G's host does (its
+//! `docs/arq.md` §9): `CLIENT`, `PEER`, `ABORT`, `LINK_LOST`,
+//! `LINK_FAILED weak path` (the lifeline's hold ran out), `NO_ANSWER`,
+//! with `unconfirmed` when our goodbye went unacknowledged. Data2G's other
+//! `DATA2G ON` extensions are not offered (`WRONG`, as before).
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -29,9 +36,25 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use ion::link::State;
+use ion::link::station::End;
 
 use crate::engine::UiEvent;
 use crate::ion_engine::{IonCmd, IonStatus};
+
+/// Data2G's words for why a link ended (`DISCONNECTED reason [detail]
+/// [unconfirmed]`).
+fn end_words(end: Option<End>, state: State) -> String {
+    let unconfirmed = |c: bool| if c { "" } else { " unconfirmed" };
+    match end {
+        Some(End::Client { confirmed }) => format!("CLIENT{}", unconfirmed(confirmed)),
+        Some(End::Peer) => "PEER".into(),
+        Some(End::NoAnswer) => "NO_ANSWER".into(),
+        Some(End::LinkLost) => "LINK_LOST".into(),
+        Some(End::Weak { confirmed }) => format!("LINK_FAILED weak path{}", unconfirmed(confirmed)),
+        None if state == State::Failed => "LINK_LOST".into(),
+        None => "ABORT".into(),
+    }
+}
 
 /// From the Ion worker to the host interface.
 #[derive(Debug)]
@@ -240,6 +263,8 @@ struct Host {
     ports: std::collections::BTreeMap<u8, String>,
     /// The command client has sent a BCAST command: it gets the statuses.
     bcast_client: bool,
+    /// The command client sent `DATA2G ON`: DISCONNECTED says why.
+    data2g: bool,
 }
 
 impl Host {
@@ -266,6 +291,7 @@ impl Host {
             kiss_out: Vec::new(),
             ports: std::collections::BTreeMap::new(),
             bcast_client: false,
+            data2g: false,
         }
     }
 
@@ -319,6 +345,7 @@ impl Host {
                     // Its groups go with it ("KISS 0" stays with the KISS
                     // client).
                     self.bcast_client = false;
+                    self.data2g = false;
                     let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
                     for p in open {
                         self.close_port(p);
@@ -467,7 +494,7 @@ impl Host {
                     // Nothing up (or still calling): give up now, and ID.
                     let _ = self.ion.send(IonCmd::GiveUp);
                     self.calling = None;
-                    self.say("DISCONNECTED");
+                    self.disconnected("CLIENT");
                     self.relisten();
                 }
             }
@@ -476,9 +503,13 @@ impl Host {
                 let _ = self.ion.send(IonCmd::Stop);
                 self.calling = None;
                 if self.connected.take().is_some() {
-                    self.say("DISCONNECTED");
+                    self.disconnected("ABORT");
                 }
                 self.relisten();
+            }
+            ["DATA2G", on @ ("ON" | "OFF")] => {
+                self.data2g = *on == "ON";
+                self.say("OK");
             }
             ["SN"] => match self.last_snr {
                 Some(s) => self.say(&format!("SN {s:.1}")),
@@ -534,6 +565,15 @@ impl Host {
         }
     }
 
+    /// DISCONNECTED, with `why` for a client that sent `DATA2G ON`.
+    fn disconnected(&mut self, why: &str) {
+        if self.data2g {
+            self.say(&format!("DISCONNECTED {why}"));
+        } else {
+            self.say("DISCONNECTED");
+        }
+    }
+
     fn open_port(&mut self, p: u8, name: &str) {
         self.ports.insert(p, name.to_string());
         let _ = self.ion.send(IonCmd::GroupOpen(p, name.to_string()));
@@ -573,7 +613,8 @@ impl Host {
                     let was_up = self.connected.take().is_some();
                     let was_calling = self.calling.take().is_some();
                     if was_up || was_calling {
-                        self.say("DISCONNECTED");
+                        // Idle or Listening: the link was stopped here.
+                        self.disconnected(&end_words(s.end, state));
                         if state != State::Listening {
                             self.relisten();
                         }

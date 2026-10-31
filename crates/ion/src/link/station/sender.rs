@@ -1,7 +1,7 @@
 //! Sending side: ACKs in, data bursts out.
 
 use super::{
-    Awaiting, Incoming, MAX_FRAMES, Outgoing, Sent, State, Station, TINY, TINY_ALL, WINDOW_BYTES, top_level_in,
+    Awaiting, End, Incoming, MAX_FRAMES, Outgoing, Sent, State, Station, TINY, TINY_ALL, WINDOW_BYTES, top_level_in,
     user_bits,
 };
 use crate::level::{FLOOR, FrameSize, Guard, LADDER, Wave};
@@ -29,6 +29,7 @@ impl Station {
                     Awaiting::ConnAck,
                 ) => {
                     self.last_progress = now;
+                    self.last_moved = now;
                     self.link_t0 = Some(now - self.air.duration(inc.wave, TINY, 0));
                     self.state = State::Connected;
                     self.clear_wait();
@@ -77,12 +78,12 @@ impl Station {
                     self.peer_heard = Some(burst);
                     self.peer_ack_wave = Some(inc.wave);
                     self.last_progress = now;
-                    self.on_ack(burst, bitmap, stored, snr_db, now);
+                    self.ack_in(burst, bitmap, stored, snr_db, now);
                     self.clear_wait();
                 }
                 (Tiny::DiscAck, Awaiting::DiscAck) => {
                     self.clear_wait();
-                    self.state = State::Disconnected;
+                    self.finish(State::Disconnected, self.disc_why);
                 }
                 // Unasked: the peer has something to send, or wants out.
                 (
@@ -103,6 +104,7 @@ impl Station {
                     self.clear_wait();
                     self.reply = Some(self.tiny(Tiny::DiscAck, inc.wave));
                     self.close_after_tx = true;
+                    self.close_end = End::Peer;
                 }
                 // A Turn while we already send: the peer never heard us take
                 // over. Our burst is lost; send again now, no faster than
@@ -148,9 +150,19 @@ impl Station {
                 self.peer_ack_wave = Some(inc.wave);
                 self.peer_heard = Some(a.burst);
                 self.last_progress = now;
-                self.on_ack(a.burst, a.bitmap, stored, snr, now);
+                self.ack_in(a.burst, a.bitmap, stored, snr, now);
                 self.clear_wait();
             }
+        }
+    }
+
+    /// An ACK awaited: the gear's [`Station::on_ack`], and whether data
+    /// moved (frames acknowledged, or an idle check-in answered).
+    fn ack_in(&mut self, burst: u8, bitmap: u64, stored: bool, snr_db: f32, now: f64) {
+        let (acked, idle) = (self.stats.bytes_acked, self.last_burst.is_empty());
+        self.on_ack(burst, bitmap, stored, snr_db, now);
+        if idle || self.stats.bytes_acked > acked {
+            self.last_moved = now;
         }
     }
 

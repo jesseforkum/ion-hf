@@ -297,6 +297,7 @@ fn adapted_bursts_fit_the_phys() {
                 assert!(syms <= phy::MAX_DATA_SYMBOLS, "level {l}: {n} frames, {syms} symbols");
             }
             Wave::Mfsk(m) => assert!(bits <= ion::phy_mfsk::max_bits(m), "level {l}: {n} frames"),
+            Wave::Lifeline => unreachable!("not a level"),
         }
         assert!(bits <= air.max_bits(lv.wave, l), "level {l}");
         // A 32 s burst at OFDM-normal would pass the PHY's limit: the
@@ -1433,7 +1434,7 @@ fn compression_table() {
                 let mut waves = [0u32; 4];
                 for &l in &sim.stations[0].stats().levels {
                     waves[match LADDER[l].wave {
-                        Wave::Mfsk(_) => 0,
+                        Wave::Mfsk(_) | Wave::Lifeline => 0,
                         Wave::Ofdm(Guard::Slice) => 1,
                         Wave::Ofdm(Guard::Long) => 2,
                         Wave::Ofdm(_) => 3,

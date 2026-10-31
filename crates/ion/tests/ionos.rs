@@ -28,7 +28,7 @@
 //! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_STREAM=0` (without
 //! the stream gear), `ION_FAIL_HOLD`,
 //! `ION_FAIL_HOLD_MAX`, `ION_LOSS_HOLD`, `ION_EFF_MARGIN` (those
-//! settings).
+//! settings), `ION_LIFELINE=0` (without `Config::lifeline`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -112,6 +112,9 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         if std::env::var("ION_EXPECT").is_ok_and(|v| v == "0") {
             c.expect_headers = false;
         }
+        if std::env::var("ION_LIFELINE").is_ok_and(|v| v == "0") {
+            c.lifeline = false;
+        }
         c
     };
     let a = Station::new(cfg("N0JLF"), air.clone());
@@ -158,6 +161,10 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
             rx.bytes_received,
             st.stream_periods
         );
+    }
+    let holds = sim.stations[0].stats().holds + sim.stations[1].stats().holds;
+    if holds > 0 {
+        eprintln!("{} {snr_db:+} dB seed {seed}: {holds} holds", mode.name());
     }
     (sim.stations[1].stats().bytes_received, sim.airtime())
 }

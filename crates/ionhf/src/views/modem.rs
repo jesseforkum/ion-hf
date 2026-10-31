@@ -161,6 +161,7 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
         ours: st.and(app.hist.us_levels.last()).map(|(_, l)| *l as usize),
         peer: st.and(app.hist.peer_level),
         ceiling: st.map(|s| s.target_level),
+        hold: st.is_some_and(|s| s.holding),
     };
     panel::readout(ui, &readout, width, s);
     ui.add_space(4.0 * s);

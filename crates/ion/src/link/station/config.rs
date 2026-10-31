@@ -166,6 +166,33 @@ pub struct Config {
     /// losses say.
     #[doc(hidden)]
     pub pin_level: Option<usize>,
+    // -- the lifeline (`docs/link.md`, Lifeline) --
+    /// With no data moving for `life_enter_s` (nothing acknowledged or
+    /// delivered, no idle check-in answered), hold the link in R1/7
+    /// header-only bursts instead of retrying until `link_timeout_s`:
+    /// the sending side probes, the other answers with how it heard the
+    /// probe, and the link resumes once both hear each other at
+    /// `life_resume_db` over the floor's threshold. Offered (calling) or
+    /// accepted (called) as [`crate::link::frame::caps::LIFELINE`] and used
+    /// only when both ends have it on. Off: the old timeout.
+    pub lifeline: bool,
+    pub life_enter_s: f64,
+    /// The first probe at once, the next after this, doubling up to
+    /// `life_probe_max_s` (back to it when the SNR comes within 3 dB of
+    /// resuming).
+    pub life_probe_s: f64,
+    pub life_probe_max_s: f64,
+    /// Between probes, the sending side knocks this often: a header-only
+    /// R0 poll, which a path that has come back answers at once (`None`:
+    /// resume on the probes' reports only).
+    pub life_knock_s: Option<f64>,
+    /// Nothing heard from the peer for this long in a hold: the link is
+    /// lost (the answering side waits `life_probe_max_s` longer).
+    pub life_silent_s: f64,
+    /// A hold this long: goodbye in the lifeline, the path too weak.
+    pub life_max_s: f64,
+    /// Over the floor's threshold (`thresholds_db`, mean SNR), dB.
+    pub life_resume_db: f32,
 }
 
 /// The sending side's choice of level ([`Config::gear`]).
@@ -243,6 +270,14 @@ impl Config {
             harq_partial: true,
             stream: true,
             pin_level: None,
+            lifeline: true,
+            life_enter_s: 45.0,
+            life_probe_s: 60.0,
+            life_probe_max_s: 120.0,
+            life_knock_s: Some(30.0),
+            life_silent_s: 300.0,
+            life_max_s: 900.0,
+            life_resume_db: 1.0,
         }
     }
 }
