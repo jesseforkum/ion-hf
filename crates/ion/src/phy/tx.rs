@@ -4,6 +4,7 @@
 use ion_dsp::TX_LEVEL;
 use ion_dsp::dsp::{AUDIO_RATE, Complex};
 use ion_dsp::fft::Fft;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::frame::*;
 use super::{
@@ -170,12 +171,37 @@ fn clip_distortion_db(clip_db: f32) -> f32 {
     26.0 + 8.0 * (clip_db - 6.0)
 }
 
-/// Experiment (`ION_TDCLIP=1`): the link's data bursts go through
-/// [`TdClip`] instead of the per-symbol clip and the low-PAPR mode.
-#[doc(hidden)]
+/// 0: not set yet (`ION_TDCLIP` decides), 1: off, 2: on.
+static TD_CLIP: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the link's data bursts go through [`TdClip`] instead of the
+/// per-symbol clip and the low-PAPR mode: [`set_td_clip`], else
+/// `ION_TDCLIP=1`. Read for every burst, so a change applies to the next.
 pub fn td_clip_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ION_TDCLIP").is_ok_and(|v| v == "1"))
+    match TD_CLIP.load(Ordering::Relaxed) {
+        0 => {
+            let on = std::env::var("ION_TDCLIP").is_ok_and(|v| v == "1");
+            let _ = TD_CLIP.compare_exchange(0, 1 + on as u8, Ordering::Relaxed, Ordering::Relaxed);
+            TD_CLIP.load(Ordering::Relaxed) == 2
+        }
+        v => v == 2,
+    }
+}
+
+/// Switches [`TdClip`] on or off for the whole process.
+pub fn set_td_clip(on: bool) {
+    TD_CLIP.store(1 + on as u8, Ordering::Relaxed);
+}
+
+/// Whether a burst of `c` in `mode` was sent through [`TdClip`]: spread with
+/// no data gain is only ever the clipper's (low-PAPR bursts always have a
+/// gain); plain QAM looks the same either way and follows our own setting.
+pub(super) fn td_clipped(c: Constellation, mode: DataMode) -> bool {
+    match (mode.spread, mode.gain_code, c) {
+        (true, 0, _) => true,
+        (false, 0, Constellation::Qam16 | Constellation::Qam64) => td_clip_on(),
+        _ => false,
+    }
 }
 
 /// In-band distortion of [`TdClip`] at the link's picks, dB below the
@@ -206,7 +232,7 @@ pub(super) fn tx_distortion_db(c: Constellation, mode: DataMode, num: Numerology
     if std::env::var("ION_RX_DIST").is_ok_and(|v| v == "none") {
         return f32::INFINITY;
     }
-    if td_clip_on()
+    if td_clipped(c, mode)
         && let Some(d) = td_clip_distortion_db(c, mode, num)
     {
         return d;

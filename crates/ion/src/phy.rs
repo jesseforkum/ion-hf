@@ -33,7 +33,8 @@ pub use frame::{DataMode, GAIN_STEP_DB, Pilots};
 pub use rx::{BurstGrid, CellDebug, Cue, ExpectedHeader, Genie, HYP_MARGIN, HYP_Z, PhyRx, REFINE_K, RxBurst, RxStats};
 pub use tx::{
     DEFAULT_CLIP_DB, LOW_PAPR_HDR_CLIP_DB, PSK8_CLIP_DB, QAM16_CLIP_DB, QAM64_CLIP_DB, QPSK_CLIP_DB, TdClip, TxOptions,
-    debug_tx_cells, low_papr_clip_db, low_papr_gain_db, modulate, modulate_full, modulate_with, td_clip_on,
+    debug_tx_cells, low_papr_clip_db, low_papr_gain_db, modulate, modulate_full, modulate_with, set_td_clip,
+    td_clip_on,
 };
 
 /// Data constellation of a burst.

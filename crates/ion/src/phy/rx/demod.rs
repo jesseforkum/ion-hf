@@ -8,7 +8,7 @@ use ion_dsp::dsp::Complex;
 use crate::chan::{self, ChannelMeas, Eesm};
 use crate::phy::est;
 use crate::phy::frame::*;
-use crate::phy::tx::{td_clip_on, tx_distortion_db};
+use crate::phy::tx::{td_clipped, tx_distortion_db};
 use crate::phy::{Constellation, DataMode};
 
 use super::{BLANK_ERASE, BurstGrid, CellDebug, PhyRx, RxBurst, known};
@@ -498,7 +498,7 @@ impl PhyRx {
         let snr_db = self.snr_db(pre, ng, &sig2_rep[..nc]);
         let excess_db = {
             let pre_n: f32 = self.sigma2[..nc].iter().sum();
-            if td_clip_on() {
+            if td_clipped(cons, mode) {
                 // The whole-burst clipper's distortion is uneven over the
                 // carriers: the band's total against the preamble's noise
                 // and the expected distortion, not carrier by carrier.

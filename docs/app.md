@@ -52,6 +52,15 @@ burst's level: `"goodput"` (the default) by expected throughput,
 `"ladder"` up and down the ladder as Ion HF 0.1.0-alpha.4 did, for an A/B
 on the air ([link.md](link.md), Gear shifting). Each end chooses for the
 bursts it sends; it takes effect from the next link.
+
+`clipper` (Setup, **Clipper**) is how OFDM bursts are clipped:
+`"classic"` (the default), the per-symbol clip and low-PAPR mode of
+0.1.0-alpha.5, or `"burst"`, Data2G's whole-burst clipper, which sends
+1–2.4 dB more mean power at the same peak and eases off on fast fading. It
+takes effect from the next burst. Both stations should use the same one:
+the receiver tells the burst clipper's QPSK and 8PSK apart but not its
+16QAM and 64QAM.
+
 **Log file.** Everything the Log shows goes to `logs/ionhf.log` as it
 happens, one line each (`2026-10-29 19:38:53Z RX   CONACK +15 dB`), kept
 across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;

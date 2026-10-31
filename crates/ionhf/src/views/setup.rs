@@ -1,7 +1,7 @@
 //! Setup: station, radio, levels, keying, host. Radio link changes apply
 //! on the next start; levels and the host apply at once.
 
-use crate::config::{Backend, PttMethod, TxAudio};
+use crate::config::{Backend, Clipper, PttMethod, TxAudio};
 use crate::rig::{cat, civ};
 use eframe::egui::{self, Margin, RichText};
 
@@ -262,6 +262,17 @@ fn levels(app: &mut App, ui: &mut egui::Ui) {
         let o = ui.add(egui::Slider::new(&mut ofdm, 0.0..=3.0).step_by(0.1).suffix(" dB"));
         if o.changed() {
             app.set_ofdm_db(ofdm);
+        }
+        ui.end_row();
+        ui.label(RichText::new("Clipper").color(theme::MUTED));
+        let mut clipper = app.cfg.clipper;
+        ui.horizontal(|ui| {
+            for c in Clipper::ALL {
+                ui.selectable_value(&mut clipper, c, c.name());
+            }
+        });
+        if clipper != app.cfg.clipper {
+            app.set_clipper(clipper);
         }
         ui.end_row();
     });
