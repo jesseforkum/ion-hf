@@ -73,7 +73,13 @@ impl PhyRx {
             *v = (*v - floor).max(0.0);
         }
         let span = chan::span_bins(&p, PDP_FRAC);
-        let delay_ms = (span.saturating_sub(self.span0)) as f32 / FS as f32 * 1e3;
+        // A span past the guard is noise: the decision-directed channel
+        // cannot hold echoes beyond it (they show as ISI instead).
+        let delay_ms = if span > l.cp + self.span0 {
+            f32::NAN
+        } else {
+            (span.saturating_sub(self.span0)) as f32 / FS as f32 * 1e3
+        };
         // Doppler: pilot pairs one pattern period apart, and the continual
         // pilot (the top carrier) one symbol apart; the noise of each pilot
         // (the preamble's estimate, which leaves out what the estimator

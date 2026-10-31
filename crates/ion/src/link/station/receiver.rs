@@ -252,6 +252,17 @@ impl Station {
             inc.snr_db
         };
         self.chan.add(&inc.chan);
+        if std::env::var("ION_TRACE_CHAN").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "chan {:?} snr {:.1} delay {:.2} doppler {:.2} raw {:?} -> {:?}",
+                inc.wave,
+                inc.snr_db,
+                inc.chan.delay_ms,
+                inc.chan.doppler_hz,
+                inc.chan.raw,
+                self.chan.class()
+            );
+        }
     }
 
     /// The SNR our ACKs report: effective or mean.

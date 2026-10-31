@@ -1,0 +1,190 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `release` profile [optimized] target(s) in 0.22s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+WGN -6 dB seed 1: 3916 B, 783 B/min
+WGN -6 dB seed 0: 3916 B, 783 B/min
+WGN -6 dB seed 3: 3916 B, 783 B/min
+WGN -6 dB seed 4: 3960 B, 792 B/min
+WGN -6 dB seed 2: 3916 B, 783 B/min
+WGN -6 dB seed 5: 3916 B, 783 B/min
+test ionos_table has been running for over 60 seconds
+MPG -6 dB seed 1: 1836 B, 367 B/min
+MPG -6 dB seed 0: 1956 B, 391 B/min
+MPG -6 dB seed 5: 1874 B, 375 B/min
+MPG -6 dB seed 3: 1896 B, 379 B/min
+MPG -6 dB seed 2: 1708 B, 342 B/min
+MPG -6 dB seed 4: 1864 B, 373 B/min
+MPP -6 dB seed 0: 2100 B, 420 B/min
+MPP -6 dB seed 1: 2568 B, 514 B/min
+MPP -6 dB seed 3: 1864 B, 373 B/min
+MPP -6 dB seed 2: 2364 B, 473 B/min
+MPP -6 dB seed 4: 2260 B, 452 B/min
+MPP -6 dB seed 5: 2034 B, 407 B/min
+MPD -6 dB seed 1: 1990 B, 398 B/min
+MPD -6 dB seed 0: 1946 B, 389 B/min
+MPD -6 dB seed 2: 1754 B, 351 B/min
+MPD -6 dB seed 3: 1984 B, 397 B/min
+MPD -6 dB seed 4: 2222 B, 444 B/min
+MPD -6 dB seed 5: 1974 B, 395 B/min
+WGN -3 dB seed 0: 3622 B, 724 B/min
+WGN -3 dB seed 2: 3684 B, 737 B/min
+WGN -3 dB seed 1: 3396 B, 679 B/min
+WGN -3 dB seed 3: 3396 B, 679 B/min
+WGN -3 dB seed 4: 3396 B, 679 B/min
+WGN -3 dB seed 5: 3264 B, 653 B/min
+MPG -3 dB seed 1: 2146 B, 429 B/min
+MPG -3 dB seed 0: 2120 B, 424 B/min
+MPG -3 dB seed 3: 2008 B, 402 B/min
+MPG -3 dB seed 2: 3220 B, 644 B/min
+MPG -3 dB seed 4: 2674 B, 535 B/min
+MPG -3 dB seed 5: 1800 B, 360 B/min
+MPP -3 dB seed 0: 2868 B, 574 B/min
+MPP -3 dB seed 1: 2676 B, 535 B/min
+MPP -3 dB seed 2: 3236 B, 647 B/min
+MPP -3 dB seed 3: 2692 B, 538 B/min
+MPP -3 dB seed 4: 2928 B, 586 B/min
+MPP -3 dB seed 5: 3094 B, 619 B/min
+MPD -3 dB seed 0: 2588 B, 518 B/min
+MPD -3 dB seed 1: 2578 B, 516 B/min
+MPD -3 dB seed 2: 2632 B, 526 B/min
+MPD -3 dB seed 3: 2332 B, 466 B/min
+MPD -3 dB seed 4: 2506 B, 501 B/min
+MPD -3 dB seed 5: 2720 B, 544 B/min
+WGN +0 dB seed 0: 6970 B, 1394 B/min
+WGN +0 dB seed 1: 8160 B, 1632 B/min
+WGN +0 dB seed 2: 7990 B, 1598 B/min
+WGN +0 dB seed 3: 7990 B, 1598 B/min
+WGN +0 dB seed 4: 7140 B, 1428 B/min
+WGN +0 dB seed 5: 7480 B, 1496 B/min
+MPG +0 dB seed 0: 2808 B, 562 B/min
+MPG +0 dB seed 1: 5748 B, 1150 B/min
+MPG +0 dB seed 2: 5440 B, 1088 B/min
+MPG +0 dB seed 3: 7738 B, 1548 B/min
+MPG +0 dB seed 5: 6460 B, 1292 B/min
+MPG +0 dB seed 4: 7990 B, 1598 B/min
+MPP +0 dB seed 0: 5338 B, 1068 B/min
+MPP +0 dB seed 1: 6460 B, 1292 B/min
+MPP +0 dB seed 2: 3030 B, 606 B/min
+MPP +0 dB seed 4: 4168 B, 834 B/min
+MPP +0 dB seed 3: 4848 B, 970 B/min
+MPP +0 dB seed 5: 3140 B, 628 B/min
+MPD +0 dB seed 0: 2564 B, 513 B/min
+MPD +0 dB seed 1: 3058 B, 612 B/min
+MPD +0 dB seed 2: 3180 B, 636 B/min
+MPD +0 dB seed 4: 2686 B, 537 B/min
+MPD +0 dB seed 3: 2826 B, 565 B/min
+MPD +0 dB seed 5: 2904 B, 581 B/min
+WGN +3 dB seed 0: 34680 B, 6936 B/min
+WGN +3 dB seed 1: 34680 B, 6936 B/min
+WGN +3 dB seed 2: 34680 B, 6936 B/min
+WGN +3 dB seed 3: 35360 B, 7072 B/min
+WGN +3 dB seed 5: 34680 B, 6936 B/min
+WGN +3 dB seed 4: 35360 B, 7072 B/min
+MPG +3 dB seed 0: 11314 B, 2263 B/min
+MPG +3 dB seed 1: 21080 B, 4216 B/min
+MPG +3 dB seed 5: 10370 B, 2074 B/min
+MPG +3 dB seed 2: 15470 B, 3094 B/min
+MPG +3 dB seed 3: 14110 B, 2822 B/min
+MPG +3 dB seed 4: 16660 B, 3332 B/min
+MPP +3 dB seed 3: 8840 B, 1768 B/min
+MPP +3 dB seed 0: 19550 B, 3910 B/min
+MPP +3 dB seed 1: 19380 B, 3876 B/min
+MPP +3 dB seed 2: 24310 B, 4862 B/min
+MPP +3 dB seed 4: 21250 B, 4250 B/min
+MPP +3 dB seed 5: 23290 B, 4658 B/min
+MPD +3 dB seed 0: 5270 B, 1054 B/min
+MPD +3 dB seed 3: 3078 B, 616 B/min
+MPD +3 dB seed 2: 7140 B, 1428 B/min
+MPD +3 dB seed 1: 6630 B, 1326 B/min
+MPD +3 dB seed 4: 5994 B, 1199 B/min
+MPD +3 dB seed 5: 6888 B, 1378 B/min
+WGN +6 dB seed 0: 53550 B, 10710 B/min
+WGN +6 dB seed 1: 53550 B, 10710 B/min
+WGN +6 dB seed 3: 53550 B, 10710 B/min
+WGN +6 dB seed 2: 53550 B, 10710 B/min
+WGN +6 dB seed 4: 53550 B, 10710 B/min
+WGN +6 dB seed 5: 53550 B, 10710 B/min
+MPG +6 dB seed 0: 39950 B, 7990 B/min
+MPG +6 dB seed 1: 34510 B, 6902 B/min
+MPG +6 dB seed 3: 30600 B, 6120 B/min
+MPG +6 dB seed 2: 37230 B, 7446 B/min
+MPG +6 dB seed 4: 35530 B, 7106 B/min
+MPG +6 dB seed 5: 41650 B, 8330 B/min
+MPP +6 dB seed 0: 30430 B, 6086 B/min
+MPP +6 dB seed 1: 30090 B, 6018 B/min
+MPP +6 dB seed 2: 39440 B, 7888 B/min
+MPP +6 dB seed 5: 34000 B, 6800 B/min
+MPP +6 dB seed 3: 41310 B, 8262 B/min
+MPP +6 dB seed 4: 38250 B, 7650 B/min
+MPD +6 dB seed 0: 30940 B, 6188 B/min
+MPD +6 dB seed 1: 32130 B, 6426 B/min
+MPD +6 dB seed 2: 27540 B, 5508 B/min
+MPD +6 dB seed 3: 29240 B, 5848 B/min
+MPD +6 dB seed 5: 32640 B, 6528 B/min
+MPD +6 dB seed 4: 31960 B, 6392 B/min
+WGN +10 dB seed 0: 73100 B, 14620 B/min
+WGN +10 dB seed 1: 73100 B, 14620 B/min
+WGN +10 dB seed 2: 73440 B, 14688 B/min
+WGN +10 dB seed 4: 71400 B, 14280 B/min
+WGN +10 dB seed 3: 73440 B, 14688 B/min
+MPG +10 dB seed 0: 52020 B, 10404 B/min
+WGN +10 dB seed 5: 72760 B, 14552 B/min
+MPG +10 dB seed 1: 51170 B, 10234 B/min
+MPG +10 dB seed 4: 49300 B, 9860 B/min
+MPG +10 dB seed 2: 49980 B, 9996 B/min
+MPG +10 dB seed 5: 52700 B, 10540 B/min
+MPG +10 dB seed 3: 61710 B, 12342 B/min
+MPP +10 dB seed 0: 57120 B, 11424 B/min
+MPP +10 dB seed 1: 67660 B, 13532 B/min
+MPP +10 dB seed 3: 71230 B, 14246 B/min
+MPP +10 dB seed 2: 68000 B, 13600 B/min
+MPP +10 dB seed 4: 64770 B, 12954 B/min
+MPD +10 dB seed 0: 50320 B, 10064 B/min
+MPP +10 dB seed 5: 69530 B, 13906 B/min
+MPD +10 dB seed 1: 44880 B, 8976 B/min
+WGN +20 dB seed 0: 162860 B, 32572 B/min
+MPD +10 dB seed 2: 49980 B, 9996 B/min
+MPD +10 dB seed 5: 53040 B, 10608 B/min
+WGN +20 dB seed 1: 162860 B, 32572 B/min
+WGN +20 dB seed 2: 162860 B, 32572 B/min
+MPD +10 dB seed 3: 32312 B, 6462 B/min
+MPD +10 dB seed 4: 32980 B, 6596 B/min
+WGN +20 dB seed 3: 162860 B, 32572 B/min
+WGN +20 dB seed 4: 162860 B, 32572 B/min
+WGN +20 dB seed 5: 162860 B, 32572 B/min
+MPG +20 dB seed 2: 138040 B, 27608 B/min
+MPG +20 dB seed 0: 125120 B, 25024 B/min
+MPG +20 dB seed 1: 108630 B, 21726 B/min
+MPG +20 dB seed 4: 144160 B, 28832 B/min
+MPG +20 dB seed 5: 146710 B, 29342 B/min
+MPG +20 dB seed 3: 128860 B, 25772 B/min
+MPP +20 dB seed 2: 143990 B, 28798 B/min
+MPP +20 dB seed 0: 142460 B, 28492 B/min
+MPP +20 dB seed 4: 146030 B, 29206 B/min
+MPP +20 dB seed 1: 147050 B, 29410 B/min
+MPP +20 dB seed 3: 148920 B, 29784 B/min
+MPP +20 dB seed 5: 155550 B, 31110 B/min
+MPD +20 dB seed 0: 133110 B, 26622 B/min
+MPD +20 dB seed 4: 82280 B, 16456 B/min
+MPD +20 dB seed 1: 103530 B, 20706 B/min
+MPD +20 dB seed 3: 121550 B, 24310 B/min
+MPD +20 dB seed 5: 124100 B, 24820 B/min
+MPD +20 dB seed 2: 59670 B, 11934 B/min
+
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | WGN | MPG | MPP | MPD |
+|---:|---:|---:|---:|---:|
+| 20 | 32572 (4343) | 26384 (3518) | 29467 (3929) | 20808 (2774) |
+| 10 | 14575 (1943) | 10563 (1408) | 13277 (1770) | 8784 (1171) |
+| 6 | 10710 (1428) | 7316 (975) | 7117 (949) | 6148 (820) |
+| 3 | 6981 (931) | 2967 (396) | 3887 (518) | 1167 (156) |
+| 0 | 1524 (203) | 1206 (161) | 899 (120) | 574 (77) |
+| -3 | 692 (92) | 466 (62) | 583 (78) | 512 (68) |
+| -6 | 785 (105) | 371 (49) | 440 (59) | 396 (53) |
+test ionos_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1952.57s
+
