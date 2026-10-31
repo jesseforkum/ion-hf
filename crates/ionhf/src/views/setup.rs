@@ -319,11 +319,16 @@ fn host(app: &mut App, ui: &mut egui::Ui) {
     let mut port = app.cfg.host_port;
     row(ui, "host", |ui| {
         ui.label(RichText::new("VARA").color(theme::MUTED));
-        if ui.checkbox(&mut on, "On").changed() {
-            app.cfg.host_enabled = on;
-            app.set_host(on);
-            app.mark_dirty();
-        }
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut on, "On").changed() {
+                app.cfg.host_enabled = on;
+                app.set_host(on);
+                app.mark_dirty();
+            }
+            if app.host_waiting() {
+                ui.label(RichText::new("Waiting").color(theme::WARN));
+            }
+        });
         ui.end_row();
         ui.label(RichText::new("Port").color(theme::MUTED));
         let p = ui.add_enabled(!app.host_on(), egui::DragValue::new(&mut port).range(1024..=65_000));

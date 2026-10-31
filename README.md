@@ -30,11 +30,11 @@ for links and group chat such as Ragtime's for broadcast groups.
 
 ## Status
 
-Alpha. Everything has been measured in simulation (Watterson channels and
-a port of the IONOS SIM channel simulator); Ion has not yet been tested on
-the air. On-air testers are wanted: see
-[docs/acoustic-test.md](docs/acoustic-test.md) for a first test without
-radios.
+Alpha. Ion made its first contacts on the air in October 2026 and did
+well. The results in `docs/` are still measured in simulation (Watterson
+channels and a port of the IONOS SIM channel simulator). More on-air
+testers are wanted: see [docs/acoustic-test.md](docs/acoustic-test.md)
+for a first test without radios.
 
 ## Download and build
 

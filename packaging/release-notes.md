@@ -1,4 +1,4 @@
-**Alpha.** Ion HF has been measured in simulation but not yet proven on the air. It is released for on-air testing; expect rough edges and changes that break compatibility between versions.
+**Alpha.** Ion HF has made its first contacts on the air, and its measured results still come from simulation. It is released for on-air testing; expect rough edges and changes that break compatibility between versions.
 
 ## New in this version
 

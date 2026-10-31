@@ -525,7 +525,11 @@ most of the clip.
   with `g_k` the channel estimate times the gain and `v_k` the cell's noise
   plus the estimate's error variance, despread by the inverse DFT, and
   each despread symbol demapped as `z = μ·x + e` with `μ = mean(w_k g_k)`
-  and `var(e) = mean(|w_k g_k|² + |w_k|² v_k) − μ²` (`est::fde`). The
+  and `var(e) = mean(|w_k g_k|² + |w_k|² v_k) − μ²` (`est::fde`). For
+  16QAM and 64QAM each point `x` adds `κ·μ²·|x|²`, κ the mode's clipping
+  distortion: the clip falls on the envelope's peaks, which in a spread
+  symbol are its outer points, and with `var(e)` alone their LLRs came out
+  sure and wrong (about 7% of 16QAM codewords lost at 30–40 dB). The
   decision-directed noise floor and the local noise keep working per
   carrier: the despread decisions are spread again and compared with the
   received cells. The delay profile of spread symbols uses the pilots'

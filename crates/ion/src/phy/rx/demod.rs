@@ -461,6 +461,12 @@ impl PhyRx {
                 // plus noise and residual interference of variance `var`.
                 let z = &mut za[..dc];
                 let (mu, var) = est::fde(&ya[..dc], &self.hbuf[base..base + dc], &va[..dc], gain, z, &mut sp);
+                // The clip's distortion lands on the despread symbols of
+                // the envelope's peaks, the outer QAM points, not evenly as
+                // `var` has it; a share growing with the point's energy
+                // keeps those symbols' LLRs from being sure and wrong.
+                // Phase-only constellations are untouched.
+                let clip_var = if bps >= 4 { kappa * mu * mu } else { 0.0 };
                 for (m, &zm) in z.iter().enumerate() {
                     let cell = base + m;
                     if cell % eq_step == 0 && mu > 0.0 {
@@ -469,7 +475,7 @@ impl PhyRx {
                     est::demap(
                         zm,
                         Complex::new(mu, 0.0),
-                        0.0,
+                        clip_var,
                         var,
                         &pts,
                         &mut self.slot_llr[cell * bps..cell * bps + bps],

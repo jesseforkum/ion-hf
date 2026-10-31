@@ -113,6 +113,24 @@ impl Drop for Rig {
     }
 }
 
+/// The host interface, once its ports are open, and its command port.
+/// Free ports are taken (`host::free_port`); one taken meanwhile by another
+/// test is given up for the next.
+fn host_on(rig: &Rig, h: &IonHandle) -> (crate::host::HostHandle, u16) {
+    for _ in 0..10 {
+        let port = crate::host::free_port();
+        let host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).unwrap();
+        let end = Instant::now() + Duration::from_secs(2);
+        while !host.listening() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if host.listening() {
+            return (host, port);
+        }
+    }
+    panic!("no free host ports");
+}
+
 /// A program on the host interface's command and data ports.
 struct HostClient {
     cmd: TcpStream,
@@ -245,6 +263,51 @@ fn ion_disconnect_mid_transfer_ends_promptly_and_ids() {
     h.cmds.send(IonCmd::Stop).unwrap();
 }
 
+/// A call nobody answers, given up by the host: the call stops and our CW
+/// ID is the last thing on the air.
+#[test]
+fn ion_call_given_up_ends_with_an_id() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::Connect("N0BODY".into())).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "never called; notes {:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::GiveUp).unwrap();
+    h.cmds.send(IonCmd::Listen).unwrap();
+    let ok = rig.run_until(Duration::from_secs(10), |r| r.id_sent() && r.keyed);
+    assert!(ok, "no CW ID; notes {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(15), |r| !r.keyed);
+    assert!(ok, "still keyed");
+    rig.run_until(Duration::from_secs(5), |r| r.keyed);
+    assert!(!rig.keyed, "keyed again after the ID; notes {:?}", rig.ion_notes);
+}
+
+/// Broadcast traffic identifies after its run of bursts, not before or
+/// between them.
+#[test]
+fn a_broadcast_run_ends_with_one_id() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::GroupOpen(1, "NET".into())).unwrap();
+    h.cmds.send(IonCmd::GroupSend(1, b"one".to_vec(), None)).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "no broadcast; notes {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(30), |r| !r.keyed);
+    assert!(ok, "broadcast never ended");
+    assert!(!rig.id_sent(), "ID before the run ended: {:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::GroupSend(1, b"two".to_vec(), None)).unwrap();
+    let ok = rig.run_until(Duration::from_secs(20), |r| r.keyed);
+    assert!(ok, "second broadcast never went");
+    let ok = rig.run_until(Duration::from_secs(30), |r| !r.keyed);
+    assert!(ok, "second broadcast never ended");
+    assert!(!rig.id_sent(), "ID between the bursts: {:?}", rig.ion_notes);
+    let ok = rig.run_until(Duration::from_secs(15), Rig::id_sent);
+    assert!(ok, "no CW ID after the run; notes {:?}", rig.ion_notes);
+    let n = rig.ion_notes.iter().filter(|n| n.contains("CW ID")).count();
+    assert_eq!(n, 1, "{:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::Stop).unwrap();
+}
+
 /// A host program (standing in for Pat) drives Ion through the VARA-style
 /// interface: connect to LOOP, send a line, read the echo, wait for
 /// BUFFER 0, disconnect.
@@ -252,8 +315,7 @@ fn ion_disconnect_mid_transfer_ends_promptly_and_ids() {
 fn winlink_host_drives_a_ion_link() {
     let mut rig = Rig::new();
     let h = rig.ion();
-    let port = 18_300;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let (_host, port) = host_on(&rig, &h);
     let mut c = HostClient::connect(port);
     for l in [
         "VERSION",
@@ -306,8 +368,7 @@ fn winlink_host_drives_a_ion_link() {
 fn ragtime_style_client_comes_up_and_holds_a_session() {
     let mut rig = Rig::new();
     let h = rig.ion();
-    let port = 18_400;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let (_host, port) = host_on(&rig, &h);
     let mut kiss = TcpStream::connect(("127.0.0.1", port - 200)).expect("KISS port");
     let mut c = HostClient::connect(port);
     // Ragtime's start-up, in its order; then its KISS persistence frame.
