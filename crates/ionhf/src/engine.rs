@@ -303,9 +303,10 @@ impl Engine {
                 "no more audio"
             };
             let secs = (now - self.last_pull.unwrap_or(self.tx_started)).as_secs_f32();
+            let left_ms = (self.burst.len() - self.played + queued) * 1000 / SAMPLE_RATE;
             self.abort();
             self.send(UiEvent::Warning(format!(
-                "TX stalled: the radio took {what} for {secs:.1} s; unkeyed"
+                "TX stalled: the radio took {what} for {secs:.1} s ({left_ms} ms of the burst left); unkeyed"
             )));
             return;
         }
