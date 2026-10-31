@@ -156,6 +156,7 @@ pub fn sequence_with(call: &str, ofdm_db: f32) -> (Vec<f32>, Vec<Sent>) {
     ];
     for w in waves {
         let b = Outgoing {
+            td_ease: false,
             cue: false,
             wave: w,
             code: TINY,
@@ -185,6 +186,7 @@ pub fn sequence_with(call: &str, ofdm_db: f32) -> (Vec<f32>, Vec<Sent>) {
                 })
                 .collect();
             let b = Outgoing {
+                td_ease: false,
                 cue: false,
                 wave: lv.wave,
                 code: level,

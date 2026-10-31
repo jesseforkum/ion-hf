@@ -24,6 +24,8 @@ pub struct Config {
     pub ofdm_db: f32,
     /// How the link picks its level (`ion::link::Gear`).
     pub gear: Gear,
+    /// How OFDM bursts are clipped (`ion::phy::set_td_clip`).
+    pub clipper: Clipper,
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
@@ -46,6 +48,7 @@ impl Default for Config {
             drive: 50,
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
             gear: Gear::Goodput,
+            clipper: Clipper::Classic,
             host_enabled: false,
             host_port: 8300,
             tci_url: "ws://127.0.0.1:50001".into(),
@@ -140,6 +143,29 @@ impl Gear {
         match self {
             Gear::Goodput => ion::link::Gear::Goodput,
             Gear::Ladder => ion::link::Gear::Ladder,
+        }
+    }
+}
+
+/// `clipper` in `ionhf.toml`: how OFDM bursts are clipped. Both stations
+/// should use the same one (the header does not tell plain QAM apart).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Clipper {
+    /// Per-symbol clip and the low-PAPR mode, as 0.1.0-alpha.5.
+    #[default]
+    Classic,
+    /// Data2G's whole-burst clipper: more mean power at the same peak.
+    Burst,
+}
+
+impl Clipper {
+    pub const ALL: [Clipper; 2] = [Clipper::Classic, Clipper::Burst];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Clipper::Classic => "Classic",
+            Clipper::Burst => "Burst",
         }
     }
 }
@@ -294,5 +320,8 @@ mod tests {
         assert_eq!(c.gear, Gear::Goodput);
         let c: Config = toml::from_str("gear = \"ladder\"\n").unwrap();
         assert_eq!(c.gear, Gear::Ladder);
+        assert_eq!(c.clipper, Clipper::Classic);
+        let c: Config = toml::from_str("clipper = \"burst\"\n").unwrap();
+        assert_eq!(c.clipper, Clipper::Burst);
     }
 }

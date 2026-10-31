@@ -58,6 +58,8 @@ pub enum IonCmd {
     /// The link's choice of level, from the next link on (at once while
     /// none is up).
     SetGear(Gear),
+    /// The whole-burst clipper on or off, from the next burst on.
+    SetBurstClip(bool),
     /// A Winlink host interface takes the link's received bytes and status
     /// (`None`: it has gone).
     AttachHost(Option<Sender<crate::host::HostIn>>),
@@ -415,6 +417,7 @@ impl Worker {
                 self.ofdm_db = db;
                 self.node.set_ofdm_gain_db(db);
             }
+            IonCmd::SetBurstClip(on) => ion::phy::set_td_clip(on),
             IonCmd::SetGear(g) => {
                 self.gear = g;
                 match self.node.station().state() {

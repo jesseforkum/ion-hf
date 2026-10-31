@@ -160,6 +160,7 @@ fn llrs_combine_across_a_level_change() {
     for seed in 0..tries {
         let f = frame(300 + seed as u32);
         let first = Outgoing {
+            td_ease: false,
             cue: false,
             wave: LADDER[QAM16_2_3].wave,
             code: QAM16_2_3,
@@ -170,6 +171,7 @@ fn llrs_combine_across_a_level_change() {
         };
         let inc = harq::increment(Rate::R2_3.n(), LADDER[QPSK_2_3].coded_bits());
         let second = Outgoing {
+            td_ease: false,
             cue: false,
             wave: LADDER[QPSK_2_3].wave,
             code: QPSK_2_3,

@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, Margin, RichText};
 use ion::link::State;
 
-use crate::config::Config;
+use crate::config::{Clipper, Config};
 use crate::engine::{Msg, Status, UiEvent};
 use crate::history::History;
 use crate::ion_engine::{IonCmd, IonEvent, IonHandle, IonStatus};
@@ -115,6 +115,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetCall(cfg.call.clone()));
         let _ = cmds.send(IonCmd::SetOfdmDb(cfg.ofdm_db));
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
+        let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
             let _ = lb.send(LoopCmd::IonPeer(true));
@@ -272,6 +273,12 @@ impl App {
     pub fn set_ofdm_db(&mut self, db: f32) {
         self.cfg.ofdm_db = db;
         self.cmd(IonCmd::SetOfdmDb(db));
+        self.mark_dirty();
+    }
+
+    pub fn set_clipper(&mut self, c: Clipper) {
+        self.cfg.clipper = c;
+        self.cmd(IonCmd::SetBurstClip(c == Clipper::Burst));
         self.mark_dirty();
     }
 

@@ -64,10 +64,66 @@ fn shape(code: usize) -> (Constellation, Pilots) {
 /// when it has one, else the plain clip for its constellation.
 pub fn tx_options(code: usize) -> TxOptions {
     let (c, p) = shape(code);
+    if let Some((headroom_db, spread)) = td_clip_pick(code) {
+        return TxOptions {
+            clip_db: None,
+            spread,
+            data_gain_db: 0.0,
+            hdr_clip_db: None,
+            td_clip: Some(phy::TdClip {
+                headroom_db,
+                overshoot: &[1.0, 2.0, 3.0],
+            }),
+            ..TxOptions::for_burst(c, p)
+        };
+    }
     match code {
         l if l < LADDER.len() && LADDER[l].low_papr => TxOptions::low_papr(c, p),
         _ => TxOptions::for_burst(c, p),
     }
+}
+
+/// Doppler spread (Hz) a peer reports from which the whole-burst clipper
+/// eases by [`TD_EASE_DB`]: IONOS MPD measures 2.0–2.6 Hz, MPP mostly
+/// 1.1–1.4 Hz, MPG under 1.3 Hz.
+pub const TD_EASE_DOPPLER_HZ: f32 = 1.8;
+/// Extra clip headroom on fast fading, dB.
+pub const TD_EASE_DB: f32 = 2.0;
+
+/// [`tx_options`] of a data burst, eased on fast fading.
+fn tx_options_eased(code: usize, ease: bool) -> TxOptions {
+    let mut opt = tx_options(code);
+    if ease && let Some(td) = opt.td_clip.as_mut() {
+        td.headroom_db += TD_EASE_DB;
+    }
+    opt
+}
+
+/// Experiment (`ION_TDCLIP=1`): the whole-burst clipper's headroom (dB) and
+/// spreading for ladder level `code`, as picked in PR #1's ladder table.
+fn td_clip_pick(code: usize) -> Option<(f32, bool)> {
+    if !phy::td_clip_on() {
+        return None;
+    }
+    static SHIFT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let shift = *SHIFT.get_or_init(|| {
+        std::env::var("ION_TD_SHIFT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    });
+    let (h, spread) = match code {
+        5..=7 | 9 | 10 => (-3.0, true),
+        8 => (-1.0, true),
+        11 => (0.0, true),
+        12 => (1.0, true),
+        13 => (3.5, false),
+        14 => (4.0, false),
+        15 => (7.0, false),
+        16 => (6.0, false),
+        _ => return None,
+    };
+    Some((h + shift, spread))
 }
 
 /// Air time from the PHYs' burst arithmetic.
@@ -153,6 +209,7 @@ pub fn ofdm_gain(db: f32) -> f32 {
 /// stay as they are.
 pub fn level_trim_db(code: usize) -> f32 {
     match LADDER.get(code) {
+        Some(l) if l.wave == Wave::Ofdm(Guard::Slice) && phy::td_clip_on() => TD_SLICE_TRIM_DB,
         Some(l) if l.wave == Wave::Ofdm(Guard::Slice) => match l.rate {
             fec::Rate::R1_3 => 0.6,
             fec::Rate::R1_2 => 0.95,
@@ -161,6 +218,9 @@ pub fn level_trim_db(code: usize) -> f32 {
         _ => 0.0,
     }
 }
+
+/// [`level_trim_db`] of the slice levels under the whole-burst clipper.
+const TD_SLICE_TRIM_DB: f32 = 0.45;
 
 /// [`transmit`] as it goes on the air: OFDM bursts scaled by `ofdm_gain`
 /// and their level's [`level_trim_db`], together never more than
@@ -293,7 +353,7 @@ fn modulate(b: &Outgoing) -> Vec<f32> {
                 extra,
                 &bits,
                 center_of(b),
-                &tx_options(b.code),
+                &tx_options_eased(b.code, b.td_ease),
             )
         }
     }
@@ -863,6 +923,7 @@ mod tests {
     fn data_burst(cue: bool) -> Outgoing {
         let level = LADDER.iter().position(|l| l.wave == Wave::Ofdm(Guard::Normal)).unwrap();
         Outgoing {
+            td_ease: false,
             wave: LADDER[level].wave,
             code: level,
             user: super::super::station::user_bits(level, 0x5A, 2),

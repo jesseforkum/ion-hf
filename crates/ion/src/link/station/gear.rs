@@ -336,7 +336,12 @@ impl Station {
     /// the gear shift counts it (0 without `power_aware`).
     pub(super) fn air_db(&self, l: usize) -> f32 {
         if self.cfg.power_aware {
-            crate::level::AIR_MEAN_DB.get(l).copied().unwrap_or(0.0)
+            let table = if crate::phy::td_clip_on() {
+                &crate::level::AIR_MEAN_TD_DB
+            } else {
+                &crate::level::AIR_MEAN_DB
+            };
+            table.get(l).copied().unwrap_or(0.0)
         } else {
             0.0
         }

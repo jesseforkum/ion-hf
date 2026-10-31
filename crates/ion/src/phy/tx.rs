@@ -3,6 +3,8 @@
 
 use ion_dsp::TX_LEVEL;
 use ion_dsp::dsp::{AUDIO_RATE, Complex};
+use ion_dsp::fft::Fft;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::frame::*;
 use super::{
@@ -29,6 +31,18 @@ pub struct TxOptions {
     /// Clip level of the header symbols, when not `clip_db` (only with
     /// `clip_db` set).
     pub hdr_clip_db: Option<f32>,
+    /// Whole-burst clip-and-filter after upconversion (Data2G's
+    /// `tx_condition`), on top of or instead of `clip_db`.
+    pub td_clip: Option<TdClip>,
+}
+
+/// Data2G's clipper: clip the 48 kHz envelope at `headroom_db` over the
+/// burst's RMS envelope, the scale raised to `overshoot[i]` on pass `i`
+/// (one pass per factor), then low-pass with the front-end filter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TdClip {
+    pub headroom_db: f32,
+    pub overshoot: &'static [f32],
 }
 
 /// Clip level of [`TxOptions::default`] (and so [`modulate`]), dB over the
@@ -52,6 +66,7 @@ impl Default for TxOptions {
             spread: false,
             data_gain_db: 0.0,
             hdr_clip_db: None,
+            td_clip: None,
         }
     }
 }
@@ -67,6 +82,7 @@ impl TxOptions {
             spread: false,
             data_gain_db: 0.0,
             hdr_clip_db: None,
+            td_clip: None,
         }
     }
 }
@@ -87,6 +103,7 @@ impl TxOptions {
             spread: true,
             data_gain_db: low_papr_gain_db(c),
             hdr_clip_db: Some(LOW_PAPR_HDR_CLIP_DB),
+            td_clip: None,
         }
     }
 }
@@ -154,10 +171,72 @@ fn clip_distortion_db(clip_db: f32) -> f32 {
     26.0 + 8.0 * (clip_db - 6.0)
 }
 
+/// 0: not set yet (`ION_TDCLIP` decides), 1: off, 2: on.
+static TD_CLIP: AtomicU8 = AtomicU8::new(0);
+
+/// Whether the link's data bursts go through [`TdClip`] instead of the
+/// per-symbol clip and the low-PAPR mode: [`set_td_clip`], else
+/// `ION_TDCLIP=1`. Read for every burst, so a change applies to the next.
+pub fn td_clip_on() -> bool {
+    match TD_CLIP.load(Ordering::Relaxed) {
+        0 => {
+            let on = std::env::var("ION_TDCLIP").is_ok_and(|v| v == "1");
+            let _ = TD_CLIP.compare_exchange(0, 1 + on as u8, Ordering::Relaxed, Ordering::Relaxed);
+            TD_CLIP.load(Ordering::Relaxed) == 2
+        }
+        v => v == 2,
+    }
+}
+
+/// Switches [`TdClip`] on or off for the whole process.
+pub fn set_td_clip(on: bool) {
+    TD_CLIP.store(1 + on as u8, Ordering::Relaxed);
+}
+
+/// Whether a burst of `c` in `mode` was sent through [`TdClip`]: spread with
+/// no data gain is only ever the clipper's (low-PAPR bursts always have a
+/// gain); plain QAM looks the same either way and follows our own setting.
+pub(super) fn td_clipped(c: Constellation, mode: DataMode) -> bool {
+    match (mode.spread, mode.gain_code, c) {
+        (true, 0, _) => true,
+        (false, 0, Constellation::Qam16 | Constellation::Qam64) => td_clip_on(),
+        _ => false,
+    }
+}
+
+/// In-band distortion of [`TdClip`] at the link's picks, dB below the
+/// signal, for the header's modes it alone sends: spread with no data gain
+/// (low-PAPR bursts always have one) and plain QAM. Measured with
+/// `td_clip_distortion` (tests/ladder.rs), the most clipped rate of each.
+fn td_clip_distortion_db(c: Constellation, mode: DataMode, num: Numerology) -> Option<f32> {
+    match (mode.spread, mode.gain_code, c) {
+        (true, 0, _) => Some(match (c, num) {
+            (Constellation::Qpsk, Numerology::Slice) => TD_DIST_DB[0],
+            (Constellation::Qpsk, Numerology::Long | Numerology::LongWide) => TD_DIST_DB[1],
+            (Constellation::Qpsk, _) => TD_DIST_DB[2],
+            _ => TD_DIST_DB[3],
+        }),
+        (false, 0, Constellation::Qam16) => Some(TD_DIST_DB[4]),
+        (false, 0, Constellation::Qam64) => Some(TD_DIST_DB[5]),
+        _ => None,
+    }
+}
+
+/// Slice QPSK, long QPSK, full-band QPSK, 8PSK, 16QAM, 64QAM.
+const TD_DIST_DB: [f32; 6] = [8.3, 9.3, 9.5, 14.0, 17.6, 27.0];
+
 /// In-band distortion of the link's clip for `c`, dB below the signal.
 /// The receiver leaves it out of its SNR report; taking out a little too
 /// much only falls back to the preamble's noise estimate.
 pub(super) fn tx_distortion_db(c: Constellation, mode: DataMode, num: Numerology) -> f32 {
+    if std::env::var("ION_RX_DIST").is_ok_and(|v| v == "none") {
+        return f32::INFINITY;
+    }
+    if td_clipped(c, mode)
+        && let Some(d) = td_clip_distortion_db(c, mode, num)
+    {
+        return d;
+    }
     if mode.spread {
         // The slice's few data carriers clip worse.
         low_papr_distortion_db(c) - if num.is_slice() { 1.3 } else { 0.0 }
@@ -189,7 +268,7 @@ pub fn modulate_with(c: Constellation, user: u16, bits: &[u8], center_hz: f32, o
     check_center(num, center_hz);
     let nsym = data_symbols_with(num, opt.pilots, c, bits.len()).max(1);
     let bb = baseband(&NORMAL, c, user, 0, bits, nsym, opt);
-    upconvert(num, &bb, center_hz)
+    upconvert(num, &bb, center_hz, opt.td_clip)
 }
 
 /// Builds one burst of any numerology.
@@ -218,7 +297,7 @@ pub fn modulate_full(
     );
     let nsym = data_symbols_with(num, opt.pilots, c, bits.len());
     let bb = baseband(num.layout(), c, user, extra, bits, nsym, opt);
-    upconvert(num, &bb, center_hz)
+    upconvert(num, &bb, center_hz, opt.td_clip)
 }
 
 /// e^{-j2πm/n}, m = 0..n.
@@ -580,13 +659,12 @@ fn baseband(
 
 /// Interpolates 8 kHz complex baseband to 48 kHz, shifts it to
 /// `center_hz` and takes the real part, peak-normalised to `TX_LEVEL`.
-fn upconvert(num: Numerology, bb: &[Complex], center_hz: f32) -> Vec<f32> {
+fn upconvert(num: Numerology, bb: &[Complex], center_hz: f32, td: Option<TdClip>) -> Vec<f32> {
     let taps = front_end_taps_for(num);
     let flen = taps.len();
     let len = bb.len() * DEC + flen - 1;
-    let mut out = vec![0f32; len];
-    let w = core::f64::consts::TAU * center_hz as f64 / AUDIO_RATE as f64;
-    for (t, o) in out.iter_mut().enumerate() {
+    let mut z = vec![Complex::ZERO; len];
+    for (t, o) in z.iter_mut().enumerate() {
         let m_hi = (t / DEC).min(bb.len() - 1);
         let m_lo = if t >= flen - 1 {
             (t - (flen - 1)).div_ceil(DEC)
@@ -597,6 +675,14 @@ fn upconvert(num: Numerology, bb: &[Complex], center_hz: f32) -> Vec<f32> {
         for (m, &v) in bb.iter().enumerate().take(m_hi + 1).skip(m_lo) {
             acc += v.scale(taps[t - m * DEC]);
         }
+        *o = acc;
+    }
+    if let Some(td) = td {
+        td_clip(&mut z, &taps, td);
+    }
+    let w = core::f64::consts::TAU * center_hz as f64 / AUDIO_RATE as f64;
+    let mut out = vec![0f32; len];
+    for (t, (o, acc)) in out.iter_mut().zip(&z).enumerate() {
         let (s, co) = ((w * t as f64) % core::f64::consts::TAU).sin_cos();
         *o = acc.re * co as f32 - acc.im * s as f32;
     }
@@ -606,6 +692,74 @@ fn upconvert(num: Numerology, bb: &[Complex], center_hz: f32) -> Vec<f32> {
         *o *= k;
     }
     out
+}
+
+/// [`TdClip`] on 48 kHz complex baseband `z` (its envelope is the
+/// passband's analytic envelope; the low-pass is the passband's band-pass).
+/// The interpolation taps have DC gain `DEC`, so they are normalised here.
+fn td_clip(z: &mut [Complex], taps: &[f32], td: TdClip) {
+    let power = z.iter().map(|v| v.norm_sqr()).sum::<f32>() / z.len() as f32;
+    let thresh = power.sqrt() * 10f32.powf(td.headroom_db / 20.0);
+    let filter = TdFilter::new(taps);
+    for &k in td.overshoot {
+        for v in z.iter_mut() {
+            let m = v.norm();
+            if m > thresh {
+                *v = v.scale((thresh / m).powf(k));
+            }
+        }
+        filter.apply(z);
+    }
+}
+
+/// The front-end low-pass at unit DC gain, centred (taps are symmetric),
+/// by overlap-add FFT convolution.
+struct TdFilter {
+    fft: Fft,
+    spectrum: Vec<Complex>,
+    taps: usize,
+}
+
+impl TdFilter {
+    fn new(taps: &[f32]) -> Self {
+        let n = (4 * taps.len()).next_power_of_two();
+        let g = 1.0 / (taps.iter().sum::<f32>() * n as f32);
+        let mut t = vec![Complex::ZERO; n];
+        for (o, &v) in t.iter_mut().zip(taps) {
+            *o = Complex::new(v * g, 0.0);
+        }
+        let fft = Fft::new(n);
+        let mut spectrum = vec![Complex::ZERO; n];
+        fft.forward(&t, &mut spectrum);
+        Self {
+            fft,
+            spectrum,
+            taps: taps.len(),
+        }
+    }
+
+    fn apply(&self, z: &mut [Complex]) {
+        let n = self.spectrum.len();
+        let step = n - self.taps + 1;
+        let mut y = vec![Complex::ZERO; z.len() + self.taps - 1];
+        let (mut a, mut b) = (vec![Complex::ZERO; n], vec![Complex::ZERO; n]);
+        for start in (0..z.len()).step_by(step) {
+            let blk = &z[start..(start + step).min(z.len())];
+            a.fill(Complex::ZERO);
+            a[..blk.len()].copy_from_slice(blk);
+            self.fft.forward(&a, &mut b);
+            for (x, h) in b.iter_mut().zip(&self.spectrum) {
+                *x = *x * *h;
+            }
+            self.fft.inverse(&b, &mut a);
+            let end = (start + n).min(y.len());
+            for (o, v) in y[start..end].iter_mut().zip(&a) {
+                *o += *v;
+            }
+        }
+        let h = self.taps / 2;
+        z.copy_from_slice(&y[h..h + z.len()]);
+    }
 }
 
 /// Data cell values `modulate` sends for `bits`, in cell order (debug
@@ -627,4 +781,43 @@ pub fn debug_tx_cells(c: Constellation, bits: &[u8]) -> Vec<Complex> {
             p.pts[label]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn td_filter_matches_direct_convolution() {
+        for num in [Numerology::NormalWide, Numerology::Slice, Numerology::LongWide] {
+            let taps = front_end_taps_for(num);
+            let z: Vec<Complex> = (0..20_011)
+                .map(|i| Complex::new((i as f32 * 0.37).sin(), (i as f32 * 0.011).cos() * (i % 7) as f32))
+                .collect();
+            let g = 1.0 / taps.iter().sum::<f32>();
+            let h = taps.len() / 2;
+            let direct: Vec<Complex> = (0..z.len())
+                .map(|t| {
+                    let mut acc = Complex::ZERO;
+                    for (j, v) in z
+                        .iter()
+                        .enumerate()
+                        .take((t + h).min(z.len() - 1) + 1)
+                        .skip(t.saturating_sub(h))
+                    {
+                        acc += v.scale(taps[j + h - t]);
+                    }
+                    acc.scale(g)
+                })
+                .collect();
+            let mut fast = z.clone();
+            TdFilter::new(&taps).apply(&mut fast);
+            let err = direct
+                .iter()
+                .zip(&fast)
+                .map(|(a, b)| (*a - *b).norm())
+                .fold(0f32, f32::max);
+            assert!(err < 1e-3, "{num:?}: {err}");
+        }
+    }
 }

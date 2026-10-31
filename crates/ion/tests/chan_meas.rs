@@ -48,6 +48,7 @@ fn burst(level: usize, secs: f64, seed: u32) -> Outgoing {
         })
         .collect();
     Outgoing {
+        td_ease: false,
         cue: false,
         wave: lv.wave,
         code: level,

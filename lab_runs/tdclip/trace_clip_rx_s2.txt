@@ -1,0 +1,30 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 0.18s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+test ionos_table has been running for over 60 seconds
+MPD +6 dB seed 1906: L9(t10) true/5, L10(t10) true/8, L9(t10) true/11, L8(t10) true/8, L7(t7) true/10, L7(t4) true/10, L7(t7) true/4, L7(t8) true/4, L7(t8) true/4, L7(t8) true/8, L11(t11) true/11, L9(t10) true/14, L9(t10) true/19, L9(t10) true/13, L9(t10) true/13, L9(t10) true/13, L9(t10) true/13, L9(t11) true/13, L9(t10) true/13, L9(t11) true/13, L9(t11) true/13
+  bursts 21 cued 21 frames 166 resent 0 increments 54 (104400 bits) | rx codewords failed 54 harq recovered 27 bytes 28220
+MPD +6 dB seed 1: 28220 B, 5644 B/min
+MPD +6 dB seed 906: L7(t8) true/4, L8(t8) true/8, L8(t8) true/17, L8(t10) true/21, L8(t10) true/21, L10(t10) true/8, L10(t10) true/18, L10(t10) true/17, L10(t10) true/9, L10(t10) true/18, L11(t11) true/11, L10(t10) true/16, L10(t10) true/18, L10(t10) true/20, L10(t10) true/17, L10(t10) true/8, L10(t10) true/18, L10(t10) true/20, L10(t9) true/17, L9(t9) true/7, L9(t9) true/5
+  bursts 21 cued 21 frames 232 resent 21 increments 66 (87120 bits) | rx codewords failed 87 harq recovered 66 bytes 35020
+MPD +6 dB seed 0: 35020 B, 7004 B/min
+MPD +20 dB seed 920: L11(t14) true/13, L14(t14) true/29, L14(t12) true/36, L14(t13) true/30, L14(t13) true/30, L13(t14) true/52, L13(t14) true/38, L13(t12) true/26, L13(t14) true/26, L13(t11) true/24, L13(t14) true/26, L13(t14) true/26, L13(t11) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t11) true/26, L13(t11) true/26, L13(t11) true/26, L13(t11) true/26, L13(t11) true/54, L13(t11) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t13) true/26, L13(t13) true/26, L13(t13) true/26
+  bursts 30 cued 2 frames 795 resent 0 increments 57 (22800 bits) | rx codewords failed 57 harq recovered 40 bytes 130730
+MPD +20 dB seed 0: 130730 B, 26146 B/min
+MPD +20 dB seed 1920: L8(t8) true/9, L8(t8) true/9, L8(t8) true/11, L8(t8) true/11, L8(t8) true/11, L15(t15) true/44, L13(t14) true/64, L13(t14) true/56, L13(t14) true/44, L13(t14) true/26, L13(t13) true/26, L13(t11) true/26, L13(t13) true/26, L13(t14) true/26, L13(t13) true/26, L13(t11) true/26, L13(t13) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t11) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t14) true/26, L13(t11) true/26, L13(t11) true/26, L13(t11) true/26, L13(t13) true/26
+  bursts 33 cued 0 frames 751 resent 0 increments 132 (105600 bits) | rx codewords failed 132 harq recovered 44 bytes 123250
+MPD +20 dB seed 1: 123250 B, 24650 B/min
+
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | MPD |
+|---:|---:|
+| 20 | 25398 (3386) |
+| 6 | 6324 (843) |
+test ionos_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 387.39s
+

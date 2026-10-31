@@ -696,6 +696,7 @@ impl NetStation {
 
     fn tiny(&self, kind: u8, extra: u16, wave: Wave) -> Outgoing {
         Outgoing {
+            td_ease: false,
             cue: false,
             wave,
             code: TINY,
@@ -713,6 +714,7 @@ impl NetStation {
     fn ctrl_hi(&self, frames: Vec<Frame>, wave: Wave, hi: u8) -> Outgoing {
         let size = LADDER[CTRL_CODE].frame_bytes();
         Outgoing {
+            td_ease: false,
             cue: false,
             wave,
             code: CTRL_CODE,

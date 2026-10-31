@@ -144,6 +144,7 @@ impl Station {
                 // The channel is the same both ways: our own class, and
                 // the lower of the Turn's SNR and the last data burst's.
                 self.peer_class = self.chan.class();
+                self.peer_doppler_hz = self.chan.spreads().1;
                 let rep = self.report_snr();
                 let snr = match self.chan.eff_snr_db() {
                     Some(e) if self.cfg.eff_snr => e.min(rep),
@@ -252,6 +253,17 @@ impl Station {
             inc.snr_db
         };
         self.chan.add(&inc.chan);
+        if std::env::var("ION_TRACE_CHAN").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "chan {:?} snr {:.1} delay {:.2} doppler {:.2} raw {:?} -> {:?}",
+                inc.wave,
+                inc.snr_db,
+                inc.chan.delay_ms,
+                inc.chan.doppler_hz,
+                inc.chan.raw,
+                self.chan.class()
+            );
+        }
     }
 
     /// The SNR our ACKs report: effective or mean.
