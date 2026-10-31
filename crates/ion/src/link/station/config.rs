@@ -271,7 +271,7 @@ impl Config {
             stream: true,
             pin_level: None,
             lifeline: true,
-            life_enter_s: 45.0,
+            life_enter_s: 90.0,
             life_probe_s: 60.0,
             life_probe_max_s: 120.0,
             life_knock_s: Some(30.0),

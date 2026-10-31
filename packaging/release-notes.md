@@ -2,12 +2,13 @@
 
 ## New in this version
 
-- **Faster on fading paths.** In simulation against alpha.4: about 2× at +3 dB on most channels (6× on a gentle fading path), 1.4–1.7× at 0 dB, and up to 7× on fast-fading (MPD) paths, where alpha.4 barely got through.
-- **Level choice by throughput.** The sender picks each burst's level by the throughput it expects, not one rung at a time. `gear = "ladder"` in `ionhf.toml` (or `--gear ladder`) brings back alpha.4's way, for comparing on the air.
-- **MFSK cue below +7 dB.** Weak OFDM bursts go out behind a short MFSK cue that carries their header, so the receiver finds them. It is used only when both stations are alpha.5 or later, and it is no louder than Ion's other MFSK.
-- **Better receiver.** Echoes near the end of the guard interval no longer break the timing; a second decoding pass recovers more of each OFDM burst; damaged headers are matched against the ones the link expects next.
-- **New window.** Backlit annunciators for TX, RX, link, CW ID, host, radio, ARQ/broadcast, HARQ, retries, losses and warnings, and for the waveform on the air; the level as a readout and a 17-step strip; a decode plot of the last bursts heard; a full log with filters, search, Copy, Save and Folder, kept in `logs/ionhf.log` in the settings folder.
-- New options: `--log` (open on the Log), `--gear goodput|ladder`.
+- **Stream gear for big transfers at low S:N.** A large transfer on a weak or fading link goes as a continuous stream of coded periods, answered by short tones, instead of burst-by-burst ARQ: in simulation 1.4–1.9× faster on large transfers around 0 dB, and never more than 2% slower. Short exchanges stay on ARQ. Used only when both stations are alpha.6; `stream = false` in `ionhf.toml` (or `--stream off`) turns it off.
+- **Lifeline.** When a link fades below Ion's slowest MFSK level, both ends hold it in a slow 337 Hz MFSK mode (heard from about −20 dB) instead of retrying until a timer gives up, pick up again without reconnecting when the band comes back, and after 15 minutes of hold close by agreement with a reason the host program can act on (with `DATA2G ON`, `DISCONNECTED LINK_FAILED weak path`). Same power as Ion's other MFSK. Used only when both stations are alpha.6.
+- **Clipper setting (experimental).** Setup › Clipper: *Classic* (the default, as alpha.5) or *Burst*, Data2G's whole-burst clipper by Andrew Rodland, KC2G: 1–2.4 dB more average power at the same peak, about 1.25× faster in simulation from 0 dB up, eased on fast-fading paths. It switches from the next burst. Both stations should use the same setting. Peaks, MFSK and CW are unchanged.
+- **Safer transmit.** If the radio or sound card stops taking audio, Ion now unkeys within about 2 seconds and says so in the log, where alpha.5 could stay keyed and silent until its 15-second watchdog.
+- **CW ID** after broadcasts and after a call that was given up.
+- **Host ports** wait for a port that is still busy (for example right after restarting Ion) instead of failing; Setup shows *Waiting*.
+- 16QAM and 64QAM bursts decode more reliably (a fix in how the receiver allows for clipping distortion).
 
 ## Download
 
@@ -31,7 +32,7 @@ The builds are not signed:
 2. Try it without a radio first: `ionhf --loopback --connect LOOP` calls a simulated station that sends back what it receives; or point a host program at Ion with `--loopback` and connect to `LOOP`.
 3. On the air, Ion sends a CW ID at the end of every link and every 9.5 minutes during one. *Esc* or *Abort* stops transmitting at any time.
 
-Ion answers calls on its own while no link is up. All stations in a test need the same Ion HF version.
+Ion answers calls on its own while no link is up. Alpha.6 works with alpha.5 stations; the stream gear and the lifeline need alpha.6 at both ends.
 
 ## Report problems
 

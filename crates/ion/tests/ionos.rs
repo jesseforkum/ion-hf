@@ -28,7 +28,7 @@
 //! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_STREAM=0` (without
 //! the stream gear), `ION_FAIL_HOLD`,
 //! `ION_FAIL_HOLD_MAX`, `ION_LOSS_HOLD`, `ION_EFF_MARGIN` (those
-//! settings), `ION_LIFELINE=0` (without `Config::lifeline`).
+//! settings), `ION_LIFELINE=0` (without `Config::lifeline`), `ION_LIFE_ENTER` (`Config::life_enter_s`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,6 +114,9 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         }
         if std::env::var("ION_LIFELINE").is_ok_and(|v| v == "0") {
             c.lifeline = false;
+        }
+        if let Some(v) = env("ION_LIFE_ENTER") {
+            c.life_enter_s = v;
         }
         c
     };

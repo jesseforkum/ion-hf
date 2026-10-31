@@ -1,0 +1,52 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 0.17s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+WGN -6 dB seed 1: 3851 B, 770 B/min
+WGN -6 dB seed 0: 3851 B, 770 B/min
+MPG -6 dB seed 0: 2143 B, 429 B/min
+MPG -6 dB seed 1: 2024 B, 405 B/min
+test ionos_table has been running for over 60 seconds
+MPD -6 dB seed 0: 1708 B, 342 B/min
+MPP -6 dB seed 0: 1714 B, 343 B/min
+MPP -6 dB seed 1: 1436 B, 287 B/min
+MPD -6 dB seed 1: 1672 B, 334 B/min
+WGN -3 dB seed 1: 3396 B, 679 B/min
+WGN -3 dB seed 0: 3588 B, 718 B/min
+MPG -3 dB seed 1: 2146 B, 429 B/min
+MPG -3 dB seed 0: 2120 B, 424 B/min
+MPP -3 dB seed 0: 2868 B, 574 B/min
+MPP -3 dB seed 1: 2676 B, 535 B/min
+MPD -3 dB seed 0: 2588 B, 518 B/min
+MPD -3 dB seed 1: 2783 B, 557 B/min
+WGN +0 dB seed 0: 8079 B, 1616 B/min
+WGN +0 dB seed 1: 9593 B, 1919 B/min
+MPG +0 dB seed 0: 3066 B, 613 B/min
+MPG +0 dB seed 1: 6249 B, 1250 B/min
+MPP +0 dB seed 0: 6759 B, 1352 B/min
+MPP +0 dB seed 1: 6561 B, 1312 B/min
+MPD +0 dB seed 0: 2905 B, 581 B/min
+MPD +0 dB seed 1: 2931 B, 586 B/min
+WGN +10 dB seed 0: 73100 B, 14620 B/min
+MPG +10 dB seed 0: 52020 B, 10404 B/min
+MPG +10 dB seed 1: 51170 B, 10234 B/min
+WGN +10 dB seed 1: 73100 B, 14620 B/min
+MPP +10 dB seed 0: 57120 B, 11424 B/min
+MPD +10 dB seed 0: 50320 B, 10064 B/min
+MPP +10 dB seed 1: 67660 B, 13532 B/min
+MPD +10 dB seed 1: 37740 B, 7548 B/min
+
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | WGN | MPG | MPP | MPD |
+|---:|---:|---:|---:|---:|
+| 10 | 14620 (1949) | 10319 (1376) | 12478 (1664) | 8806 (1174) |
+| 0 | 1767 (236) | 932 (124) | 1332 (178) | 584 (78) |
+| -3 | 698 (93) | 427 (57) | 554 (74) | 537 (72) |
+| -6 | 770 (103) | 417 (56) | 315 (42) | 338 (45) |
+test ionos_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 456.49s
+

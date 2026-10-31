@@ -657,7 +657,7 @@ lost ACK, which would hold its ACKs back after the resume). A path that
 has come back answers the knock at once, so the link need not wait for
 the next probe. No data goes in R1/7: nothing needs a frame.
 
-**Trigger** (`life_enter_s`, 45 s): no data has moved for 45 s, at either
+**Trigger** (`life_enter_s`, 90 s): no data has moved for 90 s, at either
 end: nothing acknowledged or delivered, no idle check-in answered, no
 turn. ACKs that say nothing arrived do not count (on a path that is weak
 one way, the polls' ACKs keep coming). A running stream (Stream gear)
@@ -667,6 +667,11 @@ prober, the other as the answering side; the receiving side's timer
 stops its unasked ACKs as well. A probe heard makes an end the answering
 side at once (two ends that both thought they were sending sort it out
 that way; the probes' timing differs by up to 4.9 s by call sign).
+
+It was 45 s at first, which also fired in fades the link rides out on
+its own: on IONOS, 5-minute sessions at −3 and 0 dB on MPG and MPD came
+out at 0.66–0.91× alpha.5; at 90 s (and 150 s) none of those sessions
+held, and they match the lifeline off (`lab_runs/alpha6/`).
 
 **Hold.** What is in flight stays in flight and what is queued stays
 queued, offsets and all; what the peer has acknowledged stays
@@ -686,7 +691,7 @@ SNR: 1 dB over the floor's −13). The gear starts afresh from the report,
 as after a ConnAck (the old channel's holds and failures dropped), and
 data goes at once. The answering side leaves its hold at the first
 ladder burst it hears. **Hysteresis**: the hold begins at no data for
-45 s (in the model, a mean SNR of about −15 dB) and ends at −11 dB both
+90 s and ends at −11 dB both
 ways; a hold within 300 s of a resume is a flap and adds 2 dB to what the
 next resume wants (up to 6 dB), stops the knocks, and keeps the hold's
 clock running from the first hold.
@@ -884,7 +889,7 @@ HF leaves compression off on links; nets compress direct messages
 | `harq_stretch`, `merge_pieces` | on, on | |
 | `cue`, `cue_below_db`, `harq_partial` | on, 7 dB, on | MFSK cue |
 | `stream` | on | the stream gear (offered; used when both have it) |
-| `lifeline`, `life_enter_s` | on, 45 s | Lifeline |
+| `lifeline`, `life_enter_s` | on, 90 s | Lifeline |
 | `life_probe_s`, `life_probe_max_s`, `life_knock_s` | 60 s, 120 s, 30 s | |
 | `life_silent_s`, `life_max_s`, `life_resume_db` | 300 s, 900 s, 1 dB | |
 
