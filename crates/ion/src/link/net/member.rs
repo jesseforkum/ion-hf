@@ -658,6 +658,7 @@ impl NetStation {
         let aside = if self.parent.is_some() { ASIDE } else { 0 };
         let hi = self.burst_id & 3 | (more as u8) << 2 | aside;
         Outgoing {
+            td_ease: false,
             cue: false,
             wave: LADDER[level].wave,
             code: level,

@@ -203,6 +203,7 @@ impl NetStation {
             }
         }
         Some(Outgoing {
+            td_ease: false,
             cue: false,
             wave: LADDER[level].wave,
             code: level,

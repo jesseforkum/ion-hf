@@ -144,6 +144,7 @@ impl Station {
                 // The channel is the same both ways: our own class, and
                 // the lower of the Turn's SNR and the last data burst's.
                 self.peer_class = self.chan.class();
+                self.peer_doppler_hz = self.chan.spreads().1;
                 let rep = self.report_snr();
                 let snr = match self.chan.eff_snr_db() {
                     Some(e) if self.cfg.eff_snr => e.min(rep),

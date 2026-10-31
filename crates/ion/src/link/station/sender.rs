@@ -144,6 +144,7 @@ impl Station {
                 };
                 self.peer_class = a.report.map(|r| r.class).unwrap_or_default();
                 self.peer_slot = a.report.map_or(0, |r| r.slot);
+                self.peer_doppler_hz = a.report.map_or(f32::NAN, |r| r.doppler_hz);
                 self.peer_ack_wave = Some(inc.wave);
                 self.peer_heard = Some(a.burst);
                 self.last_progress = now;
@@ -363,6 +364,7 @@ impl Station {
             field
         };
         Outgoing {
+            td_ease: self.peer_doppler_hz > crate::link::audio::TD_EASE_DOPPLER_HZ,
             wave: lv.wave,
             code: level,
             user: user_bits(level, self.session, self.burst_id | hq << 2),

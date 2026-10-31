@@ -1,0 +1,44 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 0.20s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+MPD +0 dB seed 0: 3094 B, 619 B/min
+MPD +0 dB seed 5: 2854 B, 571 B/min
+MPD +0 dB seed 3: 2862 B, 572 B/min
+test ionos_table has been running for over 60 seconds
+MPD +0 dB seed 1: 3114 B, 623 B/min
+MPD +0 dB seed 2: 2716 B, 543 B/min
+MPD +0 dB seed 4: 3078 B, 616 B/min
+MPD +3 dB seed 1: 10030 B, 2006 B/min
+MPD +3 dB seed 0: 18190 B, 3638 B/min
+MPD +3 dB seed 3: 15300 B, 3060 B/min
+MPD +3 dB seed 5: 14280 B, 2856 B/min
+MPD +3 dB seed 2: 15980 B, 3196 B/min
+MPD +6 dB seed 1: 30260 B, 6052 B/min
+MPD +6 dB seed 0: 31960 B, 6392 B/min
+MPD +3 dB seed 4: 25330 B, 5066 B/min
+MPD +6 dB seed 3: 34850 B, 6970 B/min
+MPD +6 dB seed 2: 16660 B, 3332 B/min
+MPD +10 dB seed 0: 49980 B, 9996 B/min
+MPD +6 dB seed 5: 21760 B, 4352 B/min
+MPD +10 dB seed 1: 56780 B, 11356 B/min
+MPD +6 dB seed 4: 19380 B, 3876 B/min
+MPD +10 dB seed 3: 49810 B, 9962 B/min
+MPD +10 dB seed 2: 64090 B, 12818 B/min
+MPD +10 dB seed 4: 32980 B, 6596 B/min
+MPD +10 dB seed 5: 65960 B, 13192 B/min
+
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | MPD |
+|---:|---:|
+| 10 | 10653 (1420) |
+| 6 | 5162 (688) |
+| 3 | 3304 (440) |
+| 0 | 591 (79) |
+test ionos_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 336.86s
+

@@ -162,6 +162,9 @@ pub struct Outgoing {
     /// ([`CUE_MODE`], [`cue_s`] long, carrying its header and `extra`), only
     /// to a peer that agreed to [`caps::CUE`].
     pub cue: bool,
+    /// Experiment (`ION_TDCLIP=1`): the whole-burst clipper eased by
+    /// `audio::TD_EASE_DB`, for a peer reporting fast fading.
+    pub td_ease: bool,
 }
 
 impl Outgoing {
@@ -440,6 +443,8 @@ pub struct Station {
     /// The third the peer wants our slice bursts in, and the one our
     /// receivers want ours in (`crate::slots`).
     peer_slot: u8,
+    /// The peer's last reported Doppler spread, Hz (NaN: none).
+    peer_doppler_hz: f32,
     rx_slot: u8,
     // Receiving side.
     /// What we measure of the channel over the link (for the report).
@@ -530,6 +535,7 @@ impl Station {
             sends: VecDeque::new(),
             peer_class: ChanClass::default(),
             peer_slot: 0,
+            peer_doppler_hz: f32::NAN,
             rx_slot: 0,
             chan: ChanTrack::default(),
             last_rx_eff: 0.0,
@@ -1067,6 +1073,7 @@ impl Station {
     fn tiny(&self, t: Tiny, wave: Wave) -> Outgoing {
         let (kind, extra) = t.encode();
         Outgoing {
+            td_ease: false,
             wave,
             code: TINY,
             user: user_bits(TINY, self.session, kind),
@@ -1079,6 +1086,7 @@ impl Station {
 
     fn control(&self, f: Frame, wave: Wave) -> Outgoing {
         Outgoing {
+            td_ease: false,
             wave,
             code: CONTROL,
             user: user_bits(CONTROL, self.session, 0),
@@ -1145,6 +1153,7 @@ impl Station {
         self.tx_codec = None;
         self.rx_codec = None;
         self.peer_class = ChanClass::default();
+        self.peer_doppler_hz = f32::NAN;
         self.chan.clear();
         self.burst_s = self.cfg.max_burst_s;
         self.last_report_db = None;

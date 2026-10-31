@@ -83,6 +83,22 @@ pub fn tx_options(code: usize) -> TxOptions {
     }
 }
 
+/// Doppler spread (Hz) a peer reports from which the whole-burst clipper
+/// eases by [`TD_EASE_DB`]: IONOS MPD measures 2.0–2.6 Hz, MPP mostly
+/// 1.1–1.4 Hz, MPG under 1.3 Hz.
+pub const TD_EASE_DOPPLER_HZ: f32 = 1.8;
+/// Extra clip headroom on fast fading, dB.
+pub const TD_EASE_DB: f32 = 2.0;
+
+/// [`tx_options`] of a data burst, eased on fast fading.
+fn tx_options_eased(code: usize, ease: bool) -> TxOptions {
+    let mut opt = tx_options(code);
+    if ease && let Some(td) = opt.td_clip.as_mut() {
+        td.headroom_db += TD_EASE_DB;
+    }
+    opt
+}
+
 /// Experiment (`ION_TDCLIP=1`): the whole-burst clipper's headroom (dB) and
 /// spreading for ladder level `code`, as picked in PR #1's ladder table.
 fn td_clip_pick(code: usize) -> Option<(f32, bool)> {
@@ -337,7 +353,7 @@ fn modulate(b: &Outgoing) -> Vec<f32> {
                 extra,
                 &bits,
                 center_of(b),
-                &tx_options(b.code),
+                &tx_options_eased(b.code, b.td_ease),
             )
         }
     }
@@ -907,6 +923,7 @@ mod tests {
     fn data_burst(cue: bool) -> Outgoing {
         let level = LADDER.iter().position(|l| l.wave == Wave::Ofdm(Guard::Normal)).unwrap();
         Outgoing {
+            td_ease: false,
             wave: LADDER[level].wave,
             code: level,
             user: super::super::station::user_bits(level, 0x5A, 2),

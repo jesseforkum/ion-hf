@@ -13,6 +13,7 @@ fn heard(level: usize, plot: bool) -> Vec<Option<RxPlot>> {
     let mut f = Frame::new(Kind::Data, 9);
     f.payload = b"plot test".to_vec();
     let out = Outgoing {
+        td_ease: false,
         wave: LADDER[level].wave,
         code: level,
         user: user_bits(level, 9, 1),
