@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::audio::{self, PhyAir, Receivers, RxPlot};
 use super::frame::{AckInfo, Frame, Kind, Tiny};
 use super::station::{Air, CONTROL, Config, Incoming, Station, TINY, user_hi, user_session};
+use super::stream::{self, Ctl, STREAM, TONES};
 use crate::level::{LADDER, Wave};
 
 /// One burst sent or heard, for the operator's log.
@@ -90,6 +91,26 @@ fn describe(code: usize, user: u16, extra: u16, first: Option<&[u8]>, frames: us
                 );
                 return (format!("CONREQ {from}>{to}"), Some((from, to)), None);
             }
+            Some(f) if f.kind == Kind::Stream => match Ctl::from_bytes(&f.payload) {
+                Some(Ctl::Start { opt, len, .. }) => {
+                    format!(
+                        "STREAM START {len} B {}",
+                        stream::OPTS[(opt as usize).min(stream::OPTS.len() - 1)].name
+                    )
+                }
+                Some(Ctl::Go { opt, .. }) => {
+                    format!(
+                        "STREAM GO {}",
+                        stream::OPTS[(opt as usize).min(stream::OPTS.len() - 1)].name
+                    )
+                }
+                Some(Ctl::End { .. }) => "STREAM END".into(),
+                Some(Ctl::Report { done, snr_db, .. }) => {
+                    reported = Some(snr_db);
+                    format!("STREAM REPORT {}", if done { "done" } else { "not done" })
+                }
+                None => "STREAM".into(),
+            },
             Some(f) if f.kind == Kind::Ack => match AckInfo::from_bytes(&f.payload) {
                 Some(a) => {
                     reported = Some(a.snr_db);
@@ -99,6 +120,11 @@ fn describe(code: usize, user: u16, extra: u16, first: Option<&[u8]>, frames: us
             },
             _ => "CTRL".into(),
         },
+        STREAM => format!(
+            "PERIOD {}",
+            stream::OPTS[((extra & 0xFF) as usize).min(stream::OPTS.len() - 1)].name
+        ),
+        TONES => stream::Msg::from_code(extra & 0xFF).map_or("TONES".into(), |m| m.name().to_string()),
         // Received long-frame bursts arrive as soft bits: no count yet.
         l if frames == 0 => format!("DATA {}", crate::sounding::level_name(l, LADDER[l].wave)),
         l => format!("DATA {} ×{frames}", crate::sounding::level_name(l, LADDER[l].wave)),
@@ -126,6 +152,10 @@ impl Air for NodeAir {
     fn max_bits(&self, wave: Wave, code: usize) -> usize {
         PhyAir.max_bits(wave, code)
     }
+
+    fn lead_s(&self) -> f64 {
+        self.lead_s
+    }
 }
 
 pub struct Node {
@@ -151,6 +181,9 @@ pub struct Node {
     groups: Vec<u8>,
     group_in: Vec<Incoming>,
     plots: Vec<BurstPlot>,
+    /// Stream gear, sending side: the audio heard since our period ended,
+    /// for the tone detector, until it has decided.
+    watch: Option<Vec<f32>>,
 }
 
 impl Node {
@@ -173,6 +206,7 @@ impl Node {
             id_every_s: None,
             last_key: f64::NEG_INFINITY,
             id_peer: String::new(),
+            watch: None,
         }
     }
 
@@ -221,15 +255,19 @@ impl Node {
         &mut self.station
     }
 
-    /// Received audio, 48 kHz, ending at `now`. Ignored while our own burst
-    /// is out (so we never decode ourselves).
+    /// Received audio, 48 kHz, ending at `now`. Not decoded while our own
+    /// burst is out (so we never decode ourselves), but counted on the
+    /// receivers' clock.
     pub fn push_audio(&mut self, samples: &[f32], now: f64) {
         if self.on_air {
+            self.rx.skip(samples.len());
             return;
         }
         self.bursts.clear();
         self.rx.expect(&self.station.expected());
+        self.rx.stream_listen(self.station.stream_listen());
         self.rx.process(samples, &mut self.bursts);
+        self.watch_tones(samples, now);
         let mut plots = self.rx.take_plots().into_iter();
         for inc in std::mem::take(&mut self.bursts) {
             let plot = plots.next().flatten();
@@ -275,6 +313,68 @@ impl Node {
         }
     }
 
+    /// `n` samples the host did not hand over (we were keyed, or its echo
+    /// was muted): they count on the receivers' clock, which the stream's
+    /// timekeeping runs on.
+    pub fn push_gap(&mut self, n: usize) {
+        self.rx.skip(n);
+    }
+
+    /// Stream gear, sending side: after our period, listen for the
+    /// receiver's tones, decide once the answer would be over, and hand
+    /// what was heard to the station.
+    fn watch_tones(&mut self, samples: &[f32], now: f64) {
+        let Some(w) = self.station.stream_watch() else {
+            self.watch = None;
+            return;
+        };
+        let Some(buf) = self.watch.as_mut() else { return };
+        buf.extend_from_slice(samples);
+        let span = (stream::WATCH_S * 48_000.0) as usize;
+        if buf.len() < span {
+            return;
+        }
+        let buf = self.watch.take().unwrap();
+        let plan = stream::tones::Plan::new(w.seed);
+        let lo = 2_400;
+        let h = stream::tones::detect(
+            &plan,
+            &buf,
+            lo,
+            span - stream::tones::answer_samples(),
+            stream::tones::MARK,
+        );
+        if let Some(m) = h.msg {
+            let inc = Incoming {
+                wave: crate::level::FLOOR_WAVE,
+                code: TONES,
+                user: super::station::user_bits(CONTROL, self.station_session(), 0),
+                extra: m.code() | ((w.seed & 0xFF) as u16) << 8,
+                frames: Vec::new(),
+                soft: None,
+                snr_db: 10.0 * h.score.max(1e-3).log10(),
+                chan: crate::chan::ChannelMeas::of_snr(0.0),
+                slot: 0,
+                grid: None,
+            };
+            self.station.on_rx(&inc, now);
+            self.note(BurstNote {
+                tx: false,
+                level: None,
+                what: m.name().into(),
+                snr_db: None,
+                lost: 0,
+                secs: 0.0,
+                calls: None,
+                reported_db: None,
+            });
+        }
+    }
+
+    fn station_session(&self) -> u8 {
+        self.station.stream_seed().map_or(0, |s| (s >> 8) as u8)
+    }
+
     /// Keep the bursts of the broadcast groups with these ids (for a
     /// [`super::bcast::BcastStation`] beside the link).
     pub fn set_groups(&mut self, ids: &[u8]) {
@@ -291,7 +391,9 @@ impl Node {
 
     /// Receiving a burst, or transmitting one: not the moment to key.
     pub fn busy(&self) -> bool {
-        self.on_air || self.rx.busy()
+        // While streaming the schedule is the stream's: a receiver chasing
+        // noise must not hold a period or an answer back.
+        self.on_air || (self.rx.busy() && !self.station.streaming())
     }
 
     /// The slot meter: the third of the passband our receivers would have
@@ -319,7 +421,10 @@ impl Node {
         }
         let b = self.station.poll_tx(now)?;
         let mut out = vec![0.0; self.lead];
-        if let (Some(every), Some(t0)) = (self.id_every_s, self.station.link_t0()) {
+        // The station ends a stream before an ID falls due; a period or an
+        // answer never carries one (it would run into the other side's slot).
+        let streamed = b.code == STREAM || b.code == TONES;
+        if let (Some(every), Some(t0), false) = (self.id_every_s, self.station.link_t0(), streamed) {
             let due = t0 + ((now - t0) / every).floor() * every;
             if now - t0 >= every && due > self.last_key {
                 out.extend(crate::sounding::cw(&format!("DE {}", self.station.call())));
@@ -336,7 +441,11 @@ impl Node {
                 });
             }
         }
-        out.extend(audio::transmit_with(&b, self.ofdm_gain));
+        if b.code == TONES {
+            out.extend(audio::transmit_tones(&b, self.rx.stream_state().0));
+        } else {
+            out.extend(audio::transmit_with(&b, self.ofdm_gain));
+        }
         self.on_air = true;
         self.last_key = now;
         let first = b.frames.first().map(Vec::as_slice);
@@ -368,7 +477,19 @@ impl Node {
         if self.on_air {
             self.on_air = false;
             self.station.on_tx_done(now);
+            self.rx.stream_tx_end(None);
+            self.watch = self.station.stream_watch().map(|_| Vec::new());
         }
+    }
+
+    /// MFSK cues our receivers have heard.
+    pub fn cues_heard(&self) -> u64 {
+        self.rx.cues_heard()
+    }
+
+    /// The stream acquisition's counters (receiving side).
+    pub fn stream_acq(&self) -> stream::acq::AcqStats {
+        self.rx.stream_state().1
     }
 
     pub fn on_air(&self) -> bool {

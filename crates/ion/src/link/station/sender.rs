@@ -155,7 +155,7 @@ impl Station {
     }
 
     /// The peer asks for the turn (or no longer does).
-    fn note_turn_ask(&mut self, want: bool, now: f64) {
+    pub(super) fn note_turn_ask(&mut self, want: bool, now: f64) {
         if want && !self.peer_wants_turn {
             self.turn_asked_at = now;
         }
@@ -181,6 +181,7 @@ impl Station {
             if got {
                 if let Some(p) = self.inflight.remove(&s.off) {
                     self.stats.bytes_acked += p.len() as u64;
+                    self.arq_bytes += p.len() as u64;
                 }
             } else if keep && s.held < harq::H_MAX && self.inflight.contains_key(&s.off) {
                 self.at_peer.push((s.off, s.held));
@@ -314,7 +315,21 @@ impl Station {
             .collect();
         let resent = pieces.len();
         let mut in_flight: usize = self.inflight.values().map(Vec::len).sum();
-        while pieces.len() < room && !self.out.is_empty() && in_flight < WINDOW_BYTES {
+        // While the queue waits for a stream, only what is in flight goes,
+        // for a while: frames that keep failing would hold the link back.
+        let now = self.last_heard.max(self.last_tx_end);
+        let mut draining = self.stream_wanted(now);
+        if draining {
+            let since = *self.drain_since.get_or_insert(now);
+            if now - since > crate::link::stream::DRAIN_S {
+                self.stream_hold_until = now + crate::link::stream::DRAIN_HOLD_S;
+                self.drain_since = None;
+                draining = false;
+            }
+        } else {
+            self.drain_since = None;
+        }
+        while pieces.len() < room && !self.out.is_empty() && in_flight < WINDOW_BYTES && !draining {
             let n = self.out.len().min(max_payload);
             let chunk: Vec<u8> = self.out.drain(..n).collect();
             self.inflight.insert(self.next_offset, chunk);

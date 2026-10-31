@@ -1,0 +1,64 @@
+arm1   bursts 8 cued 0 frames 35 resent 17 increments 0 (0 bits) | periods 17
+arm1 MPD -6 dB seed 0: 1708 B, 342 B/min
+arm1   bursts 11 cued 0 frames 41 resent 25 increments 0 (0 bits) | periods 13
+arm1 MPD -6 dB seed 1: 1672 B, 334 B/min
+arm1   bursts 10 cued 0 frames 36 resent 11 increments 0 (0 bits) | periods 15
+arm1 MPP -6 dB seed 0: 1714 B, 343 B/min
+arm1   bursts 8 cued 0 frames 29 resent 17 increments 0 (0 bits) | periods 17
+arm1 MPP -6 dB seed 1: 1436 B, 287 B/min
+arm1   bursts 27 cued 1 frames 144 resent 54 increments 0 (0 bits) | periods 0
+arm1 MPD -3 dB seed 0: 2588 B, 518 B/min
+arm1   bursts 8 cued 0 frames 35 resent 15 increments 0 (0 bits) | periods 16
+arm1 MPD -3 dB seed 1: 2783 B, 557 B/min
+arm1   bursts 29 cued 2 frames 162 resent 66 increments 0 (0 bits) | periods 0
+arm1 MPP -3 dB seed 0: 2868 B, 574 B/min
+arm1   bursts 27 cued 2 frames 146 resent 54 increments 0 (0 bits) | periods 0
+arm1 MPP -3 dB seed 1: 2676 B, 535 B/min
+arm1   bursts 21 cued 21 frames 210 resent 8 increments 8 (11520 bits) | periods 0
+arm1 MPD +6 dB seed 1: 32130 B, 6426 B/min
+arm1   bursts 22 cued 22 frames 133 resent 12 increments 61 (165600 bits) | periods 0
+arm1 MPD +6 dB seed 0: 19210 B, 3842 B/min
+arm1   bursts 20 cued 20 frames 206 resent 16 increments 0 (0 bits) | periods 0
+arm1 MPP +6 dB seed 1: 30090 B, 6018 B/min
+arm1   bursts 22 cued 22 frames 209 resent 17 increments 71 (94320 bits) | periods 0
+arm1 MPP +6 dB seed 0: 30430 B, 6086 B/min
+arm1   bursts 32 cued 1 frames 828 resent 0 increments 60 (33600 bits) | periods 0
+arm1 MPD +20 dB seed 0: 133110 B, 26622 B/min
+arm1   bursts 31 cued 1 frames 678 resent 0 increments 212 (147840 bits) | periods 0
+arm1 MPD +20 dB seed 1: 103530 B, 20706 B/min
+arm1   bursts 33 cued 0 frames 805 resent 0 increments 193 (129360 bits) | periods 0
+arm1 MPP +20 dB seed 0: 136850 B, 27370 B/min
+arm1   bursts 33 cued 0 frames 891 resent 0 increments 156 (58560 bits) | periods 0
+arm1 MPP +20 dB seed 1: 147050 B, 29410 B/min
+arm0   bursts 25 cued 0 frames 119 resent 38 increments 0 (0 bits) | periods 0
+arm0 MPD -6 dB seed 1: 1990 B, 398 B/min
+arm0   bursts 26 cued 0 frames 121 resent 42 increments 0 (0 bits) | periods 0
+arm0 MPD -6 dB seed 0: 1946 B, 389 B/min
+arm0   bursts 28 cued 0 frames 135 resent 19 increments 0 (0 bits) | periods 0
+arm0 MPP -6 dB seed 1: 2568 B, 514 B/min
+arm0   bursts 25 cued 0 frames 122 resent 34 increments 0 (0 bits) | periods 0
+arm0 MPP -6 dB seed 0: 2100 B, 420 B/min
+arm0   bursts 27 cued 1 frames 144 resent 54 increments 0 (0 bits) | periods 0
+arm0 MPD -3 dB seed 0: 2588 B, 518 B/min
+arm0   bursts 26 cued 1 frames 137 resent 36 increments 0 (0 bits) | periods 0
+arm0 MPD -3 dB seed 1: 2578 B, 516 B/min
+arm0   bursts 29 cued 2 frames 162 resent 66 increments 0 (0 bits) | periods 0
+arm0 MPP -3 dB seed 0: 2868 B, 574 B/min
+arm0   bursts 27 cued 2 frames 146 resent 54 increments 0 (0 bits) | periods 0
+arm0 MPP -3 dB seed 1: 2676 B, 535 B/min
+arm0   bursts 18 cued 18 frames 216 resent 21 increments 8 (11520 bits) | periods 0
+arm0 MPD +6 dB seed 0: 30940 B, 6188 B/min
+arm0   bursts 21 cued 21 frames 210 resent 8 increments 8 (11520 bits) | periods 0
+arm0 MPD +6 dB seed 1: 32130 B, 6426 B/min
+arm0   bursts 20 cued 20 frames 206 resent 16 increments 0 (0 bits) | periods 0
+arm0 MPP +6 dB seed 1: 30090 B, 6018 B/min
+arm0   bursts 22 cued 22 frames 209 resent 17 increments 71 (94320 bits) | periods 0
+arm0 MPP +6 dB seed 0: 30430 B, 6086 B/min
+arm0   bursts 32 cued 1 frames 828 resent 0 increments 60 (33600 bits) | periods 0
+arm0 MPD +20 dB seed 0: 133110 B, 26622 B/min
+arm0   bursts 31 cued 1 frames 678 resent 0 increments 212 (147840 bits) | periods 0
+arm0 MPD +20 dB seed 1: 103530 B, 20706 B/min
+arm0   bursts 34 cued 0 frames 864 resent 0 increments 120 (51120 bits) | periods 0
+arm0 MPP +20 dB seed 0: 142460 B, 28492 B/min
+arm0   bursts 33 cued 0 frames 891 resent 0 increments 156 (58560 bits) | periods 0
+arm0 MPP +20 dB seed 1: 147050 B, 29410 B/min

@@ -20,10 +20,12 @@ mod expect;
 mod gear;
 mod receiver;
 mod sender;
+mod stream;
 
 pub use config::{Config, Gear};
 pub use expect::Expected;
 pub use receiver::cheap_ack_waves;
+pub use stream::StreamStatus;
 
 /// Burst code of a header-only burst (on the air: 14, [`air_code`]).
 pub const TINY: usize = 62;
@@ -60,12 +62,18 @@ pub trait Air: Send + Sync {
     fn max_bits(&self, _wave: Wave, _code: usize) -> usize {
         usize::MAX
     }
+
+    /// Silence before every burst (the PTT lead), seconds, included in
+    /// [`Air::duration`].
+    fn lead_s(&self) -> f64 {
+        0.0
+    }
 }
 
 /// Coded bits of `frames` whole frames of burst `code`.
 pub fn frame_bits(code: usize, frames: usize) -> usize {
     match code {
-        TINY => 0,
+        TINY | crate::link::stream::TONES | crate::link::stream::STREAM => 0,
         CONTROL => frames * fec::n_short(),
         l => frames * LADDER[l].coded_bits(),
     }
@@ -295,6 +303,12 @@ pub struct Stats {
     pub turbo_recovered: u32,
     pub turbo_bursts: u32,
     pub polls: u32,
+    /// Stream periods sent or taken in, and blocks delivered.
+    pub stream_periods: u32,
+    pub stream_blocks: u32,
+    /// Receiving side: each period's option, frames decoded and tried,
+    /// SNR, and the answer to it (0 DONE, 1 SLOWER, 2 FASTER, 3 none).
+    pub stream_log: Vec<(u8, u8, u8, f32, u8)>,
     /// Seconds we were on the air.
     pub airtime_s: f64,
     /// Level of each data burst we sent, in order.
@@ -330,6 +344,9 @@ enum Awaiting {
     /// We sent Turn: waiting for the peer's first burst.
     TurnTaken,
     DiscAck,
+    /// Stream gear: our Start's Go, our End's Report.
+    StreamGo,
+    StreamReport,
 }
 
 pub struct Station {
@@ -365,6 +382,35 @@ pub struct Station {
     last_progress: f64,
     last_tx_end: f64,
     last_tx_wave: Wave,
+    last_tx_code: usize,
+    /// A tone answer in `reply` goes only until then (it would run into
+    /// the next period).
+    reply_by: Option<f64>,
+    // Stream gear.
+    stream_tx: Option<stream::StreamTx>,
+    /// A block whose DONE was heard and the next block followed at once:
+    /// the next Go confirms it.
+    stream_prev: Option<stream::StreamTx>,
+    stream_rx: Option<stream::StreamRx>,
+    stream_ids: u8,
+    stream_hold_until: f64,
+    /// The last block's pieces needed over pieces sent.
+    stream_eff: f32,
+    /// ARQ goodput yardstick: data bytes ARQ got acknowledged, the seconds
+    /// it spent sending data, and when its current stretch began.
+    arq_bytes: u64,
+    arq_time: f64,
+    arq_from: Option<f64>,
+    /// The current run of stream blocks: when its first Start went, the
+    /// bytes of its blocks that heard DONE, and how many.
+    run_from: Option<f64>,
+    run_bytes: u64,
+    run_blocks: u32,
+    /// Since when data bursts have sent only what was in flight, so the
+    /// queue can stream.
+    drain_since: Option<f64>,
+    tone_count: u32,
+    last_tone: Option<(bool, crate::link::stream::Msg)>,
     // Sending side.
     out: VecDeque<u8>,
     /// Stream offset of `out[0]`.
@@ -500,6 +546,23 @@ impl Station {
             last_progress: 0.0,
             last_tx_end: 0.0,
             last_tx_wave: FLOOR_WAVE,
+            last_tx_code: TINY,
+            reply_by: None,
+            stream_tx: None,
+            stream_prev: None,
+            stream_rx: None,
+            stream_ids: seed,
+            stream_hold_until: 0.0,
+            stream_eff: 0.0,
+            arq_bytes: 0,
+            arq_time: 0.0,
+            arq_from: None,
+            run_from: None,
+            run_bytes: 0,
+            run_blocks: 0,
+            drain_since: None,
+            tone_count: 0,
+            last_tone: None,
             out: VecDeque::new(),
             next_offset: 0,
             inflight: BTreeMap::new(),
@@ -568,7 +631,14 @@ impl Station {
 
     /// The [`caps`] we offer or accept.
     fn own_caps(&self) -> u8 {
-        if self.cfg.cue { caps::CUE } else { 0 }
+        let mut c = 0;
+        if self.cfg.cue {
+            c |= caps::CUE;
+        }
+        if self.cfg.stream {
+            c |= caps::STREAM;
+        }
+        c
     }
 
     // -- application side -----------------------------------------------------
@@ -592,6 +662,11 @@ impl Station {
     /// Current data level (meaningful on the sending side).
     pub fn level(&self) -> usize {
         self.level
+    }
+
+    /// The SNR the gear aims by (dB in 2.4 kHz), once there is a report.
+    pub fn aim_db(&self) -> Option<f32> {
+        self.aim_db
     }
 
     /// The level the peer's last SNR report allows.
@@ -727,6 +802,8 @@ impl Station {
         self.out.len()
             + self.inflight.values().map(Vec::len).sum::<usize>()
             + self.unsent.iter().map(Vec::len).sum::<usize>()
+            + self.stream_tx.as_ref().map_or(0, |t| t.block.len())
+            + self.stream_prev.as_ref().map_or(0, |t| t.block.len())
     }
 
     /// End the link now: drop what is still queued and say goodbye. A peer
@@ -741,6 +818,9 @@ impl Station {
                 self.state = State::Disconnected;
             }
             State::Connected => {
+                self.stream_tx = None;
+                self.stream_prev = None;
+                self.stream_rx = None;
                 self.out.clear();
                 self.inflight.clear();
                 self.unsent.clear();
@@ -794,6 +874,13 @@ impl Station {
             if self.answering && r.code == TINY && user_hi(r.user) == Tiny::CONN_ACK_KIND {
                 self.link_t0 = Some(now);
             }
+            if r.code == crate::link::stream::TONES {
+                if self.reply_by.take().is_some_and(|by| now > by) {
+                    self.stream_late(&r);
+                    return None;
+                }
+                self.stream_note_answer(&r);
+            }
             return Some(self.note_tx(r));
         }
         // New data while waiting on a check-in's answer: send it, its ACK
@@ -818,6 +905,16 @@ impl Station {
                 Awaiting::DiscAck => self.tries > self.cfg.disc_retries,
                 _ => self.tries > self.cfg.retries,
             };
+            if give_up && matches!(self.awaiting, Awaiting::StreamGo | Awaiting::StreamReport) {
+                // The peer did not answer the stream's handshake: back to
+                // the link with the block (the link's own timeout decides
+                // whether the peer is gone).
+                self.awaiting = Awaiting::Nothing;
+                self.deadline = None;
+                self.retry = None;
+                self.stream_giveup();
+                return None;
+            }
             if give_up {
                 self.state = match self.awaiting {
                     Awaiting::DiscAck => State::Disconnected,
@@ -852,6 +949,7 @@ impl Station {
             // Something to send and the sender has gone quiet: ask.
             if self.state == State::Connected
                 && self.has_data()
+                && !self.streaming()
                 && now - self.last_heard >= SPEAK_UP_S
                 && now - self.last_tx_end >= SPEAK_UP_S
                 && now >= self.next_speak_up
@@ -865,6 +963,9 @@ impl Station {
         }
         if self.state != State::Connected {
             return None;
+        }
+        if let Some(b) = self.stream_sender_poll(now) {
+            return b;
         }
         let wave = self.cur_wave();
         let nothing_left = self.out.is_empty() && self.inflight.is_empty();
@@ -884,6 +985,9 @@ impl Station {
             );
             return Some(self.send_awaiting(b, Awaiting::TurnTaken));
         }
+        if let Some(b) = self.stream_start(now) {
+            return Some(b);
+        }
         if nothing_left {
             if now - self.last_tx_end < self.cfg.idle_s {
                 return None;
@@ -891,6 +995,7 @@ impl Station {
             let b = self.tiny(Tiny::Idle, wave);
             return Some(self.send_awaiting(b, Awaiting::Ack));
         }
+        self.arq_from.get_or_insert(now);
         let b = self.data_burst();
         Some(self.note_tx(b))
     }
@@ -898,6 +1003,17 @@ impl Station {
     /// Our burst finished at `t` (the last sample left).
     pub fn on_tx_done(&mut self, t: f64) {
         self.last_tx_end = t;
+        if self.last_tx_code == crate::link::stream::STREAM
+            && let Some(s) = self.stream_tx.as_mut()
+        {
+            s.pause_from = Some(t);
+        }
+        if self.last_tx_code == CONTROL
+            && let Some(r) = self.stream_rx.as_mut()
+            && r.live
+        {
+            r.go_out = true;
+        }
         if self.close_after_tx {
             self.close_after_tx = false;
             self.state = State::Disconnected;
@@ -953,7 +1069,10 @@ impl Station {
 
     /// A burst arrived, ending at `now`.
     pub fn on_rx(&mut self, inc: &Incoming, now: f64) {
-        self.tx_at = now + self.cfg.turnaround_s;
+        // Tones in a pause leave the stream's schedule alone.
+        if inc.code != crate::link::stream::TONES {
+            self.tx_at = now + self.cfg.turnaround_s;
+        }
         self.next_speak_up = 0.0;
         let frames: Vec<Option<Frame>> = inc
             .frames
@@ -1003,8 +1122,9 @@ impl Station {
         // sender now. None of its bursts has arrived yet, so our ACK says
         // so (an older one could name a burst number of the peer's and
         // acknowledge frames we never got).
+        let stream_ctl = frames.iter().flatten().any(|f| f.kind == Kind::Stream);
         if self.awaiting == Awaiting::TurnTaken
-            && (inc.code < LADDER.len() || matches!(tiny, Some(Tiny::Idle | Tiny::Poll)))
+            && (inc.code < LADDER.len() || matches!(tiny, Some(Tiny::Idle | Tiny::Poll)) || stream_ctl)
         {
             self.role = Role::Receiver;
             self.clear_wait();
@@ -1015,6 +1135,9 @@ impl Station {
             self.last_progress = now;
         }
 
+        if self.stream_rx_routed(inc, &frames, now) {
+            return;
+        }
         match self.role {
             Role::Sender => self.sender_rx(inc, tiny, &frames, now),
             Role::Receiver => self.receiver_rx(inc, tiny, &frames, now),
@@ -1106,11 +1229,12 @@ impl Station {
     }
 
     fn note_tx(&mut self, b: Outgoing) -> Outgoing {
-        if b.code >= LADDER.len() {
+        if b.code >= LADDER.len() && b.code != crate::link::stream::STREAM {
             self.stats.control_bursts += 1;
         }
         self.stats.airtime_s += b.duration(&*self.air);
         self.last_tx_wave = b.wave;
+        self.last_tx_code = b.code;
         b
     }
 
@@ -1122,6 +1246,19 @@ impl Station {
     }
 
     fn reset_data(&mut self) {
+        self.stream_tx = None;
+        self.stream_prev = None;
+        self.stream_rx = None;
+        self.stream_hold_until = 0.0;
+        self.stream_eff = 0.0;
+        self.arq_bytes = 0;
+        self.arq_time = 0.0;
+        self.arq_from = None;
+        self.run_from = None;
+        self.run_bytes = 0;
+        self.run_blocks = 0;
+        self.drain_since = None;
+        self.reply_by = None;
         self.inflight.clear();
         self.next_offset = 0;
         self.delivered = 0;

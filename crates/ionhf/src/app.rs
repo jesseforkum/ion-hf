@@ -84,7 +84,12 @@ pub struct App {
     shot_steps: Vec<(f64, ShotStep)>,
     started: Instant,
     next_shot: f64,
+    /// Seconds between `--shots` screenshots.
+    pub shot_every: f64,
 }
+
+/// A tone answer's lamp stays lit this long.
+const TONE_FLASH_S: f64 = 2.0;
 
 /// Seconds since start until which each activity lamp stays lit.
 #[derive(Default)]
@@ -94,6 +99,9 @@ pub struct Flash {
     pub lost: f64,
     pub warn: f64,
     pub cw_id: f64,
+    pub cue: f64,
+    /// DONE, SLOWER, FASTER: until when, and whether ours.
+    pub tone: [(f64, bool); 3],
 }
 
 enum ShotStep {
@@ -116,6 +124,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetOfdmDb(cfg.ofdm_db));
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
+        let _ = cmds.send(IonCmd::SetStream(cfg.stream));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
             let _ = lb.send(LoopCmd::IonPeer(true));
@@ -156,6 +165,7 @@ impl App {
             shot_steps: Vec::new(),
             started: Instant::now(),
             next_shot: 10.0,
+            shot_every: 15.0,
             cfg,
         };
         app.note(format!(
@@ -405,6 +415,14 @@ impl App {
             if rose(old.codewords_failed, s.codewords_failed) {
                 self.lit_until.lost = now + FLASH_S;
             }
+            if s.stream.cues > old.stream.cues {
+                self.lit_until.cue = now + FLASH_S;
+            }
+            if s.stream.gear.tones != old.stream.gear.tones
+                && let Some((ours, m)) = s.stream.gear.last_tone
+            {
+                self.lit_until.tone[m.code() as usize] = (now + TONE_FLASH_S, ours);
+            }
         }
         for b in s.bursts.iter().filter(|b| b.tx) {
             // A mid-link CW ID goes out ahead of a burst.
@@ -515,7 +533,7 @@ impl App {
         if let Some(dir) = &self.shots
             && t >= self.next_shot
         {
-            self.next_shot += 15.0;
+            self.next_shot += self.shot_every;
             shoot(ctx, dir.join(format!("ion_{:03}s.png", t as u64)));
         }
         if self.quit_after.is_some_and(|q| t >= q) {

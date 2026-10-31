@@ -182,22 +182,28 @@ impl Station {
 
     /// Stores a data frame and delivers whatever is now contiguous.
     fn accept(&mut self, f: &Frame) {
+        self.accept_bytes(f.field, &f.payload);
+    }
+
+    /// Stores `payload` found at 24-bit stream offset `field` and delivers
+    /// whatever is now contiguous.
+    pub(super) fn accept_bytes(&mut self, field: u32, payload: &[u8]) {
         // 24-bit offset on the air → full offset near `delivered`.
-        let d = f.field.wrapping_sub(self.delivered) & 0xFF_FFFF;
+        let d = field.wrapping_sub(self.delivered) & 0xFF_FFFF;
         let off = if d < 0x80_0000 {
             self.delivered.wrapping_add(d)
         } else {
             self.delivered.wrapping_sub(0x100_0000 - d)
         };
-        let end = off.wrapping_add(f.payload.len() as u32);
+        let end = off.wrapping_add(payload.len() as u32);
         if end.wrapping_sub(self.delivered) as i32 <= 0 {
             return; // already delivered
         }
         let skip = self.delivered.wrapping_sub(off) as i32;
         let (off, data) = if skip > 0 {
-            (self.delivered, &f.payload[skip as usize..])
+            (self.delivered, &payload[skip as usize..])
         } else {
-            (off, &f.payload[..])
+            (off, payload)
         };
         let keep = self.rx_pending.get(&off).is_none_or(|v| v.len() < data.len());
         if keep {
@@ -267,7 +273,7 @@ impl Station {
     }
 
     /// The SNR our ACKs report: effective or mean.
-    fn report_snr(&self) -> f32 {
+    pub(super) fn report_snr(&self) -> f32 {
         if self.cfg.eff_snr {
             self.last_rx_eff
         } else {

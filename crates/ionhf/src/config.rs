@@ -26,6 +26,8 @@ pub struct Config {
     pub gear: Gear,
     /// How OFDM bursts are clipped (`ion::phy::set_td_clip`).
     pub clipper: Clipper,
+    /// Offer the stream gear (`ion::link::frame::caps::STREAM`); off: plain ARQ.
+    pub stream: bool,
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
@@ -49,6 +51,7 @@ impl Default for Config {
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
             gear: Gear::Goodput,
             clipper: Clipper::Classic,
+            stream: true,
             host_enabled: false,
             host_port: 8300,
             tci_url: "ws://127.0.0.1:50001".into(),
@@ -167,6 +170,15 @@ impl Clipper {
             Clipper::Classic => "Classic",
             Clipper::Burst => "Burst",
         }
+    }
+}
+
+/// `--stream on|off`.
+pub fn parse_on_off(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -323,5 +335,12 @@ mod tests {
         assert_eq!(c.clipper, Clipper::Classic);
         let c: Config = toml::from_str("clipper = \"burst\"\n").unwrap();
         assert_eq!(c.clipper, Clipper::Burst);
+        assert!(Config::default().stream);
+        let c: Config = toml::from_str(
+            "stream = false
+",
+        )
+        .unwrap();
+        assert!(!c.stream);
     }
 }

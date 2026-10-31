@@ -900,6 +900,92 @@ the guard); they show as excess decision-directed noise instead.
 +8 dB, under 0.5 dB on AWGN and CCIR poor; above a 2 dB threshold the
 receiver reports a 6 ms echo, and the link moves to the long guard or MFSK.
 
+## Stream tones and timekeeping
+
+The link's stream gear ([link.md](link.md), Stream gear) adds two
+signals and a way of receiving: `crates/ion/src/link/stream/`.
+
+### Tones
+
+In each pause the receiving side may answer with one of three messages,
+DONE, SLOWER or FASTER, each two steady tones in sequence (`tones.rs`):
+
+- **Grid**: 45 frequencies, 400–2600 Hz, 50 Hz apart. Each stream draws
+  its three pairs from its session and stream id: every frequency used
+  once, at least 100 Hz from any other in use, the two of a pair at least
+  600 Hz apart (some frequency diversity on a fading path); the other 39
+  are the noise reference.
+- **Signal**: 0.2 s per tone (`TONE_S`), a sine at `TX_LEVEL`, as loud as
+  every MFSK burst and never louder, phase-continuous from the first tone
+  to the second, 5 ms ramps; no OFDM gain, no level trim
+  (`a_tone_answer_is_no_louder_than_mfsk_and_leaves_the_ofdm_as_it_was`).
+  The receiver shifts its tones by the carrier offset it tracked, so they
+  land on the grid at the sender.
+- **Detector** (the sending side, which knows when the pause is): the
+  audio from the end of its period, 1.15 s (`WATCH_S`), in 10 ms blocks;
+  per block the DFT at every grid frequency and its two neighbours
+  (6.25 Hz apart), so a tone's energy over any whole number of blocks is a
+  sum. For every start from 50 ms on, each pair is scored by its weaker
+  tone: the energy in its bin and the neighbours over 160 ms (the tone
+  less 20 ms at each end) over the mean of the same over the reference
+  bins (CFAR). The best score over the mark (`MARK`, 4) is the answer.
+  Searching the start makes the detector indifferent to the radios'
+  switching and the sound cards' latency. Noise alone passed the mark in
+  none of 300 pauses (`noise_seldom_passes_the_mark`); an answer at −10 dB
+  in 2.4 kHz against the tone is heard wherever it starts
+  (`an_answer_is_heard_wherever_it_starts_and_at_low_snr`). The lab's
+  measurements of the same tones with a fixed start
+  ([experiments/rateless-stream.md](experiments/rateless-stream.md),
+  section 1): every answer on WGN from −12 dB, 89–94% on fading at −6 dB.
+
+### Timekeeping
+
+A stream period carries the usual preamble and header, but the receiver
+does not need to hear the header: it knows when each period starts (the
+schedule is fixed, `SLOT_S` = 11.4 s from the first) and what its head
+says (its user word and length follow from the option), so it finds the
+head by correlation and cues an OFDM receiver there, trusted
+([experiments/stream-sync.md](experiments/stream-sync.md)):
+
+- **Clock.** The receiver counts every audio sample, including those it
+  does not decode while it transmits (the host reports them:
+  `Node::push_gap`, `Receivers::skip`). Positions are on that count.
+- **Anchors** (`sync::Track`): (a period's place on the schedule, where it
+  was found on our clock), from the first period on: an OFDM period once
+  the station says a codeword of it decoded, an MFSK period once its
+  header decoded. Before any, a guess from the end of our Go plus the
+  sender's turnaround and lead, ±0.6 s.
+- **Prediction**: the clock ratio from the anchors' least-squares slope
+  (or the bursts' own `clock_ppm` while jitter blurs it), the offset
+  averaged over the last 8, a half-window of 4 × their scatter + 3 × the
+  clock's standard error × the time since the last anchor + 1 ms, between
+  3 ms and 0.6 s (0.25 s until three anchors). The carrier offset is the
+  measured ones smoothed.
+- **Search** (`sync::locate`): the period's head (preamble A, B and the
+  header symbols, as we would send them) and the received audio taken
+  to an 8 kHz baseband at the tracked offset, correlated over the window
+  in 8 segments of 20 ms summed without phase (tolerant of a few Hz and of
+  fading), normalised. Over the mark (1 false alarm in 1000 windows of
+  noise, by window width), a fresh `PhyRx` gets the audio from 0.2 s
+  before the find, cued there (`PhyRx::cue`, trusted); under it, the same
+  receiver runs on its own detection with the period's header expected.
+  The cue lands inside `PhyRx`'s own ±10 ms pull-in (`mf_span`) in the
+  lab's measurements 96–100% of the time at 0 dB, so `mf_span` and the
+  `seg`/`corr` buffers sized from it stay as they are: the search widens
+  around the receiver rather than inside it.
+- **MFSK periods** go to the link's MFSK receiver with the slot
+  (`MfskRx::expect`, the window as tolerance) and the header expected.
+- **Every slot gives the station a period**, heard or not (a period not
+  found by the end of its window is handed over empty), so the receiver's
+  rule sees every one. While a stream runs, a period's header that the
+  link's own receivers catch is dropped as a copy.
+
+The lab found this keeps 99.8–100% of what an ideal receiver decodes
+under clock offsets to 200 ppm, carrier offsets to 20 Hz and start jitter
+to 100 ms. The simulator here (`AudioMedium`) has none of those: the
+production code runs on exact timing in the sessions, and on a continuous
+two-node timeline in `two_nodes_stream_over_continuous_audio`.
+
 ## Results
 
 From `cargo test -p ion --release --test phy -- --ignored --nocapture

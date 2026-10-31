@@ -25,7 +25,8 @@
 //! (`Gear::Ladder`), `ION_MERGE=0` / `ION_STRETCH=0` (without
 //! `Config::merge_pieces` / `harq_stretch`), `ION_CUE=0` (without
 //! `Config::cue`), `ION_CUE_DB=X` (`Config::cue_below_db`; `inf`: every
-//! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_FAIL_HOLD`,
+//! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_STREAM=0` (without
+//! the stream gear), `ION_FAIL_HOLD`,
 //! `ION_FAIL_HOLD_MAX`, `ION_LOSS_HOLD`, `ION_EFF_MARGIN` (those
 //! settings).
 
@@ -90,6 +91,9 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         if std::env::var("ION_PARTIAL").is_ok_and(|v| v == "0") {
             c.harq_partial = false;
         }
+        if std::env::var("ION_STREAM").is_ok_and(|v| v == "0") {
+            c.stream = false;
+        }
         if let Some(v) = env("ION_FAIL_HOLD") {
             c.fail_hold_s = v;
         }
@@ -142,7 +146,7 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         eprintln!("{} {snr_db:+} dB seed {seed}: {}", mode.name(), line.join(", "));
         let rx = sim.stations[1].stats();
         eprintln!(
-            "  bursts {} cued {} frames {} resent {} increments {} ({} bits) | rx codewords failed {} harq recovered {} bytes {}",
+            "  bursts {} cued {} frames {} resent {} increments {} ({} bits) | rx codewords failed {} harq recovered {} bytes {} | stream periods {}",
             st.data_bursts,
             st.cued_bursts,
             st.frames_sent,
@@ -151,7 +155,8 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
             st.increment_bits,
             rx.codewords_failed,
             rx.harq_recovered,
-            rx.bytes_received
+            rx.bytes_received,
+            st.stream_periods
         );
     }
     (sim.stations[1].stats().bytes_received, sim.airtime())

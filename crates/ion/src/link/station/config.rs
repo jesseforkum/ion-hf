@@ -158,6 +158,10 @@ pub struct Config {
     /// first) and name how many in the cue, rather than stretching the
     /// burst (`harq_stretch`, still used for bursts without a cue).
     pub harq_partial: bool,
+    /// Offer (calling) or accept (called) the stream gear
+    /// ([`crate::link::frame::caps::STREAM`]): used only when both ends
+    /// have it on. Off: the station never advertises it.
+    pub stream: bool,
     /// Lab: every data burst at this level, whatever the reports and
     /// losses say.
     #[doc(hidden)]
@@ -237,6 +241,7 @@ impl Config {
             cue: true,
             cue_below_db: CUE_BELOW_DB,
             harq_partial: true,
+            stream: true,
             pin_level: None,
         }
     }

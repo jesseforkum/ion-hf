@@ -13,6 +13,7 @@ Code, in `crates/ion/src/`:
 | `link/station.rs` | `Station`: one end of a link; `link/station/config.rs` (`Config`, the defaults below), `gear.rs` (gear shifting), `sender.rs`, `receiver.rs` |
 | `link/frame.rs` | frames and tiny (header-only) messages |
 | `link/harq.rs` | hybrid ARQ with incremental redundancy |
+| `link/stream.rs`, `link/stream/`, `link/station/stream.rs` | the stream gear: options, outer code, tones, timekeeping, and the protocol |
 | `link/report.rs`, `chan.rs` | the channel report and the channel measurement behind it |
 | `slots.rs` | slice placement: which third of the passband a slice burst goes in |
 | `link/audio.rs` | bursts to audio and back through the PHYs, and every receiver at once |
@@ -93,8 +94,10 @@ link, four bits offered in the ConnReq's flags (bits 4–7) and answered in
 the ConnAck's `extra` (bits 11–14) with those the called station has too.
 The link uses only what both have; a station that knows none (Ion HF
 0.1.0-alpha.4 and before) leaves them clear and ignores them, so it agrees
-to nothing and never sees anything new on the air. One is defined:
-`caps::CUE` (MFSK cue, below).
+to nothing and never sees anything new on the air. Two are defined:
+`caps::CUE` (MFSK cue, below) and `caps::STREAM` (Stream gear, below).
+With `Config::stream` off a station's ConnReq and ConnAck are byte for
+byte those of Ion HF 0.1.0-alpha.5 (`the_conn_req_without_the_stream_is_alpha5s`).
 The call is tried `retries` (6) times. The first data burst then goes at
 the highest level the ConnAck's SNR allows, less `start_margin_db` (3 dB:
 the report was measured on the MFSK call, stronger than OFDM on the air),
@@ -377,6 +380,148 @@ today's full-band data header at +1.4…+1.8 dB on WGN, +4…+4.7 on MPG,
 `tests/cue.rs` checks a cue-less peer gets no cue (as caller and as called
 station) and that two stations with cues use them.
 
+## Stream gear
+
+For a big transfer at low S:N the sending side stops sending bursts
+that each wait for an ACK and streams instead: periods of outer-coded
+pieces back to back, a pause after each in which the receiving side may
+answer with two tones, and silence meaning "go on"
+([experiments/rateless-stream.md](experiments/rateless-stream.md),
+variant A; the build: [experiments/stream-gear.md](experiments/stream-gear.md)).
+
+**When.** Streaming is for large transfers at low S:N; every transfer
+starts on ARQ, and ARQ's own goodput (data bytes acknowledged over the
+seconds spent sending data) is the yardstick. On a link that agreed to
+`caps::STREAM`, once ARQ has sent data for `stream::MEASURE_S` (75 s; a
+short transfer is done by then and never streams), the queue streams
+when all of these hold (calibrated on IONOS SIM,
+[experiments/stream-gear.md](experiments/stream-gear.md), Decision):
+
+- ARQ's goodput is under `stream::REGION_BPS` (1850 B/min): the stream
+  wins where ARQ is slow (0 dB and below) and not above;
+- what is left would take ARQ longer than `stream::BREAK_EVEN_S`
+  (600 s) at that goodput: the gear-on link overtook the gear-off one
+  82–374 s into 0 dB sessions and 191–551 s into −6 dB ones;
+- the SNR the gear aims by is below `stream::BELOW_DB` (2 dB in 2.4 kHz);
+- the peer asks for neither the turn nor a goodbye, and no CW ID is due
+  within two periods.
+
+With frames still in flight, the data bursts send only those until they
+are acknowledged, for at most `stream::DRAIN_S` (40 s; then no stream for
+5 minutes). The same test runs at each block's end: what is left
+under break-even (the tail) finishes on ARQ. From a run's second block on,
+a block slower than ARQ was goes back to ARQ for 5 minutes. The first
+block of a run starts no faster than an option of four times ARQ's
+goodput (`stream::start_cap`).
+
+**A block.** The sender takes the next 1–16 kB of its queue: the first
+block of a run about two minutes at ARQ's goodput (`stream::FIRST_BLOCK_S`;
+the stream should do at least that, so it completes wherever the stream
+settles), later ones about 2.5 minutes of the option's nominal rate after
+a block that needed at most 1.05 times its pieces, one minute otherwise
+(`stream::block_bytes`), and cuts it
+into 28-byte pieces, K of them. Pieces are numbered 0–65535: 0..K are the
+block itself, the rest repairs of a systematic Cauchy code over GF(2^16)
+(`stream::code`), any K distinct pieces giving the block back. The
+receiver delivers each source piece as it arrives (in order, as the link
+delivers anything), and the rest once K are in.
+
+```text
+Start → Go | period 0 | pause | … DONE → Start → Go | period 0 | … DONE → End → Report
+```
+
+- **Start**: stream id, start option, the block's offset (24 bits),
+  length and CRC-32, in a control frame in the link's waveform; **Go**
+  answers with the option (for the first block the more cautious of the
+  sender's pick from its last reports and the receiver's from the Start's
+  SNR; later blocks go on in the option the last ended in) and how far
+  the receiver's stream is delivered. A Go that does not come after the
+  control frame's tries leaves the block to ARQ and holds the stream off 5
+  minutes.
+- **Blocks follow one another**: at DONE, with enough still queued, the
+  sender opens the next block at once (unless the block ended at QPSK 1/4
+  or faster, `stream::HIGH_OPT`: there the link's HARQ does as well or
+  better, so End, and ARQ for 5 minutes); its Go's delivered offset confirms
+  the block before (if it does not, both go back to ARQ), and its flags
+  carry the receiver's turn and goodbye wishes (if set, the new block goes
+  back to the queue and the link hands over).
+- **Periods** start every `SLOT_S` (11.4 s) on the sender's clock from its
+  turnaround after the Go, whatever the option, so a receiver unsure of
+  the option still knows when the next one starts. Each holds at most
+  9.8 s of burst (`BURST_S`) after the PTT lead: an OFDM period whole
+  LDPC codewords of six pieces each (id, option, first index, pieces,
+  CRC-32), an MFSK period GF(32) frames of one piece (index, piece,
+  CRC-16 seeded by the stream id). Fresh pieces in order, sources first.
+- **Options** (`stream::OPTS`), slowest first; SLOWER and FASTER move one:
+
+| Option | Frames | Pieces | Burst | Nominal |
+|---|---:|---:|---:|---:|
+| MFSK R0 1/4 | 1 | 1 | 7.98 s | 147 B/min |
+| MFSK R1 1/4 | 2 | 2 | 7.08 s | 295 B/min |
+| MFSK R1 1/3 | 3 | 3 | 7.90 s | 442 B/min |
+| MFSK R1 1/2 | 5 | 5 | 8.62 s | 737 B/min |
+| MFSK R1 2/3 | 7 | 7 | 8.99 s | 1032 B/min |
+| QPSK 1/8 | 3 | 18 | 9.61 s | 2653 B/min |
+| QPSK 1/6 | 4 | 24 | 9.61 s | 3537 B/min |
+| QPSK 1/4 | 6 | 36 | 9.61 s | 5305 B/min |
+| QPSK 1/3 | 8 | 48 | 9.61 s | 7074 B/min |
+| QPSK 1/2 | 12 | 72 | 9.61 s | 10611 B/min |
+| QPSK 2/3 | 16 | 96 | 9.61 s | 14147 B/min |
+
+  QPSK is full-band normal-guard low-PAPR OFDM as ladder level 10; rates
+  below 1/4 repeat the mother code (chase). Every QPSK option fills the
+  same data symbols, so they share one head. Nominal: every piece
+  through, per slot.
+- **The pause** holds the receiver's turnaround and PTT lead, its two
+  0.2 s tones, and slack for both sound cards' latency (at least 1.4 s
+  of air with a 0.2 s lead). The receiver answers after its turnaround
+  from the end it heard; an answer that would start more than 0.1 s late
+  (decoding held it up) waits for the next pause rather than run into the
+  next period. Tones, detector and timekeeping: [phy.md](phy.md), Stream
+  tones and timekeeping.
+- **The receiver's rule** (`stream::Rule`, the lab's): DONE once it holds
+  K pieces (and decodes and delivers the block; a block whose CRC fails
+  starts again). MFSK: SLOWER under 60% of frames, FASTER after two clean
+  periods (into QPSK only when the last two periods both read 0 dB or
+better), longer after a failed probe. OFDM,
+  over the last two periods: each codeword's blind information predicts
+  how the neighbouring rates would do; it moves to the better by 3%,
+  faster only if 80% would decode; down into MFSK when, over four
+  periods, MFSK would carry more. Two periods in a row with nothing
+  decoded: SLOWER, whatever the prediction (exp-sync's fix). A SLOWER or
+  FASTER may not have been heard: the receiver then tries the next
+  period at both options.
+- **End**: after the last DONE (or when it gives up: four times K pieces
+  sent, or four minutes with no answer and twice K sent) the sender sends End, in
+  an OFDM control frame from QPSK 1/3 up, MFSK below. The receiver's
+  **Report** says whether it has the block, how far its stream is
+  delivered, the SNR it heard the periods at, and (in the frame's flags)
+  whether it wants the turn or a goodbye. Only a Report or the next Go
+  acknowledges a block: a DONE heard where none was sent costs the End and
+  Report, and the block goes on. A block given up goes back to the front of the queue
+  for ARQ.
+- **CW ID.** A block never runs over an ID time: the sender ends it with
+  End/Report when an ID falls due within two slots, both sides' IDs go
+  ahead of their next bursts, and the same block starts again (Start with
+  the same id, offset and CRC: the receiver keeps its pieces). Node never
+  puts an ID ahead of a period or an answer.
+
+**Turns.** A stream is not interrupted: the receiving side cannot ask
+for the turn mid-block, so it waits up to a block (a few minutes); its
+Report carries the wish, and the sender does not open another block
+while the peer wants the turn (`the_receiver_with_data_gets_the_turn_after_the_block`,
+`after_the_turn_the_other_side_streams_too`).
+
+**Progress.** Periods heard count as progress at the receiving side,
+tones heard at the sending side, so a stream does not end the link by
+`link_timeout_s`; a receiving side that hears nothing for that long fails
+the link as in ARQ.
+
+`tests/stream.rs`: the model channel (a 20 kB transfer in blocks, a
+station without the gear, small transfers and high S:N staying on ARQ,
+the ConnReq bytes, turns, CW IDs), IONOS SIM with the real PHYs, and two
+`Node`s on one continuous audio timeline.
+
 ## Expected headers
 
 While a link is up the station lists the OFDM bursts its peer may send
@@ -504,6 +649,7 @@ HF leaves compression off on links; nets compress direct messages
 | `gear` | `Goodput` | `Ladder`: the alpha.4 rule |
 | `harq_stretch`, `merge_pieces` | on, on | |
 | `cue`, `cue_below_db`, `harq_partial` | on, 7 dB, on | MFSK cue |
+| `stream` | on | the stream gear (offered; used when both have it) |
 
 `tests/ionos.rs` switches some of these for comparisons (`ION_SMOOTH=0`,
 `ION_HOLD=0`, `ION_POWER=1`, `ION_START=floor`, `ION_GEAR=ladder`,

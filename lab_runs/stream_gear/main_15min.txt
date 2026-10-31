@@ -1,0 +1,31 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running tests\ionos.rs (target\release\deps\ionos-8d7cbdd3c691c64a.exe)
+
+running 1 test
+test ionos_table has been running for over 60 seconds
+WGN -6 dB seed 0: 12100 B, 807 B/min
+MPG -6 dB seed 0: 5734 B, 382 B/min
+MPP -6 dB seed 0: 7358 B, 491 B/min
+WGN -3 dB seed 0: 11506 B, 767 B/min
+MPG -3 dB seed 0: 7992 B, 533 B/min
+MPP -3 dB seed 0: 9672 B, 645 B/min
+WGN +0 dB seed 0: 23290 B, 1553 B/min
+MPG +0 dB seed 0: 9972 B, 665 B/min
+MPP +0 dB seed 0: 13438 B, 896 B/min
+WGN +3 dB seed 0: 109820 B, 7321 B/min
+MPG +3 dB seed 0: 51094 B, 3406 B/min
+MPP +3 dB seed 0: 60520 B, 4035 B/min
+
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 15 min per run, bytes/min (bit/s):
+| S:N dB | WGN | MPG | MPP |
+|---:|---:|---:|---:|
+| 3 | 7321 (976) | 3406 (454) | 4035 (538) |
+| 0 | 1553 (207) | 665 (89) | 896 (119) |
+| -3 | 767 (102) | 533 (71) | 645 (86) |
+| -6 | 807 (108) | 382 (51) | 491 (65) |
+test ionos_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1543.66s
+

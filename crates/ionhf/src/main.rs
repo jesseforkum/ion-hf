@@ -3,7 +3,7 @@
 //!
 //! Usage: ionhf [--loopback] [--tci ws://host:port] [--connect CALL]
 //! [--setup] [--log] [--shots DIR] [--quit S] [--loop-snr DB]
-//! [--gear goodput|ladder] [--size WxH] [--shot-set NAME --shot-at S]
+//! [--gear goodput|ladder] [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
 //! ionhf --sim ...: headless stations on a simulated band (see `sim`)
 
 // Release builds are GUI-subsystem exes: no console window on launch.
@@ -46,10 +46,14 @@ struct Args {
     /// Save a screenshot to this folder every 15 s; quit after `quit` s.
     shots: Option<String>,
     quit: Option<f64>,
+    /// With `shots`: seconds between screenshots (15).
+    shot_every: Option<f64>,
     /// Loopback only: the simulated channel's SNR, dB.
     loop_snr: Option<f32>,
     /// The link's gear for this run, over the setting.
     gear: Option<config::Gear>,
+    /// The stream gear for this run, over the setting.
+    stream: Option<bool>,
     /// Open on the log.
     log: bool,
     /// Window size in pixels (screenshots); the saved size is left alone.
@@ -68,8 +72,10 @@ fn parse_args() -> Args {
         setup: false,
         shots: None,
         quit: None,
+        shot_every: None,
         loop_snr: None,
         gear: None,
+        stream: None,
         log: false,
         size: None,
         shot_set: None,
@@ -84,10 +90,15 @@ fn parse_args() -> Args {
             "--setup" => args.setup = true,
             "--shots" => args.shots = it.next(),
             "--quit" => args.quit = it.next().and_then(|v| v.parse().ok()),
+            "--shot-every" => args.shot_every = it.next().and_then(|v| v.parse().ok()),
             "--loop-snr" => args.loop_snr = it.next().and_then(|v| v.parse().ok()),
             "--gear" => match it.next().as_deref().and_then(config::Gear::parse) {
                 Some(g) => args.gear = Some(g),
                 None => eprintln!("--gear: goodput or ladder"),
+            },
+            "--stream" => match it.next().as_deref().and_then(config::parse_on_off) {
+                Some(on) => args.stream = Some(on),
+                None => eprintln!("--stream: on or off"),
             },
             "--log" => args.log = true,
             "--size" => {
@@ -252,6 +263,9 @@ fn main() -> eframe::Result {
             if let Some(g) = args.gear {
                 let _ = app.threads.ion.cmds.send(ion_engine::IonCmd::SetGear(g.link()));
             }
+            if let Some(on) = args.stream {
+                let _ = app.threads.ion.cmds.send(ion_engine::IonCmd::SetStream(on));
+            }
             if let Some(call) = &args.connect {
                 app.connect(call);
             }
@@ -261,6 +275,9 @@ fn main() -> eframe::Result {
             app.shot_set = args.shot_set.zip(args.shot_at);
             app.pixel_size = args.size;
             app.quit_after = args.quit;
+            if let Some(e) = args.shot_every {
+                app.shot_every = e.max(0.5);
+            }
             Ok(Box::new(app))
         }),
     )

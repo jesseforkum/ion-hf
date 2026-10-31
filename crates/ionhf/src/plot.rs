@@ -58,18 +58,20 @@ impl Plots {
             iq_axes(&p, inner);
         }
         let dot = (1.2 * s).max(1.1);
+        // Dots stay in the frame: at low S:N they scatter far past it.
+        let dots = p.with_clip_rect(inner);
         for (b, alpha) in same.iter().rev() {
             let c = theme::PEER.gamma_multiply(*alpha);
             match &b.plot {
                 RxPlot::Iq { constellation, symbols } => {
                     let reach = reach(&constellation.unit_points());
                     for z in symbols {
-                        p.circle_filled(iq_pos(inner, reach, z.re, z.im), dot, c);
+                        dots.circle_filled(iq_pos(inner, reach, z.re, z.im), dot, c);
                     }
                 }
                 RxPlot::Tones(pts) => {
                     for [x, y] in pts {
-                        p.circle_filled(tone_pos(inner, *x, *y), dot, c);
+                        dots.circle_filled(tone_pos(inner, *x, *y), dot, c);
                     }
                 }
             }

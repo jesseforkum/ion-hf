@@ -31,6 +31,9 @@ pub enum Kind {
     Data,
     /// Payload: see [`AckInfo`]. (Small bursts are answered by a tiny ACK.)
     Ack,
+    /// The stream gear's handshake and ending (`super::stream::Ctl`); only
+    /// on a link that agreed to [`caps::STREAM`].
+    Stream,
 }
 
 impl Kind {
@@ -39,6 +42,7 @@ impl Kind {
             Kind::ConnReq => 1,
             Kind::Data => 3,
             Kind::Ack => 4,
+            Kind::Stream => 5,
         }
     }
 
@@ -47,6 +51,7 @@ impl Kind {
             1 => Kind::ConnReq,
             3 => Kind::Data,
             4 => Kind::Ack,
+            5 => Kind::Stream,
             _ => return None,
         })
     }
@@ -76,6 +81,9 @@ pub mod caps {
     /// MFSK cues in front of full-band OFDM data bursts, and partial HARQ
     /// increments counted in the cue (`link::audio::transmit`).
     pub const CUE: u8 = 1;
+    /// The stream gear: a big transfer streams outer-coded periods with
+    /// tone answers in the pauses (`docs/link.md`, Stream gear).
+    pub const STREAM: u8 = 2;
     /// Every bit the fields hold.
     pub const MASK: u8 = 0xF;
 }
