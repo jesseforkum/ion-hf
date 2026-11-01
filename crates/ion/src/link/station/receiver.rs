@@ -97,8 +97,7 @@ impl Station {
                     let wiped = self.cfg.harq_drop_wiped
                         && r.parity == 0
                         && r.frames.iter().all(Option::is_none)
-                        && inc.snr_db
-                            < wiped_below_db(LADDER[inc.code].constellation) + self.cfg.harq_wiped_margin_db;
+                        && inc.snr_db < wiped_below_db(LADDER[inc.code].constellation) + self.cfg.harq_wiped_margin_db;
                     self.stats.harq_dropped += wiped as u32;
                     if bad || wiped || !self.cfg.harq {
                         self.harq.clear();
