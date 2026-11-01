@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::audio::{self, PhyAir, Receivers, RxPlot};
 use super::frame::{AckInfo, Frame, Kind, Life, Tiny};
+use super::report::ChanClass;
 use super::station::{Air, CONTROL, Config, Incoming, Station, TINY, user_hi, user_session};
 use super::stream::{self, Ctl, STREAM, TONES};
 use crate::level::{LADDER, Wave};
@@ -44,6 +45,16 @@ pub struct BurstPlot {
 /// reports.
 type Described = (String, Option<(String, String)>, Option<f32>);
 
+/// The channel class an ACK reports, as the log shows it.
+fn class_tags(c: ChanClass) -> &'static str {
+    match (c.echo, c.doppler) {
+        (false, false) => "",
+        (true, false) => " ECHO",
+        (false, true) => " DOPPLER",
+        (true, true) => " ECHO DOPPLER",
+    }
+}
+
 /// What a burst is, from its header and (control bursts) first frame.
 fn describe(wave: Wave, code: usize, user: u16, extra: u16, first: Option<&[u8]>, frames: usize) -> Described {
     let mut reported = None;
@@ -72,19 +83,21 @@ fn describe(wave: Wave, code: usize, user: u16, extra: u16, first: Option<&[u8]>
                 want_turn,
                 want_disc,
                 stored,
+                class,
                 ..
             }) => {
                 reported = Some(snr_db);
                 format!(
-                    "ACK {burst} {bitmap:06b} {snr_db:+.0} dB{}{}{}",
+                    "ACK {burst} {bitmap:06b} {snr_db:+.0} dB{}{}{}{}",
+                    class_tags(class),
                     if stored { " HARQ" } else { "" },
                     if want_turn { " TURN?" } else { "" },
                     if want_disc { " DISC?" } else { "" },
                 )
             }
-            Some(Tiny::ConnAck { snr_db, .. }) => {
+            Some(Tiny::ConnAck { snr_db, class, .. }) => {
                 reported = Some(snr_db);
-                format!("CONACK {snr_db:+.0} dB")
+                format!("CONACK {snr_db:+.0} dB{}", class_tags(class))
             }
             Some(Tiny::Poll) => "POLL".into(),
             Some(Tiny::Turn { .. }) => "TURN".into(),
@@ -130,7 +143,13 @@ fn describe(wave: Wave, code: usize, user: u16, extra: u16, first: Option<&[u8]>
             Some(f) if f.kind == Kind::Ack => match AckInfo::from_bytes(&f.payload) {
                 Some(a) => {
                     reported = Some(a.snr_db);
-                    format!("ACK {} {} ok {:+.0} dB", a.burst, a.bitmap.count_ones(), a.snr_db)
+                    format!(
+                        "ACK {} {} ok {:+.0} dB{}",
+                        a.burst,
+                        a.bitmap.count_ones(),
+                        a.snr_db,
+                        a.report.map_or("", |r| class_tags(r.class))
+                    )
                 }
                 None => "ACK".into(),
             },

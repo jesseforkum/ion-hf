@@ -329,6 +329,9 @@ pub struct Stats {
     /// codewords decoded only thanks to combining.
     pub codewords_failed: u32,
     pub harq_recovered: u32,
+    /// Receiving side: long bursts whose failures were not kept
+    /// (`Config::harq_drop_wiped`).
+    pub harq_dropped: u32,
     /// Codewords the iterative receiver (`Config::turbo`) decoded that a
     /// plain decode had not, and the bursts it ran on.
     pub turbo_recovered: u32,
