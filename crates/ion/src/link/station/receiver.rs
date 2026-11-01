@@ -7,7 +7,7 @@ use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::link::frame::{AckInfo, Frame, Kind, TINY_ACK_FRAMES, Tiny, caps, flags};
 use crate::link::harq;
 use crate::link::report::ChanReport;
-use crate::phy::REFINE_K;
+use crate::phy::{Constellation, REFINE_K};
 use crate::phy_mfsk::MfskMode;
 
 /// For a data burst in `data`, the shorter waveforms its tiny ACK may
@@ -21,6 +21,25 @@ pub fn cheap_ack_waves(data: Wave) -> &'static [(Wave, f32)] {
         Wave::Ofdm(Guard::Slice) => &[(Wave::Ofdm(Guard::Normal), 2.0), (Wave::Ofdm(Guard::Long), 2.0)],
         Wave::Mfsk(MfskMode::R0) => &[(Wave::Mfsk(MfskMode::R1), -8.0)],
         _ => &[],
+    }
+}
+
+/// A long burst that decoded nothing and read below this SNR (dB in 2.4
+/// kHz, as the receiver reads it) left LLRs worth less than a fresh send:
+/// continuing it takes more increment bits than sending it again, since
+/// the increments must rebuild its systematic bits from parity alone.
+/// In bits the two cost the same about 3 dB lower on AWGN and 1 dB lower
+/// on IONOS MPP (`tests/air_lab.rs`, `wipeout_keep_or_fresh`); each round
+/// of increments also costs a turnaround and an ACK, and on a link whose
+/// QAM fails (`drop_wiped_on_a_qam_hostile_link`) these floors deliver
+/// 20 KB 22–28% sooner, while normal IONOS fading never reaches them.
+/// QPSK's header goes before its LLRs do.
+pub(super) fn wiped_below_db(c: Constellation) -> f32 {
+    match c {
+        Constellation::Psk8 => 1.0,
+        Constellation::Qam16 => 3.0,
+        Constellation::Qam64 => 5.0,
+        _ => f32::NEG_INFINITY,
     }
 }
 
@@ -75,7 +94,13 @@ impl Station {
                         .iter()
                         .zip(&combined)
                         .any(|(c, f)| c.is_some() && !f.as_ref().is_some_and(|f| f.kind == Kind::Data));
-                    if bad || !self.cfg.harq {
+                    let wiped = self.cfg.harq_drop_wiped
+                        && r.parity == 0
+                        && r.frames.iter().all(Option::is_none)
+                        && inc.snr_db
+                            < wiped_below_db(LADDER[inc.code].constellation) + self.cfg.harq_wiped_margin_db;
+                    self.stats.harq_dropped += wiped as u32;
+                    if bad || wiped || !self.cfg.harq {
                         self.harq.clear();
                     }
                     &combined[..]

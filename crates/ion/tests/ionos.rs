@@ -25,7 +25,8 @@
 //! (`Gear::Ladder`), `ION_MERGE=0` / `ION_STRETCH=0` (without
 //! `Config::merge_pieces` / `harq_stretch`), `ION_CUE=0` (without
 //! `Config::cue`), `ION_CUE_DB=X` (`Config::cue_below_db`; `inf`: every
-//! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_STREAM=0` (without
+//! full-band burst), `ION_PARTIAL=0` (without `harq_partial`), `ION_DROP_WIPED=0`
+//! (without `harq_drop_wiped`), `ION_WIPED_MARGIN` (`harq_wiped_margin_db`), `ION_STREAM=0` (without
 //! the stream gear), `ION_FAIL_HOLD`,
 //! `ION_FAIL_HOLD_MAX`, `ION_LOSS_HOLD`, `ION_EFF_MARGIN` (those
 //! settings), `ION_LIFELINE=0` (without `Config::lifeline`), `ION_LIFE_ENTER` (`Config::life_enter_s`).
@@ -90,6 +91,12 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
         }
         if std::env::var("ION_PARTIAL").is_ok_and(|v| v == "0") {
             c.harq_partial = false;
+        }
+        if std::env::var("ION_DROP_WIPED").is_ok_and(|v| v == "0") {
+            c.harq_drop_wiped = false;
+        }
+        if let Some(v) = env("ION_WIPED_MARGIN") {
+            c.harq_wiped_margin_db = v;
         }
         if std::env::var("ION_STREAM").is_ok_and(|v| v == "0") {
             c.stream = false;
