@@ -261,7 +261,8 @@ impl App {
             return;
         }
         let port = self.cfg.host_port;
-        match crate::host::spawn(port, self.threads.ion.cmds.clone(), self.threads.ui_tx.clone()) {
+        let lan = self.cfg.host_lan;
+        match crate::host::spawn(port, lan, self.threads.ion.cmds.clone(), self.threads.ui_tx.clone()) {
             Ok(h) => self.host = Some(h),
             Err(e) => self.note(format!("! host port {port}: {e}")),
         }

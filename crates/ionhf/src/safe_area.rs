@@ -4,14 +4,6 @@
 
 use eframe::egui;
 
-#[cfg(target_os = "android")]
-static APP: std::sync::OnceLock<android_activity::AndroidApp> = std::sync::OnceLock::new();
-
-#[cfg(target_os = "android")]
-pub fn set_app(app: android_activity::AndroidApp) {
-    let _ = APP.set(app);
-}
-
 /// Top and bottom insets, points.
 #[cfg(target_os = "android")]
 pub fn insets(ctx: &egui::Context) -> (f32, f32) {
@@ -35,19 +27,9 @@ pub fn insets(ctx: &egui::Context) -> (f32, f32) {
 /// The decor view's system window insets, top and bottom, pixels.
 #[cfg(target_os = "android")]
 fn system_insets_px() -> Option<(i32, i32)> {
-    use jni::errors::Error;
-    use jni::objects::JObject;
-    let app = APP.get()?;
-    // SAFETY: the process's VM and the app's activity, both alive while
-    // the app runs.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread_permanently().ok()?;
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    // In a local frame: this thread stays attached, so references made here
-    // would otherwise pile up until the table overflows.
-    let got = env.with_local_frame(8, |env| -> Result<(i32, i32), Error> {
+    crate::android::with_activity(|env, activity| {
         let window = env
-            .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
             .l()?;
         let decor = env
             .call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?
@@ -56,19 +38,14 @@ fn system_insets_px() -> Option<(i32, i32)> {
             .call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?
             .l()?;
         if insets.is_null() {
-            return Err(Error::NullPtr("root window insets"));
+            return Err(jni::errors::Error::NullPtr("root window insets"));
         }
         let top = env.call_method(&insets, "getSystemWindowInsetTop", "()I", &[])?.i()?;
         let bottom = env
             .call_method(&insets, "getSystemWindowInsetBottom", "()I", &[])?
             .i()?;
         Ok((top, bottom))
-    });
-    if got.is_err() {
-        // A Java exception left pending would abort the next JNI call.
-        let _ = env.exception_clear();
-    }
-    got.ok()
+    })
 }
 
 #[cfg(not(target_os = "android"))]

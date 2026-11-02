@@ -1,7 +1,8 @@
 //! Winlink host interface: Ion looks like a VARA HF modem on TCP, so Pat
 //! or Winlink Express can drive it. Command port (default 8300) and data
-//! port (one above), on 127.0.0.1 only, per "VARA Protocol Native TNC
-//! Commands" (2022).
+//! port (one above), on 127.0.0.1, per "VARA Protocol Native TNC Commands"
+//! (2022); on every interface when the user asks (`host_lan`), for a host
+//! program on another machine.
 //!
 //! Settings that mean nothing to Ion (`BW…`, `COMPRESSION …`, `CWID …`,
 //! ...) are answered `OK`. `BUFFER n` counts bytes not yet acknowledged by
@@ -163,8 +164,8 @@ impl Drop for HostHandle {
 /// Longest wait between tries at a busy host port.
 const BIND_RETRY_MAX: Duration = Duration::from_secs(2);
 
-fn listen(port: u16) -> std::io::Result<TcpListener> {
-    let l = TcpListener::bind(("127.0.0.1", port))?;
+fn listen(addr: &str, port: u16) -> std::io::Result<TcpListener> {
+    let l = TcpListener::bind((addr, port))?;
     l.set_nonblocking(true)?;
     Ok(l)
 }
@@ -184,7 +185,8 @@ fn wait(stop: &AtomicBool, d: Duration) -> bool {
 /// Opens the two ports and serves one host at a time. Ports another
 /// program holds (an Ion still closing, say) are tried again until they
 /// are free or the handle is dropped.
-pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Result<HostHandle> {
+pub fn spawn(port: u16, lan: bool, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Result<HostHandle> {
+    let addr = if lan { "0.0.0.0" } else { "127.0.0.1" };
     let stop = Arc::new(AtomicBool::new(false));
     let listening = Arc::new(AtomicBool::new(false));
     let (stop2, listening2) = (stop.clone(), listening.clone());
@@ -192,7 +194,7 @@ pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Re
         let mut retry = Duration::from_millis(250);
         let mut warned = false;
         let (cmd, data) = loop {
-            match listen(port).and_then(|c| Ok((c, listen(port + 1)?))) {
+            match listen(addr, port).and_then(|c| Ok((c, listen(addr, port + 1)?))) {
                 Ok(pair) => break pair,
                 Err(e) => {
                     if !warned {
@@ -207,20 +209,20 @@ pub fn spawn(port: u16, ion: Sender<IonCmd>, ui: Sender<UiEvent>) -> std::io::Re
             }
         };
         let kiss_port = port.checked_sub(200);
-        let mut kiss = kiss_port.and_then(|p| listen(p).ok());
+        let mut kiss = kiss_port.and_then(|p| listen(addr, p).ok());
         if kiss.is_none() {
             log::info!("Winlink host: no KISS port {}", port.saturating_sub(200));
         }
         let (tx, rx) = crossbeam_channel::unbounded();
         let _ = ion.send(IonCmd::AttachHost(Some(tx)));
         listening2.store(true, Ordering::Relaxed);
-        let _ = ui.try_send(UiEvent::Host(format!("Host 127.0.0.1:{port} / {}", port + 1)));
+        let _ = ui.try_send(UiEvent::Host(format!("Host {addr}:{port} / {}", port + 1)));
         let mut h = Host::new(ion.clone(), ui);
         let mut kiss_tried = Instant::now();
         while !stop2.load(Ordering::Relaxed) {
             if kiss.is_none() && kiss_port.is_some() && kiss_tried.elapsed() >= BIND_RETRY_MAX {
                 kiss_tried = Instant::now();
-                kiss = kiss_port.and_then(|p| listen(p).ok());
+                kiss = kiss_port.and_then(|p| listen(addr, p).ok());
             }
             h.service(&cmd, &data, kiss.as_ref(), &rx);
             std::thread::sleep(Duration::from_millis(20));
@@ -672,7 +674,7 @@ mod tests {
             let blocker = TcpListener::bind(("127.0.0.1", held)).unwrap();
             let (ion, ion_rx) = crossbeam_channel::unbounded();
             let (ui, ui_rx) = crossbeam_channel::unbounded();
-            let host = spawn(port, ion, ui).unwrap();
+            let host = spawn(port, false, ion, ui).unwrap();
             std::thread::sleep(Duration::from_millis(800));
             assert!(!host.listening(), "listening beside port {held}'s holder");
             let other = if held == port { port + 1 } else { port };
@@ -706,7 +708,7 @@ mod tests {
         let _blocker = TcpListener::bind(("127.0.0.1", port)).unwrap();
         let (ion, _ion_rx) = crossbeam_channel::unbounded();
         let (ui, _ui_rx) = crossbeam_channel::unbounded();
-        let host = spawn(port, ion, ui).unwrap();
+        let host = spawn(port, false, ion, ui).unwrap();
         std::thread::sleep(Duration::from_millis(3_000));
         let t = Instant::now();
         drop(host);
@@ -721,7 +723,7 @@ mod tests {
         let port = free_port();
         let (ion, _ion_rx) = crossbeam_channel::unbounded();
         let (ui, ui_rx) = crossbeam_channel::unbounded();
-        let host = spawn(port, ion.clone(), ui.clone()).unwrap();
+        let host = spawn(port, false, ion.clone(), ui.clone()).unwrap();
         let end = Instant::now() + Duration::from_secs(5);
         while !host.listening() {
             assert!(Instant::now() < end);
@@ -737,7 +739,7 @@ mod tests {
             while matches!(s.read(&mut b), Ok(n) if n > 0) {}
         }
         drop((cmd, data));
-        let host = spawn(port, ion, ui).unwrap();
+        let host = spawn(port, false, ion, ui).unwrap();
         let end = Instant::now() + Duration::from_millis(500);
         while !host.listening() {
             assert!(Instant::now() < end, "port {port} not reopened");

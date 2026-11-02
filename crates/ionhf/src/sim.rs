@@ -168,7 +168,7 @@ pub fn run(args: &[String]) {
             .spawn(move || engine.run())
             .expect("spawn dsp thread");
         let _ = msg_tx.send(Msg::Ion(Some(ion.audio.clone())));
-        let host = match crate::host::spawn(port, ion.cmds.clone(), ui_tx.clone()) {
+        let host = match crate::host::spawn(port, false, ion.cmds.clone(), ui_tx.clone()) {
             Ok(h) => h,
             Err(e) => {
                 log::error!("sim: station {i} port {port}: {e}");

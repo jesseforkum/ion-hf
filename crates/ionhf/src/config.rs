@@ -39,6 +39,9 @@ pub struct Config {
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
+    /// Host ports on every network, not only this computer: host programs
+    /// on another machine (Pat on a laptop for a phone at the radio).
+    pub host_lan: bool,
     pub tci_url: String,
     pub tci_sample_rate: u32,
     pub loopback_snr_db: f32,
@@ -62,6 +65,7 @@ impl Default for Config {
             stream: true,
             host_enabled: false,
             host_port: 8300,
+            host_lan: false,
             tci_url: "ws://127.0.0.1:50001".into(),
             tci_sample_rate: 48_000,
             loopback_snr_db: 10.0,
@@ -204,15 +208,18 @@ pub enum Backend {
     Icom,
     Cat,
     None,
+    /// No radio: a simulated peer (LOOP) on a simulated band.
+    Loopback,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 5] = [
+    pub const ALL: [Backend; 6] = [
         Backend::Tci,
         Backend::Icom,
         Backend::Cat,
         Backend::Rigctld,
         Backend::None,
+        Backend::Loopback,
     ];
 
     pub fn short(self) -> &'static str {
@@ -222,6 +229,7 @@ impl Backend {
             Backend::Icom => "CI-V",
             Backend::Cat => "CAT",
             Backend::None => "Sound card",
+            Backend::Loopback => "Loopback",
         }
     }
 }

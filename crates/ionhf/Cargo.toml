@@ -16,14 +16,14 @@ log = "0.4.34"
 rtrb = "0.4.0"
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
-# No libudev: only opening ports by name is needed.
-serialport = { version = "4", default-features = false }
 tci = { path = "../tci" }
 toml = "1.1.8"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "glow", "default_fonts", "clipboard", "persistence", "wayland", "x11"] }
 env_logger = "0.11.11"
+# No libudev: only opening ports by name is needed.
+serialport = { version = "4", default-features = false }
 
 # accesskit needs GameActivity on Android; NativeActivity needs no Java.
 [target.'cfg(target_os = "android")'.dependencies]

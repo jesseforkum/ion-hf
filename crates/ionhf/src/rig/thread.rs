@@ -58,6 +58,7 @@ pub fn open_rig(cfg: &RadioSettings) -> RigResult<Box<dyn Rig>> {
         }
         Backend::None => Box::new(NoRig),
         Backend::Tci => return Err(RigError::Link("TCI is not a rig-control backend".into())),
+        Backend::Loopback => return Err(RigError::Link("loopback has no radio".into())),
     })
 }
 
@@ -68,7 +69,11 @@ fn line_opener(cfg: &RadioSettings) -> Option<LineOpener> {
         PttMethod::Dtr => Line::Dtr,
         _ => return None,
     };
-    let name = cfg.ptt_port.trim().to_string();
+    let mut name = cfg.ptt_port.trim().to_string();
+    // A phone has one USB port: the interface's serial bridge on it.
+    if cfg!(target_os = "android") && name.is_empty() && cfg.backend == Backend::None {
+        name = "usb".into();
+    }
     if cfg.backend == Backend::None && name.is_empty() {
         return Some(Box::new(|| {
             Err(RigError::Link("choose the PTT COM port in Setup".into()))

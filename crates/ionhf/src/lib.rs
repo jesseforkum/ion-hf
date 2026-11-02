@@ -6,6 +6,8 @@
 //! [--gear goodput|ladder] [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
 //! ionhf --sim ...: headless stations on a simulated band (see `sim`)
 
+#[cfg(target_os = "android")]
+mod android;
 mod app;
 mod config;
 mod engine;
@@ -167,7 +169,7 @@ pub fn main() -> eframe::Result {
     launch(cfg, args, options)
 }
 
-/// The app on Android: on the simulated band until radio support lands.
+/// The app on Android: on the simulated band until the user picks a radio.
 #[cfg(target_os = "android")]
 pub fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
@@ -175,17 +177,18 @@ pub fn android_main(app: android_activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("ionhf"),
     );
-    safe_area::set_app(app.clone());
+    android::set_app(app.clone());
     if let Some(dir) = app.internal_data_path() {
         config::set_dir(dir);
     }
     log::info!("ion {} starting", env!("CARGO_PKG_VERSION"));
-    let cfg = Config::load();
+    let first_run = !Config::path().exists();
+    let mut cfg = Config::load();
+    if first_run {
+        cfg.radio.backend = Backend::Loopback;
+    }
     let _ = std::fs::create_dir_all(Config::dir());
-    let args = Args {
-        loopback: true,
-        ..Args::default()
-    };
+    let args = Args::default();
     let options = eframe::NativeOptions {
         android_app: Some(app),
         persistence_path: Some(Config::dir().join("window.ron")),
@@ -201,6 +204,7 @@ fn launch(cfg: Config, args: Args, options: eframe::NativeOptions) -> eframe::Re
         "Ion HF",
         options,
         Box::new(move |cc| {
+            let loopback = args.loopback || cfg.radio.backend == Backend::Loopback;
             theme::apply(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let repaint = move || ctx.request_repaint();
@@ -213,7 +217,7 @@ fn launch(cfg: Config, args: Args, options: eframe::NativeOptions) -> eframe::Re
             let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
             let (spec_tx, spec_rx) = crossbeam_channel::bounded(32);
 
-            let radio = if args.loopback {
+            let radio = if loopback {
                 radio::spawn_loopback(
                     s.loopback_snr_db,
                     rx_prod,
@@ -267,7 +271,7 @@ fn launch(cfg: Config, args: Args, options: eframe::NativeOptions) -> eframe::Re
 
             let mut app = app::App::new(
                 cfg,
-                args.loopback,
+                loopback,
                 msg_tx,
                 ui_rx,
                 spec_tx,

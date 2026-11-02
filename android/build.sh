@@ -30,6 +30,7 @@ for abi in ${ABIS:-arm64-v8a}; do
     cp "$target/$triple/release/libionhf_android.so" "$out/lib/$abi/"
 done
 
+cp -r "$here/res/." "$out/res/"
 cp "$root/crates/ionhf/assets/icon.png" "$out/res/mipmap-xxxhdpi/ic_launcher.png"
 "$bt/aapt2" compile --dir "$out/res" -o "$out/res.zip"
 "$bt/aapt2" link -o "$out/base.apk" -I "$jar" --manifest "$here/AndroidManifest.xml" "$out/res.zip"

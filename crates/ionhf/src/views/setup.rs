@@ -104,7 +104,7 @@ fn station(app: &mut App, ui: &mut egui::Ui) {
 fn radio(app: &mut App, ui: &mut egui::Ui) {
     let before = app.cfg.radio.clone();
     let before_url = app.cfg.tci_url.clone();
-    let lists = if app.cfg.radio.backend != Backend::Tci {
+    let lists = if !matches!(app.cfg.radio.backend, Backend::Tci | Backend::Loopback) {
         app.audio_devices().cloned().unwrap_or_default()
     } else {
         Default::default()
@@ -170,16 +170,16 @@ fn radio(app: &mut App, ui: &mut egui::Ui) {
                 ui.add(
                     egui::TextEdit::singleline(&mut r.port)
                         .font(egui::TextStyle::Monospace)
-                        .hint_text("COM3"),
+                        .hint_text(if cfg!(target_os = "android") { "usb" } else { "COM3" }),
                 );
                 ui.end_row();
                 ui.label(RichText::new("Baud").color(theme::MUTED));
                 ui.add(egui::DragValue::new(&mut r.baud).range(1200..=115_200));
                 ui.end_row();
             }
-            Backend::None => {}
+            Backend::None | Backend::Loopback => {}
         }
-        if r.backend != Backend::Tci {
+        if !matches!(r.backend, Backend::Tci | Backend::Loopback) {
             let (ins, outs) = &lists;
             ui.label(RichText::new("In").color(theme::MUTED));
             device(ui, "audio_in", &mut r.audio_in, ins);
@@ -215,7 +215,14 @@ fn radio(app: &mut App, ui: &mut egui::Ui) {
         ui.label(RichText::new(format!("! {p}")).color(theme::WARN));
     }
     if app.restart {
-        ui.label(RichText::new("Restart to apply").color(theme::WARN));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Restart to apply").color(theme::WARN));
+            #[cfg(target_os = "android")]
+            if ui.button("Restart").clicked() {
+                app.cfg.save();
+                crate::android::restart();
+            }
+        });
     }
 }
 
@@ -284,9 +291,10 @@ fn levels(app: &mut App, ui: &mut egui::Ui) {
 fn keying(app: &mut App, ui: &mut egui::Ui) {
     let r = &mut app.cfg.radio;
     let before = r.clone();
+    let radio = !matches!(r.backend, Backend::Tci | Backend::Loopback);
     row(ui, "keying", |ui| {
         ui.label(RichText::new("PTT").color(theme::MUTED));
-        ui.add_enabled_ui(r.backend != Backend::Tci, |ui| {
+        ui.add_enabled_ui(radio, |ui| {
             egui::ComboBox::from_id_salt("ptt")
                 .selected_text(r.ptt.name())
                 .show_ui(ui, |ui| {
@@ -296,6 +304,21 @@ fn keying(app: &mut App, ui: &mut egui::Ui) {
                 });
         });
         ui.end_row();
+        if radio && matches!(r.ptt, PttMethod::Rts | PttMethod::Dtr) {
+            // Empty: the line on the CAT port (on a phone, the USB port).
+            let hint = match (cfg!(target_os = "android"), r.backend) {
+                (true, _) => "usb",
+                (false, Backend::None) => "COM4",
+                (false, _) => "CAT port",
+            };
+            ui.label(RichText::new("Port").color(theme::MUTED));
+            ui.add(
+                egui::TextEdit::singleline(&mut r.ptt_port)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text(hint),
+            );
+            ui.end_row();
+        }
         // Only Kenwood CAT and Hamlib tell the radio which input to key.
         let picks_input = r.ptt == PttMethod::Cat
             && (r.backend == Backend::Rigctld
@@ -314,7 +337,7 @@ fn keying(app: &mut App, ui: &mut egui::Ui) {
         ui.end_row();
         ui.label(RichText::new("Lead").color(theme::MUTED));
         ui.add_enabled(
-            r.backend != Backend::Tci,
+            radio,
             egui::DragValue::new(&mut r.ptt_lead_ms).range(0..=500).suffix(" ms"),
         );
         ui.end_row();
@@ -350,6 +373,17 @@ fn host(app: &mut App, ui: &mut egui::Ui) {
         ui.end_row();
         ui.label(RichText::new("Data").color(theme::MUTED));
         ui.label(RichText::new((port + 1).to_string()).monospace());
+        ui.end_row();
+        if let Some(kiss) = port.checked_sub(200) {
+            ui.label(RichText::new("KISS").color(theme::MUTED));
+            ui.label(RichText::new(kiss.to_string()).monospace());
+            ui.end_row();
+        }
+        ui.label(RichText::new("LAN").color(theme::MUTED));
+        let lan = ui.add_enabled(!app.host_on(), egui::Checkbox::new(&mut app.cfg.host_lan, "On"));
+        if lan.changed() {
+            app.mark_dirty();
+        }
         ui.end_row();
     });
 }

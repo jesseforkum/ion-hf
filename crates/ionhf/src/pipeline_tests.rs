@@ -119,7 +119,7 @@ impl Drop for Rig {
 fn host_on(rig: &Rig, h: &IonHandle) -> (crate::host::HostHandle, u16) {
     for _ in 0..10 {
         let port = crate::host::free_port();
-        let host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).unwrap();
+        let host = crate::host::spawn(port, false, h.cmds.clone(), rig.ui_tx.clone()).unwrap();
         let end = Instant::now() + Duration::from_secs(2);
         while !host.listening() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(10));

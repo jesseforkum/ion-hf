@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Silicon Labs CP210x serial bridges (vendor 0x10C4): the Digirig's. -->
+<resources>
+    <usb-device vendor-id="4292" />
+</resources>
