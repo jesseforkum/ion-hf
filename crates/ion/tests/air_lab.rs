@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ion::fec::{self, Rate};
 use ion::level::{LADDER, Wave};
 use ion::link::audio;
-use ion::phy::{self, Constellation, Numerology, Pilots, PhyRx};
+use ion::phy::{self, Constellation, Numerology, PhyRx, Pilots};
 use ion_dsp::ionos::{Ionos, Mode, Reference, reference_power};
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
@@ -145,12 +145,20 @@ fn tx_impair(x: &[f32], how: &str) -> Vec<f32> {
             a.iter()
                 .map(|v| {
                     let e = v.norm();
-                    det = if e > det { att * det + (1.0 - att) * e } else { rel * det + (1.0 - rel) * e };
+                    det = if e > det {
+                        att * det + (1.0 - att) * e
+                    } else {
+                        rel * det + (1.0 - rel) * e
+                    };
                     let g = if det > sat { sat / det } else { 1.0 };
                     // The PA still caps what the ALC is too slow for.
                     let y = *v * g;
                     let ey = y.norm();
-                    if ey > sat * db(1.0) { y.re * sat * db(1.0) / ey } else { y.re }
+                    if ey > sat * db(1.0) {
+                        y.re * sat * db(1.0) / ey
+                    } else {
+                        y.re
+                    }
                 })
                 .collect()
         }
@@ -170,7 +178,11 @@ fn compress(x: &[f32], arg: &str) -> Vec<f32> {
     a.iter()
         .map(|z| {
             let e = z.norm();
-            det = if e > det { att * det + (1.0 - att) * e } else { rel * det + (1.0 - rel) * e };
+            det = if e > det {
+                att * det + (1.0 - att) * e
+            } else {
+                rel * det + (1.0 - rel) * e
+            };
             z.re * if det > thr { thr / det } else { 1.0 }
         })
         .collect()
@@ -189,8 +201,7 @@ fn rx_impair(x: &mut [f32], how: &str) {
             let i = t.floor() as isize;
             let f = (t - i as f64) as f32;
             let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
-            *v = p1
-                + 0.5 * f * (p2 - p0 + f * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + f * (3.0 * (p1 - p2) + p3 - p0)));
+            *v = p1 + 0.5 * f * (p2 - p0 + f * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + f * (3.0 * (p1 - p2) + p3 - p0)));
         }
         return;
     }
@@ -204,7 +215,11 @@ fn rx_impair(x: &mut [f32], how: &str) {
         let mut det = 1e-6f32;
         for (v, z) in x.iter_mut().zip(&a) {
             let e = z.norm();
-            det = if e > det { att * det + (1.0 - att) * e } else { rel * det + (1.0 - rel) * e };
+            det = if e > det {
+                att * det + (1.0 - att) * e
+            } else {
+                rel * det + (1.0 - rel) * e
+            };
             *v = z.re / det.max(1e-6);
         }
         return;
@@ -253,7 +268,9 @@ type Received = (Option<(f32, Vec<f32>)>, Vec<Vec<u8>>);
 
 fn received(l: usize, mode: Mode, snr: f32, seed: u64, secs: f64, how: &str) -> Received {
     let lv = LADDER[l];
-    let Wave::Ofdm(g) = lv.wave else { panic!("level {l} is not OFDM") };
+    let Wave::Ofdm(g) = lv.wave else {
+        panic!("level {l} is not OFDM")
+    };
     let num = audio::numerology(g);
     let (c, r, pilots) = (lv.constellation, lv.rate, lv.pilots);
     let center = num.center_hz();
@@ -266,8 +283,8 @@ fn received(l: usize, mode: Mode, snr: f32, seed: u64, secs: f64, how: &str) -> 
     // the sender, the receiver or both (process-wide: ION_THREADS=1).
     phy::set_td_clip(matches!(how, "tdtx" | "tdboth"));
     let mut tx = phy::modulate_full(num, c, user, 0, &coded, center, &audio::tx_options(l));
-    let gain = (audio::ofdm_gain(audio::OFDM_AIR_GAIN_DB) * db(audio::level_trim_db(l)))
-        .min(db(audio::OFDM_AIR_GAIN_MAX_DB));
+    let gain =
+        (audio::ofdm_gain(audio::OFDM_AIR_GAIN_DB) * db(audio::level_trim_db(l))).min(db(audio::OFDM_AIR_GAIN_MAX_DB));
     for x in &mut tx {
         *x = (*x * gain).clamp(-1.0, 1.0);
     }
@@ -329,8 +346,13 @@ fn nonlinear_air() {
     let jobs: Vec<(usize, usize, u64)> = (0..impair.len())
         .flat_map(|i| levels.iter().flat_map(move |&l| (0..bursts).map(move |b| (i, l, b))))
         .collect();
-    let res = parallel(&jobs, |&(i, l, b)| run(l, mode, snr, 7 + b + 1000 * l as u64, secs, &impair[i]));
-    println!("\n### {} at {snr} dB, {bursts} bursts of {secs} s: SNR read (median) / codeword loss", mode.name());
+    let res = parallel(&jobs, |&(i, l, b)| {
+        run(l, mode, snr, 7 + b + 1000 * l as u64, secs, &impair[i])
+    });
+    println!(
+        "\n### {} at {snr} dB, {bursts} bursts of {secs} s: SNR read (median) / codeword loss",
+        mode.name()
+    );
     println!(
         "| impairment | {} |",
         levels.iter().map(|l| format!("L{l}")).collect::<Vec<_>>().join(" | ")
@@ -339,7 +361,12 @@ fn nonlinear_air() {
     for (i, how) in impair.iter().enumerate() {
         let mut row = format!("| {how} |");
         for &l in &levels {
-            let rs: Vec<&Out> = jobs.iter().zip(&res).filter(|(j, _)| j.0 == i && j.1 == l).map(|(_, r)| r).collect();
+            let rs: Vec<&Out> = jobs
+                .iter()
+                .zip(&res)
+                .filter(|(j, _)| j.0 == i && j.1 == l)
+                .map(|(_, r)| r)
+                .collect();
             let mut s: Vec<f32> = rs.iter().filter(|r| r.found).map(|r| r.snr).collect();
             s.sort_by(f32::total_cmp);
             let med = s.get(s.len() / 2).map_or("–".to_string(), |v| format!("{v:+.0}"));
@@ -380,14 +407,16 @@ fn increments_after_a_wipeout() {
             .collect()
     };
     println!("\n### increments after a wipeout, clean bits at {es_n0} dB Es/N0 per bit");
-    println!("| first | to | wiped LLRs | bursts to decode (20 codewords) | increment bits / a fresh codeword's | fresh at `to` |");
+    println!(
+        "| first | to | wiped LLRs | bursts to decode (20 codewords) | increment bits / a fresh codeword's | fresh at `to` |"
+    );
     println!("|---|---|---|---|---|");
     for (from, to) in [(16usize, 9usize), (15, 10), (13, 10), (14, 11)] {
         for junk in [0.01f32, 1.0, 4.0] {
             let mut tries = Vec::new();
             let mut fresh_ok = 0;
             for seed in 0..20u64 {
-                let mut s = 0x9E37_79B9 ^ (seed + 1) * 0x1000_0001;
+                let mut s = 0x9E37_79B9 ^ ((seed + 1) * 0x1000_0001);
                 let info = random_bits(fec::K, 77 + seed);
                 let slot = LADDER[from].coded_bits();
                 let first: Vec<f32> = (0..slot).map(|_| junk * gauss(&mut s).signum()).collect();
@@ -432,7 +461,10 @@ fn increments_after_a_wipeout() {
 #[ignore]
 fn wipeout_keep_or_fresh() {
     use ion::link::harq::{self, HarqRx, Soft};
-    let froms: Vec<usize> = list("AIR_FROM", "13,14,15,16").iter().map(|s| s.parse().unwrap()).collect();
+    let froms: Vec<usize> = list("AIR_FROM", "13,14,15,16")
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
     let mode_name = std::env::var("AIR_MODE").unwrap_or_else(|_| "WGN".into());
     let mode = *Mode::ALL
         .iter()
@@ -452,11 +484,15 @@ fn wipeout_keep_or_fresh() {
     let res = parallel(&jobs, |&(from, snr, b)| {
         let seed = 31 + b + 1000 * from as u64;
         let (got, infos) = received(from, mode, snr as f32, seed, 4.0, "none");
-        let Some((read, llrs)) = got else { return None };
+        let (read, llrs) = got?;
         let mut rx = HarqRx::new();
         let r = rx.receive(from, 0, &Soft::Llrs(llrs));
-        let mut pending: Vec<&Vec<u8>> =
-            infos.iter().zip(&r.frames).filter(|(_, f)| f.is_none()).map(|(i, _)| i).collect();
+        let mut pending: Vec<&Vec<u8>> = infos
+            .iter()
+            .zip(&r.frames)
+            .filter(|(_, f)| f.is_none())
+            .map(|(i, _)| i)
+            .collect();
         let failed = pending.len();
         let (mut bits, mut rounds) = (0usize, 0usize);
         let mut s = seed | 1;
@@ -486,12 +522,20 @@ fn wipeout_keep_or_fresh() {
                 }
             }
             let r = rx.receive(to, harq::check_bits(pending.len()), &Soft::Llrs(llrs));
-            pending = pending.into_iter().zip(&r.frames).filter(|(_, f)| f.is_none()).map(|(i, _)| i).collect();
+            pending = pending
+                .into_iter()
+                .zip(&r.frames)
+                .filter(|(_, f)| f.is_none())
+                .map(|(i, _)| i)
+                .collect();
             rounds += 1;
         }
         Some((read, failed, infos.len(), bits, rounds))
     });
-    println!("\n### keep or fresh after a failed burst, {}, increments at L{to}", mode.name());
+    println!(
+        "\n### keep or fresh after a failed burst, {}, increments at L{to}",
+        mode.name()
+    );
     println!("| from | true S:N | read | failed | increment bits / fresh | rounds |");
     println!("|---|---|---|---|---|---|");
     let mut keys: Vec<(usize, i32)> = jobs.iter().map(|j| (j.0, j.1)).collect();
@@ -516,7 +560,11 @@ fn wipeout_keep_or_fresh() {
         println!(
             "| L{from} | {snr} | {:+.1} | {failed}/{all} | {} | {rounds} |",
             reads[reads.len() / 2],
-            if failed > 0 { format!("{:.2}", bits as f64 / (failed * slot_to) as f64) } else { "–".into() }
+            if failed > 0 {
+                format!("{:.2}", bits as f64 / (failed * slot_to) as f64)
+            } else {
+                "–".into()
+            }
         );
     }
 }
@@ -530,15 +578,12 @@ struct QamHostile {
 }
 
 impl ion::link::sim::Medium for QamHostile {
-    fn carry(
-        &mut self,
-        from: usize,
-        b: &ion::link::Outgoing,
-        start: f64,
-        end: f64,
-    ) -> Option<ion::link::Incoming> {
+    fn carry(&mut self, from: usize, b: &ion::link::Outgoing, start: f64, end: f64) -> Option<ion::link::Incoming> {
         let qam = b.code < LADDER.len()
-            && matches!(LADDER[b.code].constellation, Constellation::Qam16 | Constellation::Qam64);
+            && matches!(
+                LADDER[b.code].constellation,
+                Constellation::Qam16 | Constellation::Qam64
+            );
         let keep = self.inner.dir_db[from];
         if qam {
             self.inner.dir_db[from] -= self.qam_db;
@@ -564,9 +609,9 @@ impl ion::link::sim::Medium for QamHostile {
 #[test]
 #[ignore]
 fn drop_wiped_on_a_qam_hostile_link() {
-    use std::sync::Arc;
     use ion::link::sim::Sim;
     use ion::link::{Air, Station};
+    use std::sync::Arc;
     let n: usize = env("AIR_BYTES").unwrap_or(20_000);
     let snr: f32 = env("AIR_SNR").unwrap_or(25.0);
     let qam_db: f32 = env("AIR_QAM_DB").unwrap_or(22.0);
@@ -614,10 +659,18 @@ fn drop_wiped_on_a_qam_hostile_link() {
     println!("| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |");
     println!("|---|---|---|---|---|---|---|");
     for ((d, s), r) in jobs.iter().zip(&res) {
-        println!("| {d:?} | {s} | {} | {:.0} | {} | {} | {}/{} |", r.0, r.1, r.2, r.3, r.4, r.5);
+        println!(
+            "| {d:?} | {s} | {} | {:.0} | {} | {} | {}/{} |",
+            r.0, r.1, r.2, r.3, r.4, r.5
+        );
     }
     for d in &arms {
-        let t: Vec<f64> = jobs.iter().zip(&res).filter(|(j, _)| j.0 == *d).map(|(_, r)| r.1).collect();
+        let t: Vec<f64> = jobs
+            .iter()
+            .zip(&res)
+            .filter(|(j, _)| j.0 == *d)
+            .map(|(_, r)| r.1)
+            .collect();
         let geo = (t.iter().map(|x| x.ln()).sum::<f64>() / t.len() as f64).exp();
         println!("drop wiped {d:?}: geometric mean {geo:.0} s");
     }
