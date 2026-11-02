@@ -246,10 +246,35 @@ impl Logbook {
         }
     }
 
+    fn search_box(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search")
+                .desired_width(150.0),
+        );
+        if !self.search.is_empty() && ui.small_button("×").clicked() {
+            self.search.clear();
+        }
+    }
+
+    /// Folder, Save and Copy, right to left; whether Copy was clicked.
+    /// Android has no file manager to open a folder in.
+    fn file_buttons(&mut self, ui: &mut egui::Ui) -> bool {
+        if !cfg!(target_os = "android") && ui.button("Folder").clicked() {
+            self.open_folder();
+        }
+        if ui.button("Save").clicked() {
+            self.save();
+        }
+        ui.button("Copy").clicked()
+    }
+
     /// Toolbar, then the lines: they follow the newest until scrolled
     /// back; LIVE returns to it.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let mut copy = false;
+        // A phone: search and the file buttons on a row of their own.
+        let narrow = ui.available_width() < 520.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.label(RichText::new("LOG").monospace().strong().color(theme::MUTED));
@@ -259,23 +284,14 @@ impl Logbook {
                     self.filter = f;
                 }
             }
-            ui.add_space(8.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search")
-                    .desired_width(150.0),
-            );
-            if !self.search.is_empty() && ui.small_button("×").clicked() {
-                self.search.clear();
+            if !narrow {
+                ui.add_space(8.0);
+                self.search_box(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Folder").clicked() {
-                    self.open_folder();
+                if !narrow {
+                    copy = self.file_buttons(ui);
                 }
-                if ui.button("Save").clicked() {
-                    self.save();
-                }
-                copy = ui.button("Copy").clicked();
                 let live = self.live && !self.jump_live;
                 let text =
                     RichText::new("LIVE")
@@ -291,6 +307,15 @@ impl Logbook {
                 }
             });
         });
+        if narrow {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                self.search_box(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    copy = self.file_buttons(ui);
+                });
+            });
+        }
         if copy {
             ui.ctx().copy_text(self.text());
         }

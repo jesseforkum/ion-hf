@@ -19,7 +19,9 @@ use crate::radio::{LoopCmd, RadioInfo, RadioThread};
 use crate::waterfall::{Band, Cursor, Waterfall};
 use crate::{theme, views};
 
+#[cfg(not(target_os = "android"))]
 pub const SIZE: [f32; 2] = [1100.0, 640.0];
+#[cfg(not(target_os = "android"))]
 pub const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 /// How long an activity lamp stays lit after what lit it, seconds.
 const FLASH_S: f64 = 3.0;
@@ -449,20 +451,18 @@ impl App {
     // -- drawing -----------------------------------------------------------
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        // A phone: no call (Setup has it), the link's buttons on a second row.
+        let narrow = ui.available_width() < 520.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.label(RichText::new("ION HF").strong().size(15.0).color(theme::TEXT));
-            ui.label(RichText::new(&self.cfg.call).monospace().color(theme::MUTED));
+            if !narrow {
+                ui.label(RichText::new(&self.cfg.call).monospace().color(theme::MUTED));
+            }
             let (color, text, detail) = self.state_pill();
             theme::pill(ui, color, &text, &detail);
-            if self.linked() {
-                // Abort (Esc) drops the link without transmitting.
-                if ui.button("Disconnect").clicked() {
-                    self.cmd(IonCmd::Disconnect);
-                }
-                if ui.button(RichText::new("Abort").color(theme::BAD)).clicked() {
-                    self.abort();
-                }
+            if self.linked() && !narrow {
+                self.link_buttons(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -476,6 +476,19 @@ impl App {
                 }
             });
         });
+        if self.linked() && narrow {
+            ui.horizontal(|ui| self.link_buttons(ui));
+        }
+    }
+
+    fn link_buttons(&mut self, ui: &mut egui::Ui) {
+        // Abort (Esc) drops the link without transmitting.
+        if ui.button("Disconnect").clicked() {
+            self.cmd(IonCmd::Disconnect);
+        }
+        if ui.button(RichText::new("Abort").color(theme::BAD)).clicked() {
+            self.abort();
+        }
     }
 
     /// Colour, word and detail for the state pill.
@@ -636,13 +649,21 @@ impl eframe::App for App {
             self.abort();
         }
         self.scripted(&ctx);
+        let (top, bottom) = crate::safe_area::insets(&ctx);
         egui::Panel::top("header")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .inner_margin(Margin::symmetric(12, 8)),
-            )
+            .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin {
+                left: 12,
+                right: 12,
+                top: (8.0 + top).round().min(127.0) as i8,
+                bottom: 8,
+            }))
             .show(ui, |ui| self.header(ui));
+        if bottom > 0.0 {
+            egui::Panel::bottom("system bar")
+                .exact_size(bottom)
+                .frame(egui::Frame::new().fill(theme::BG))
+                .show(ui, |_| {});
+        }
         // Decode plots only while the modem screen shows.
         if self.plot_on == self.setup {
             self.plot_on = !self.setup;

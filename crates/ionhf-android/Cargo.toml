@@ -1,0 +1,13 @@
+[package]
+name = "ionhf-android"
+version = "0.1.0-alpha.6"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = "0.6"
+ionhf = { path = "../ionhf" }

@@ -129,7 +129,13 @@ fn counts(app: &App, ui: &mut egui::Ui, width: f32) {
         ("Air", theme::clock(s.airtime_s)),
     ]
     .map(|(k, v)| (k, RichText::new(v).monospace()));
-    pairs(ui, &counts, width);
+    if width < 560.0 {
+        // Four to a line, so no value wraps away from its caption.
+        pairs(ui, &counts[..4], width);
+        pairs(ui, &counts[4..], width);
+    } else {
+        pairs(ui, &counts, width);
+    }
     // Broadcast groups a host program has open, and who is heard in them.
     if !s.groups.is_empty() {
         let heard = if s.heard.is_empty() {
@@ -153,6 +159,12 @@ fn counts(app: &App, ui: &mut egui::Ui, width: f32) {
 }
 
 fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
+    readout(app, ui, width, s);
+    ui.add_space(4.0 * s);
+    level_stats(app, ui, width, s);
+}
+
+fn readout(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
     let st = app.link.as_ref().filter(|_| app.linked());
     let (level, sending) = on_air(app);
     let readout = Readout {
@@ -164,8 +176,11 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
         hold: st.is_some_and(|s| s.holding),
     };
     panel::readout(ui, &readout, width, s);
-    ui.add_space(4.0 * s);
+}
 
+/// S/N, rate and data; the stream; the send progress.
+fn level_stats(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
+    let st = app.link.as_ref().filter(|_| app.linked());
     let big = |v: String| RichText::new(v).monospace().size(15.0 * s).strong();
     let link = app.link.as_ref();
     let rate = link.filter(|s| s.connected_s > 5.0).map_or("—".into(), |s| {
@@ -218,7 +233,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let spare = w - side - lamps_w - 2.0 * GAP;
         let level_w = spare.min(640.0 * s);
         let top = Layout::top_down(egui::Align::Min);
-        if level_w >= 300.0 {
+        let phone = w < 560.0;
+        if phone {
+            // The lamps across; the level and the band's thirds beside the
+            // plot; the numbers below.
+            lamps(app, ui, w, s);
+            ui.add_space(8.0);
+            let side = (w * 0.34).min(160.0);
+            let left = w - side - GAP;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                ui.allocate_ui_with_layout(vec2(left, side), top, |ui| {
+                    readout(app, ui, left, s);
+                    if let Some(b) = app.link.as_ref().map(|s| s.band) {
+                        theme::band_meter(ui, b, app.band_use());
+                    }
+                });
+                app.plots.show(ui, side, s);
+            });
+            ui.add_space(6.0);
+            level_stats(app, ui, w, s);
+            counts(app, ui, w);
+        } else if level_w >= 300.0 {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
                 ui.allocate_ui_with_layout(vec2(lamps_w, side), top, |ui| {
@@ -255,7 +291,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.logbook.show(ui);
             });
         } else {
-            let band = app.link.as_ref().map(|s| s.band);
+            let band = app.link.as_ref().map(|s| s.band).filter(|_| !phone);
             if let Some(b) = band {
                 theme::band_meter(ui, b, app.band_use());
             }

@@ -76,11 +76,18 @@ fn paint(p: &egui::Painter, r: Rect, lamp: &Lamp, s: f32, hovered: bool) {
     };
     let edge = if hovered { theme::TEXT } else { edge };
     p.rect(r, round, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
+    // Smaller type where the legend is wider than its lamp.
+    let size = 12.0 * s;
+    let wide = p
+        .layout_no_wrap(lamp.legend.into(), FontId::monospace(size), ink)
+        .size()
+        .x;
+    let size = size * ((r.width() - 4.0) / wide).min(1.0);
     p.text(
         r.center(),
         Align2::CENTER_CENTER,
         lamp.legend,
-        FontId::monospace(12.0 * s),
+        FontId::monospace(size),
         ink,
     );
 }

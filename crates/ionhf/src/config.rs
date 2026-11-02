@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 
 const FILE: &str = "ionhf.toml";
 
+static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The settings folder the platform hands the app (Android's files dir).
+#[cfg(target_os = "android")]
+pub fn set_dir(dir: PathBuf) {
+    let _ = DIR.set(dir);
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -66,6 +74,9 @@ impl Config {
     /// The program's own folder when an `ionhf.toml` is already there
     /// (portable), else the platform's place for application settings.
     pub fn dir() -> PathBuf {
+        if let Some(d) = DIR.get() {
+            return d.clone();
+        }
         if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from))
             && d.join(FILE).is_file()
         {
@@ -134,6 +145,7 @@ pub enum Gear {
 }
 
 impl Gear {
+    #[cfg(not(target_os = "android"))]
     pub fn parse(s: &str) -> Option<Gear> {
         match s.to_ascii_lowercase().as_str() {
             "goodput" => Some(Gear::Goodput),
@@ -174,6 +186,7 @@ impl Clipper {
 }
 
 /// `--stream on|off`.
+#[cfg(not(target_os = "android"))]
 pub fn parse_on_off(s: &str) -> Option<bool> {
     match s.to_ascii_lowercase().as_str() {
         "on" | "true" | "1" => Some(true),
