@@ -10,7 +10,7 @@ top. It drives the radio over TCI
 
 ```text
 ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
-      [--setup] [--log] [--shots DIR] [--quit S] [--gear goodput|ladder]
+      [--setup] [--log] [--net PAGE] [--shots DIR] [--quit S] [--gear goodput|ladder]
       [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
       [--shot-every S]
 ```
@@ -20,7 +20,9 @@ ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
   setting).
 - `--tci`: use TCI at this address instead of the configured radio.
 - `--connect`: call a station at start.
-- `--setup`: start on Setup; `--log`: on the Log.
+- `--setup`: start on Setup; `--log`: on the Log; `--net PAGE`: on that
+  page of the Net (`profile`, `roster`, `traffic`, `checkin`, `inbox`,
+  `log`, the newest net shown).
 - `--shots DIR`, `--quit S`: save the window to `DIR` every 15 s and close
   after `S` seconds (screenshots, scripted checks).
 - `--gear`: the link's choice of level for this run, over the `gear`
@@ -77,12 +79,28 @@ across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;
 the oldest goes). **Save** writes the lines the Log shows (its filter and
 search) to `logs/saved-<UTC time>.txt`; **Folder** opens `logs/`.
 
+**Net log.** Each net run or joined from the Net screen is one file,
+`nets/<UTC opening>-<net>.toml` (`20261103-010000Z-TNARES.toml`),
+rewritten through a temporary file as the net goes, so a crash keeps it:
+the net, net control, frequency, operator, open and close times (UTC),
+check-ins (call, slot, line, traffic, route, time), each item of traffic
+(from, to, precedence, time, subject, text, and Queued, Delivered,
+Received or Handled), bulletins and missed polls. Files received go in a
+folder of the same name beside it. **Export** (Net, Log) writes
+`<name>.txt` (a report), `<name>.csv` (one row per check-in, item,
+bulletin and missed poll: `time_utc,event,from,to,precedence,state,route,traffic,text`)
+and `<name>-ics309.txt` (the ICS 309 Communications Log: incident name,
+operational period, radio operator, then time, from, to and subject for
+the opening, each check-in, item and bulletin, and the close; prepared by
+and when) beside it. A member's copy takes net control's summary when it
+arrives at the close.
+
 ## Window
 
 | Screen | What it shows |
 |---|---|
 | Modem | The lamp panel and the link's counts (Bursts, Frames, Resent, HARQ increments / recoveries, Lost codewords, Polls, Ctrl bursts, Air time), the open broadcast groups and who is heard in them; the level readout with S/N, Rate, Data and the send progress; the decode plot; the band meter (how clean each third of the passband is here); the waterfall; the Log. **Disconnect** and **Abort** sit beside the state while linked. |
-| Net | Run a net (**Open**, with **Check-ins** on or off, **Close**) or join one (**Join**, the first heard when the name is empty; **Leave**), with **Relay** and **Attended** announced at check-in. The roster (net control: slot, call, S/N up and down, route, level, missed polls; a member: the stations announced), the traffic and bulletins as they come, and a box to send: net control to all, or **To** one member; a member to net control. The Log below. A link and a net exclude each other; Abort (Esc) drops the net without transmitting. |
+| Net | Pages: **Profile** (net control's profile, kept between nets: frequency, backup, start, end, next net, mode, purpose, alternate, regulars, and the Markdown body beside a live preview of the announcement), **Roster** (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the announcement; **To** one member), **Traffic** (the traffic stations list, by precedence; what came in, by precedence, with **Handled**, **Pass** for traffic meant for the net, **Folder** for files), **Check-in** (the call from Setup, the line, traffic None, Message or File, precedence, **To** NCS or the net via NCS, **Short**; **Queue** before joining, **Send** once in; the outbox), **Inbox** (files received, the stations, the announcement), **Log** (past nets, **Export**, **Folder**). On the left **Open** (with **Check-ins** on or off, **Close**: the summary first, then the close, **Now** to stop waiting) or **Join** (the first net heard when the name is empty; **Leave**), with **Relay** and **Attended** announced at check-in. On the right the messages and bulletins as they come and a box to send: net control to all, or **To** one member; a member to net control. The Log below. A link and a net exclude each other; Abort (Esc) drops the net without transmitting. |
 | Log | The Log in place of the passband, the panel still above. |
 | Setup | Station (call, grid), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
 

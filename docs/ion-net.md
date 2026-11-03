@@ -169,6 +169,61 @@ Labels follow the one-word rule.
   - exported as text, CSV and ICS-309 (time, from, to, subject);
   - the summary offered to all stations at close.
 
+### As built (wave 2)
+
+In `crates/ionhf`: `net_doc.rs` (records), `markdown.rs`, `net_log.rs`,
+`net_app.rs` (the section's state, apart from drawing) and
+`views/net.rs`; `docs/app.md` has the screen and the log.
+
+- **Records.** What the Net section sends is `[0xFF 'I'][type][body]`;
+  anything else shows as text (0xFF never occurs in UTF-8).
+  - 1 message: `[flags]` then `compress::pack(text)`; flags: bits 0–1
+    precedence, bit 2 for the net (net control passes it on).
+  - 2 file: `[flags][name length][name]` then `compress::pack(bytes)`.
+  - 3 announcement: `[fields u16]`, the fields present in bit order, then
+    `compress::pack(body)`. Bits: 0 net name, 1 net control, 2 alternate
+    (packed calls, 5 bytes; bits 11–13 mark one sent as `[length][text]`
+    because it does not pack), 3 frequency and 4 backup (Hz, u32), 5 start,
+    6 end and 7 next net (UTC minutes since 1970, u32), 8 mode and
+    9 purpose (a byte each), 10 the body.
+  - 4 summary: `compress::pack` of the net, net control, open and close
+    (UTC seconds, u32), frequency, then check-ins (call, seconds from the
+    opening as u16, traffic byte, route, line), traffic (from, to, time,
+    precedence, kind and state in a byte, subject of at most 60 bytes),
+    bulletins (time, subject) and missed polls (call, count).
+- **Sizes.** A realistic announcement (net, net control, alternate, two
+  frequencies, three times, mode, purpose, a 474-byte body with a list
+  and a table): **220 bytes**, of which 42 are the fields and 178 the
+  packed body. The same as plain Markdown is 714 bytes, 286 packed. A
+  summary of two check-ins, one item, one bulletin and a missed poll is
+  118 bytes.
+- **Net control.** Open sends `NetRegulars`, `NetStart` and the
+  announcement as `NetOffer`. An edit to the profile is offered again
+  when the field is left (or a choice made), the old one withdrawn
+  (`NetWithdraw`), so members never fetch stale versions. Close stops
+  check-ins, withdraws the announcement, offers the summary and closes
+  once every roster entry's `holds` has it, after 180 s, or at once with
+  no members (**Now** closes at once).
+- **Member.** The form's traffic is queued until `NetEvent::Joined` and
+  sent then; the listing (`NetTraffic`) is what is not yet delivered (an
+  item counts as delivered once the outbox has drained after it was
+  seen pending). A file is at most 32 kB, read from a path: `rfd` has no
+  Linux backend without zbus or GTK, so no file dialog. The size shows
+  with the uplink time at the floor (one frame a burst).
+- **Addressee.** A member's traffic always goes to net control on the
+  air; "Net (via NCS)" sets the record's flag and net control's
+  **Pass** sends it on as a bulletin. A station as addressee is not
+  offered.
+- **Markdown.** `pulldown-cmark` without default features (no HTML
+  writer); tables and strikethrough on. Links show their text and then
+  the address in grey, images their alt text, HTML as written. Drawn
+  with labels only: a test finds no link widget in a rendered page.
+- **Host programs** see the records as bytes: a member on the host
+  interface alone gets net control's bulletins as records, not text.
+- `ion::link::compress` wrapped one multiply in release builds and
+  panicked in debug ones; it now wraps in both (`wrapping_mul`), so the
+  CM1 format is unchanged.
+
 ## Not in this build-out
 
 - **Diffs and templates by hash:** the object store is built so these can

@@ -27,6 +27,20 @@ pub enum Page {
     Log,
 }
 
+impl Page {
+    pub fn parse(s: &str) -> Option<Page> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "profile" => Page::Profile,
+            "roster" => Page::Roster,
+            "traffic" => Page::Traffic,
+            "checkin" | "check-in" => Page::CheckIn,
+            "inbox" => Page::Inbox,
+            "log" => Page::Log,
+            _ => return None,
+        })
+    }
+}
+
 /// What a member's form sends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Draft {

@@ -2,7 +2,7 @@
 //! Express) on VARA-style host ports and KISS.
 //!
 //! Usage: ionhf [--loopback] [--tci ws://host:port] [--connect CALL]
-//! [--setup] [--log] [--shots DIR] [--quit S] [--loop-snr DB]
+//! [--setup] [--log] [--net PAGE] [--shots DIR] [--quit S] [--loop-snr DB]
 //! [--gear goodput|ladder] [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
 //! ionhf --sim ...: headless stations on a simulated band (see `sim`)
 
@@ -60,6 +60,9 @@ struct Args {
     stream: Option<bool>,
     /// Open on the log.
     log: bool,
+    /// Open on this page of the Net (profile, roster, traffic, checkin,
+    /// inbox, log).
+    net: Option<String>,
     /// Window size in pixels (screenshots); the saved size is left alone.
     size: Option<[f32; 2]>,
     /// With `shots`: one set of screenshots `shot_at` seconds in, at
@@ -81,6 +84,7 @@ fn parse_args() -> Args {
         gear: None,
         stream: None,
         log: false,
+        net: None,
         size: None,
         shot_set: None,
         shot_at: None,
@@ -105,6 +109,7 @@ fn parse_args() -> Args {
                 None => eprintln!("--stream: on or off"),
             },
             "--log" => args.log = true,
+            "--net" => args.net = it.next(),
             "--size" => {
                 args.size = it.next().and_then(|v| {
                     let (w, h) = v.split_once('x')?;
@@ -275,6 +280,17 @@ fn main() -> eframe::Result {
             }
             app.setup |= args.setup;
             app.log_view |= args.log;
+            if let Some(page) = args.net.as_deref() {
+                match net_app::Page::parse(page) {
+                    Some(p) => {
+                        app.net_view = true;
+                        app.nets.page = p;
+                        app.nets.refresh_past();
+                        app.nets.shown = (!app.nets.past.is_empty()).then_some(0);
+                    }
+                    None => eprintln!("--net: profile, roster, traffic, checkin, inbox or log"),
+                }
+            }
             app.shots = args.shots.as_ref().map(std::path::PathBuf::from);
             app.shot_set = args.shot_set.zip(args.shot_at);
             app.pixel_size = args.size;

@@ -594,3 +594,179 @@ fn a_net_runs_over_the_host_interface() {
     let ok = net_until(&mut cs, 60, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
     assert!(ok, "{}", report(&cs));
 }
+
+/// The Net section's records over the simulated band, driven through the
+/// host interface: N0NCS opens TNARES and offers its announcement, AG5B
+/// checks in with a line and a Priority message, net control logs both,
+/// offers the summary, and closes once AG5B has it; AG5B merges it into
+/// its own log. About 3 minutes of two stations decoding:
+/// `cargo test -p ionhf -- --ignored a_net_logs_and_sends_its_summary`.
+#[test]
+#[ignore]
+fn a_net_logs_and_sends_its_summary() {
+    use crate::net_doc::{self, Announcement, Record};
+    use crate::net_log::{Item, NetLog, NetRecord, Role, tests::TempDir};
+    use ion::link::net::{ObjectId, Precedence};
+
+    let calls = ["N0NCS", "AG5B"];
+    let ports: Vec<u16> = calls.iter().map(|_| crate::host::free_port()).collect();
+    let o = crate::sim::Opts {
+        stations: calls.len(),
+        mode: ion_dsp::ionos::Mode::Wgn,
+        snr_db: vec![20.0],
+        calls: calls.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    let band = crate::sim::Band::start(&o, &ports).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !band.listening() {
+        assert!(Instant::now() < end, "host ports never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let dir = TempDir::new("net-e2e");
+    let now = crate::net_log::now;
+    let mut ncs_log = NetLog::create(
+        &dir.0.join("N0NCS"),
+        NetRecord {
+            net: "TNARES".into(),
+            ncs: "N0NCS".into(),
+            operator: "N0NCS".into(),
+            opened: now(),
+            ..NetRecord::default()
+        },
+    );
+    let mut cs: Vec<NetClient> = ports.iter().map(|&p| NetClient::connect(p)).collect();
+    for (c, call) in cs.iter_mut().zip(calls) {
+        c.send(&format!("MYCALL {call}"));
+    }
+    cs[1].send("NET LINE Trousdale County ARES");
+    cs[1].send("NET TRAFFIC 1 P");
+    cs[1].send("NET JOIN TNARES");
+    cs[0].send("NET OPEN TNARES");
+    cs[0].send("NET OFFER");
+    let ok = net_until(&mut cs, 10, |cs| {
+        cs.iter().all(|c| c.said("NET PORT 1")) && cs[0].said.iter().filter(|l| *l == "OK").count() >= 2
+    });
+    assert!(ok, "{:?}", cs.iter().map(|c| &c.said).collect::<Vec<_>>());
+    let ann = Announcement {
+        net: "TNARES".into(),
+        ncs: "N0NCS".into(),
+        freq_hz: Some(3_975_000),
+        body: "# Tonight\n\n1. Check-ins\n2. Traffic, **Priority** first\n".into(),
+        ..Announcement::default()
+    };
+    let ann_bytes = Record::Announcement(ann.clone()).encode();
+    let ann_id = ObjectId::of(&ann_bytes);
+    cs[0].frame("", &ann_bytes);
+    let msg = Record::Message(net_doc::Message {
+        precedence: Precedence::Priority,
+        to: net_doc::To::Ncs,
+        text: "AG5B: shelter open, 40 cots".into(),
+    });
+    cs[1].frame("", &msg.encode());
+
+    // Net control's side of the log, from what its host interface says.
+    let mut seen = (0, 0);
+    let mut log_from_host = |c: &NetClient, log: &mut NetLog| {
+        for l in &c.said[seen.0..] {
+            let w: Vec<&str> = l.split(' ').collect();
+            match w[..] {
+                ["NET", "IN", call, slot, ref via @ ..] => {
+                    let via = via.get(1).copied();
+                    log.checked_in(call, slot.parse().unwrap_or(0), via, now());
+                }
+                ["NET", "LINE", call, ..] => {
+                    let line = l.splitn(4, ' ').nth(3).unwrap_or("");
+                    log.line(call, line, now());
+                }
+                ["NET", "TRAFFIC", call, n, p, ..] => {
+                    let t = ion::link::net::Traffic {
+                        items: n.parse().unwrap_or(0),
+                        precedence: crate::ion_engine::precedence_of(p).unwrap_or_default(),
+                        short: w.len() > 5,
+                    };
+                    log.traffic_listed(call, t, now());
+                }
+                _ => {}
+            }
+        }
+        for (to, from, data) in &c.frames[seen.1..] {
+            if let Record::Message(m) = Record::decode(data) {
+                log.item(Item {
+                    at: now(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    precedence: m.precedence,
+                    subject: net_doc::subject(&m.text),
+                    text: m.text,
+                    state: net_doc::State::Received,
+                    ..Item::default()
+                });
+            }
+        }
+        seen = (c.said.len(), c.frames.len());
+    };
+    let report = |cs: &[NetClient]| {
+        cs.iter()
+            .map(|c| format!("said {:?}\nframes {:?}", c.said, c.frames))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 600, |cs| {
+        cs[0].said_like("NET IN AG5B ")
+            && cs[0].said("NET LINE AG5B Trousdale County ARES")
+            && cs[0].said("NET TRAFFIC AG5B 1 P")
+            && cs[0].frames.iter().any(|f| f.1 == "AG5B")
+            && cs[1].got(&format!("#{ann_id}"), "N0NCS", &ann_bytes)
+    });
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    log_from_host(&cs[0], &mut ncs_log);
+    let r = &NetLog::load(&ncs_log.path).unwrap().rec;
+    assert_eq!(r.checkins[0].call, "AG5B");
+    assert_eq!(r.checkins[0].line, "Trousdale County ARES");
+    assert_eq!(r.traffic[0].precedence, Precedence::Priority);
+    assert_eq!(r.traffic[0].from, "AG5B");
+    let got = cs[1].frames.iter().find(|f| f.0 == format!("#{ann_id}")).unwrap();
+    assert_eq!(Record::decode(&got.2), Record::Announcement(ann));
+    println!("announcement, check-in and Priority message in {:?}", t.elapsed());
+
+    // The close: the summary to all, then NET CLOSE once the member has it.
+    let summary = ncs_log.summary(now());
+    let sum_bytes = Record::Summary(summary.clone()).encode();
+    let sum_id = ObjectId::of(&sum_bytes);
+    println!("summary {} B", sum_bytes.len());
+    cs[0].send("NET OFFER");
+    cs[0].frame("", &sum_bytes);
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 300, |cs| cs[1].got(&format!("#{sum_id}"), "N0NCS", &sum_bytes));
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    println!("summary held in {:?}", t.elapsed());
+    cs[0].send("NET CLOSE");
+    let ok = net_until(&mut cs, 60, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
+    assert!(ok, "{}", report(&cs));
+    ncs_log.close(now());
+
+    let mut member = NetLog::create(
+        &dir.0.join("AG5B"),
+        NetRecord {
+            net: "TNARES".into(),
+            operator: "AG5B".into(),
+            role: Role::Member,
+            opened: now(),
+            ..NetRecord::default()
+        },
+    );
+    let Record::Summary(s) = Record::decode(&sum_bytes) else {
+        panic!("not a summary")
+    };
+    assert_eq!(s, summary);
+    member.merge(&s);
+    let m = &NetLog::load(&member.path).unwrap().rec;
+    assert!(m.summary);
+    assert_eq!(m.ncs, "N0NCS");
+    assert_eq!(m.checkins[0].line, "Trousdale County ARES");
+    assert_eq!(m.traffic[0].precedence, Precedence::Priority);
+    assert_eq!(m.traffic[0].subject, "AG5B: shelter open, 40 cots");
+}
