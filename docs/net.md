@@ -71,7 +71,7 @@ it hears.
 | header-only, kind 3 **Ack** | NCS | ACK bitmap, end of the member's turn |
 | header-only, kind 4 **Idle** | member | "nothing to send", and how well it hears NCS (or its relay) |
 | header-only, kind 5 **Relay poll** | NCS | a poll that also names the station whose traffic this member should forward: relayer slot, source slot, cap |
-| header-only, kind 6 **Close** | NCS | the net is closed (sent 3×) |
+| header-only, kind 6 **Close** | NCS (or relay) | the net is closed (sent 3×): how many more follow from the sender, and a bit set by a relay |
 | header-only, kind 7 **SubPoll** | relay | polls one of its leaves: slot, cap, burst id |
 | header-only, kind 8 **SubAck** | relay | ACK bitmap for its leaf's burst |
 | control 1 **Beacon** | NCS | NCS call, net name, open flag, window slots, window timing, chorus slots; roster |
@@ -357,7 +357,25 @@ the block back, so one repair fills a *different* hole at every station
    - **After a miss:** NCS waits out a whole burst before polling again. A
      member NCS cannot hear may still be transmitting, and stations that
      can hear it would get a collision.
-6. **Close.** NCS sends Close three times, spaced a burst apart.
+6. **Close.**
+   - **After the turn:** NCS does not close on top of an answer, which
+     would leave the member deaf to every Close while it sends. The turn
+     under way ends first: the answer that comes gets an Ack (never a
+     PollAck), or its deadline passes, and a check-in window runs out.
+     Only then does NCS report the net closed.
+   - **Three Closes,** spaced a burst apart, so one burst NCS did not hear
+     coming cannot hide them all. Each says how many more follow.
+   - **A member** leaves at the first Close it hears, whatever it was
+     doing: a relay drops its leaves' turn, and nothing it had queued goes.
+   - **Relays pass it on:** a relay with leaves sends its own Close to
+     them, one for each of NCS's still to come, each in the gap after
+     NCS's (relays one after another in slot order). A relay's Close is
+     marked, so another relay does not take its timing as NCS's.
+   - **Lost net control:** a member that hears nothing of NCS (a leaf:
+     of its relay) for `lost_after_s` (default 750 s, 2.5 beacon
+     intervals) leaves the net too, as `NetEvent::Lost`. Polls, ACKs and
+     beacons to anyone count, so idle rounds keep it in. A lost relay
+     does not tell its leaves: NCS may still be there for them.
 
 ## Primed reception: NCS knows what is coming
 
@@ -684,4 +702,10 @@ The pieces are shaped for them:
 - **Offer indices are reused** after a withdrawal: pieces of the old
   object that reach a member which has not heard the new list fail the id
   check and are fetched again.
+- **Relays' Closes fit NCS's gaps** only for a few relays: each takes a
+  header-only burst and a turnaround (about 2.1 s at R0) out of the 6.2 s
+  between NCS's Closes, so a fourth relay runs into NCS's next Close.
+- **A member still mid-turn when NCS gives up on it** (an answer NCS did
+  not hear) can miss the Closes as before; it leaves `lost_after_s`
+  later.
 - **Not tried on the air,** like the rest of Ion.

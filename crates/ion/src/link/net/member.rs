@@ -49,7 +49,7 @@ pub(super) struct Applicant {
 impl NetStation {
     pub(super) fn member_next(&mut self, now: f64) -> Option<Outgoing> {
         if self.closed {
-            return None;
+            return self.relay_close(now);
         }
         if self.turn.is_some() {
             return self.turn_step(now);
@@ -116,11 +116,9 @@ impl NetStation {
             match kind {
                 // A leaf hears its relay, not NCS.
                 K_POLL | K_POLLACK | K_ACK | K_RELAY | K_CLOSE if self.parent.is_none() => {
-                    self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db))
+                    self.heard_ncs(inc.snr_db, now)
                 }
-                K_SUBPOLL | K_SUBACK if Some(slot) == self.my_slot => {
-                    self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db))
-                }
+                K_SUBPOLL | K_SUBACK if Some(slot) == self.my_slot => self.heard_ncs(inc.snr_db, now),
                 K_SUBPOLL | K_SUBACK => {
                     if let Some(&r) = self.parents.get(&slot) {
                         self.note_heard(r, inc.snr_db, now);
@@ -210,10 +208,7 @@ impl NetStation {
                     }
                     self.overheard_ack(slot, bitmap);
                 }
-                K_CLOSE if !self.closed => {
-                    self.closed = true;
-                    self.events.push(NetEvent::Closed);
-                }
+                K_CLOSE => self.heard_close(e, now),
                 _ => {}
             }
             return;
@@ -235,7 +230,7 @@ impl NetStation {
                 .any(|f| f.flags >> 6 == T_DOWN || ctrl_is(f, &[C_CHILD, C_OFFER]));
         let asking = frames.iter().flatten().any(|f| ctrl_is(f, &[C_CHECKIN, C_SEEK]));
         if from_ncs && self.parent.is_none() || from_relay && self.parent.is_some() {
-            self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db));
+            self.heard_ncs(inc.snr_db, now);
         } else if !from_ncs
             && !asking
             && let Some(t) = self.talker
@@ -392,6 +387,7 @@ impl NetStation {
                     if call == self.cfg.call && self.my_slot != Some(slot) {
                         self.my_slot = Some(slot);
                         self.checkin_at = None;
+                        self.ncs_heard_at = now;
                         let ncs = self.ncs_call.clone().unwrap_or_default();
                         let net = self.net_name.clone();
                         self.events.push(NetEvent::Joined { ncs, net, slot });
@@ -464,6 +460,7 @@ impl NetStation {
                     // We are in, through this relay.
                     self.my_slot = Some(c);
                     self.checkin_at = None;
+                    self.ncs_heard_at = now;
                     self.id = user_session(inc.user);
                     let ncs = unpack_call(&p[13..18]);
                     self.ncs_call = Some(ncs.clone());
@@ -499,6 +496,68 @@ impl NetStation {
             }
             _ => {}
         }
+    }
+
+    /// We heard NCS (a leaf: its relay).
+    fn heard_ncs(&mut self, snr: f32, now: f64) {
+        self.snr_ncs = Some(smooth(self.snr_ncs, snr));
+        self.ncs_heard_at = now;
+    }
+
+    /// The net is over for us.
+    fn leave(&mut self, e: NetEvent) {
+        self.closed = true;
+        self.reply = None;
+        self.turn = None;
+        self.checkin_at = None;
+        self.chorus_at = None;
+        self.events.push(e);
+    }
+
+    /// Nothing from NCS (or our relay) for too long.
+    pub(super) fn check_lost(&mut self, now: f64) {
+        if !self.closed
+            && self.my_slot.is_some()
+            && self.cfg.lost_after_s > 0.0
+            && now - self.ncs_heard_at > self.cfg.lost_after_s
+        {
+            self.leave(NetEvent::Lost);
+        }
+    }
+
+    /// A Close (`extra`: see [`CLOSE_RELAYED`]). A relay passes it on to
+    /// its leaves, once for each of NCS's: in the gap after it, which NCS
+    /// leaves for answers on their way, relays in slot order.
+    fn heard_close(&mut self, extra: u16, now: f64) {
+        let first = !self.closed;
+        if first {
+            self.leave(NetEvent::Closed);
+        }
+        if self.kids.is_empty() || !first && extra & CLOSE_RELAYED != 0 {
+            return;
+        }
+        let me = self.my_slot.unwrap_or(ALL);
+        let before = self
+            .parents
+            .values()
+            .filter(|&&r| r < me)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let b = self.tiny(K_CLOSE, 0, LADDER[self.cfg.beacon_level].wave);
+        let each = self.air.duration(b.wave, b.code, b.coded_bits()) + self.cfg.turnaround_s;
+        self.close_left = (extra & 3) as u32 + 1;
+        self.close_at = now + self.cfg.turnaround_s + before as f64 * each;
+    }
+
+    /// A relay's Close to its leaves.
+    fn relay_close(&mut self, now: f64) -> Option<Outgoing> {
+        if self.close_left == 0 || now < self.close_at {
+            return None;
+        }
+        self.close_left -= 1;
+        self.close_at = now + self.cfg.max_burst_s;
+        let extra = self.close_left as u16 | CLOSE_RELAYED;
+        Some(self.tiny(K_CLOSE, extra, LADDER[self.cfg.beacon_level].wave))
     }
 
     fn note_applicant(&mut self, a: Applicant) {

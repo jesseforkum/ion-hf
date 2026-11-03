@@ -572,10 +572,16 @@ impl Worker {
                 + id_secs(&ncs)
                 + ID_GAP_S
                 + slot * (id_secs(&self.call) + ID_GAP_S);
-            self.leave_net(false);
+            let relaying = s.close_pending();
             if self.keyed_since_id && self.id_due.is_none() && !self.id_on_air {
                 self.id_due = Some(now + wait);
             }
+            // A relay passes the Close on to its leaves first (its ID still
+            // counted from when it heard the Close).
+            if relaying {
+                return;
+            }
+            self.leave_net(false);
         }
         self.note(format!("Ion net {name}: closed"));
     }

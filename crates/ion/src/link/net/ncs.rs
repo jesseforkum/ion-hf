@@ -283,14 +283,32 @@ impl NetStation {
     }
 
     pub(super) fn ncs_next(&mut self, now: f64) -> Option<Outgoing> {
+        if self.close_asked && !self.closed {
+            // Not on top of an answer: a member sending would miss every
+            // Close. Its turn ends with this answer (or none).
+            if matches!(self.wait, Some(Wait::Reply { .. })) {
+                if now < self.deadline? {
+                    return None;
+                }
+                self.wait = None;
+                self.deadline = None;
+            }
+            if self.wait.is_some() || now < self.window_end {
+                return None;
+            }
+            self.closed = true;
+            self.close_left = CLOSES;
+            self.events.push(NetEvent::Closed);
+        }
         if self.closed {
             if self.close_left == 0 {
                 return None;
             }
             self.close_left -= 1;
-            // Spaced out, so a reply already on its way cannot hide them all.
+            // Spaced out, so a burst we did not hear coming cannot hide
+            // them all.
             self.tx_at = now + self.cfg.max_burst_s;
-            return Some(self.tiny(K_CLOSE, 0, LADDER[self.cfg.beacon_level].wave));
+            return Some(self.tiny(K_CLOSE, self.close_left as u16, LADDER[self.cfg.beacon_level].wave));
         }
         if let Some(Wait::Reply {
             slot,
@@ -910,7 +928,7 @@ impl NetStation {
             .map_or(LADDER[FLOOR].wave, |m| self.tiny_wave(m.snr_down));
         let extra = slot as u16 & 63 | (burst as u16) << 6 | bitmap << 8;
         self.deadline = None;
-        if more && turn_bursts + 1 < MAX_TURN_BURSTS {
+        if more && turn_bursts + 1 < MAX_TURN_BURSTS && !self.close_asked {
             self.wait = Some(Wait::Reply {
                 slot,
                 relay_for,

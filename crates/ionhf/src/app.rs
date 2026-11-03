@@ -401,6 +401,7 @@ impl App {
                 self.net_note(format!("{what}, {}{held}", theme::bytes(data.len() as u64)));
             }
             NetEvent::Closed => self.net_note("Closed".into()),
+            NetEvent::Lost => self.net_note("Lost".into()),
         }
     }
 

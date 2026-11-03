@@ -41,6 +41,10 @@ pub(super) const K_ACK: u8 = 3;
 pub(super) const K_IDLE: u8 = 4;
 pub(super) const K_RELAY: u8 = 5;
 pub(super) const K_CLOSE: u8 = 6;
+/// Times NCS sends Close. A Close's `extra` says how many more follow from
+/// its sender (low 2 bits), and this bit that a relay sent it.
+pub(super) const CLOSES: u32 = 3;
+pub(super) const CLOSE_RELAYED: u16 = 4;
 /// A relay polls one of its leaves, and acknowledges its answer (as
 /// [`K_POLL`] and [`K_ACK`]).
 pub(super) const K_SUBPOLL: u8 = 7;

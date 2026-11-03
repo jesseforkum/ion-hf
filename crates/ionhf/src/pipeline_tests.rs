@@ -743,21 +743,12 @@ fn a_net_logs_and_sends_its_summary() {
     let ok = net_until(&mut cs, 300, |cs| cs[1].got(&format!("#{sum_id}"), "N0NCS", &sum_bytes));
     assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
     println!("summary held in {:?}", t.elapsed());
-    // As the Net section does, close once net control has heard that the
-    // member holds it: the member's report after the object has gone, and
-    // its acknowledgement. Closing on top of that report can cost the
-    // member every Close burst.
-    let said = format!("NET OBJECT {sum_id}");
-    let ok = net_until(&mut cs, 120, |cs| {
-        let l = &cs[1].said;
-        l.iter()
-            .position(|x| *x == said)
-            .is_some_and(|i| l[i..].iter().any(|x| x == "PTT OFF"))
-    });
-    assert!(ok, "{}", report(&cs));
-    net_until(&mut cs, 10, |_| false);
+    // At once, likely while the member is sending its report: net control
+    // lets that turn end before its Closes.
     cs[0].send("NET CLOSE");
+    let t = Instant::now();
     let ok = net_until(&mut cs, 120, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
+    println!("closed in {:?}", t.elapsed());
     assert!(ok, "{}", report(&cs));
     ncs_log.close(now());
 

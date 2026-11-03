@@ -33,16 +33,17 @@
 //! `NET HEARD call up_db down_db` (net control, as the roster changes;
 //! `-` not known yet), `NET MISSED call`, `NET RELAY call VIA call`,
 //! `NET ROUTE call VIA call|DIRECT`, `NET OBJECT id [CACHED]` (`id`: 20
-//! hex digits, `ObjectId`), `NET CLOSED`. Frames on the net's
-//! port (KISS data) carry `[to length][to][from length][from][data]`, both
-//! ways: from the host `from` is empty and an empty `to` is the whole net
-//! (net control: a bulletin; member: traffic for net control); to the host
-//! both are filled in, an empty `to` was a bulletin and `#id` an object
-//! (after its `NET OBJECT` line). Messages overheard
-//! between other stations are not passed on. `CONNECT` is `WRONG` while a
-//! net is up. When the command client goes the net keeps running (the Net
-//! screen shows it) and a new client attaches to it with `NET OPEN` or
-//! `NET JOIN`.
+//! hex digits, `ObjectId`), `NET CLOSED` (`NET CLOSED LOST`: a member
+//! heard nothing of net control for `NetConfig::lost_after_s`). Frames on
+//! the net's port (KISS data) carry
+//! `[to length][to][from length][from][data]`, both ways: from the host
+//! `from` is empty and an empty `to` is the whole net (net control: a
+//! bulletin; member: traffic for net control); to the host both are
+//! filled in, an empty `to` was a bulletin and `#id` an object (after its
+//! `NET OBJECT` line). Messages overheard between other stations are not
+//! passed on. `CONNECT` is `WRONG` while a net is up. When the command
+//! client goes the net keeps running (the Net screen shows it) and a new
+//! client attaches to it with `NET OPEN` or `NET JOIN`.
 //!
 //! `DATA2G ON` (off again with `DATA2G OFF` or when the command client
 //! leaves): `DISCONNECTED` says why, as Data2G's host does (its
@@ -792,6 +793,10 @@ impl Host {
                 self.say("NET CLOSED");
                 self.forget_net();
             }
+            NetEvent::Lost => {
+                self.say("NET CLOSED LOST");
+                self.forget_net();
+            }
         }
     }
 
@@ -1202,6 +1207,10 @@ mod tests {
 
         h.net_event(NetEvent::Closed);
         assert_eq!(said.next(), "NET CLOSED");
+        h.command("NET JOIN");
+        assert_eq!(said.next(), "NET PORT 2");
+        h.net_event(NetEvent::Lost);
+        assert_eq!(said.next(), "NET CLOSED LOST");
         h.net_event(NetEvent::Missed { call: "KJ5ET".into() });
         h.command("NET CLOSE");
         assert_eq!(said.next(), "WRONG");

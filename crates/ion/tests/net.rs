@@ -976,3 +976,94 @@ fn an_object_reaches_a_leaf_through_its_relay() {
     assert_eq!(objects(&ev[3]), vec![(id, data, false)]);
     assert!(sim.stations[1].stats.obj_pieces > 0, "the relay sent it");
 }
+
+/// Close while a member is in the middle of its turn: NCS lets that turn
+/// end (the burst under way acknowledged) before its Closes, so the member
+/// is listening for them.
+#[test]
+fn a_close_waits_for_the_answer_under_way() {
+    let calls = ["K1ABC", "W1AW"];
+    let mut sim = net(&calls, 10.0, 21, |_| {});
+    let mut ev = vec![Vec::new(); 3];
+    assert!(run(&mut sim, &mut ev, 900.0, |ev| ev[1..].iter().all(|e| joined(e))));
+    let long: Vec<u8> = (0..1500u32).map(|i| b'a' + (i % 26) as u8).collect();
+    sim.stations[1].send(&long);
+    let queued = sim.stations[1].pending();
+    // Its first burst acknowledged, more to come: the next one is on its way.
+    let ok = sim.run_until(sim.t + 900.0, |s| s.stations[1].pending() < queued);
+    assert!(ok, "K1ABC never got a burst through");
+    let at_close = sim.stations[1].pending();
+    assert!(at_close > 0);
+    sim.stations[0].close();
+    let mut ncs_closed = None;
+    let until = sim.t + 120.0;
+    while sim.t < until && !ev[1..].iter().all(|e| e.contains(&NetEvent::Closed)) {
+        for (i, s) in sim.stations.iter_mut().enumerate() {
+            ev[i].extend(s.take_events());
+        }
+        if ncs_closed.is_none() && ev[0].contains(&NetEvent::Closed) {
+            ncs_closed = Some(sim.stations[1].pending());
+        }
+        sim.step();
+    }
+    assert!(
+        ev[1..].iter().all(|e| e.contains(&NetEvent::Closed)),
+        "after {:.0} s: {:#?}",
+        sim.t,
+        ev
+    );
+    let left = ncs_closed.expect("NCS never closed");
+    assert!(
+        left < at_close,
+        "the burst under way was not acknowledged ({left} of {at_close} B left)"
+    );
+}
+
+#[test]
+fn a_leaf_hears_the_close_through_its_relay() {
+    let calls = ["W1AW", "K1ABC", "W5FAR"];
+    let mut sim = tree_net(&calls, &[(1, 8.0)], 22);
+    let mut ev = vec![Vec::new(); 4];
+    assert!(run(&mut sim, &mut ev, 3000.0, |ev| joined(&ev[3])));
+    assert_eq!(sim.stations[3].relay_call().as_deref(), Some("W1AW"));
+    sim.stations[0].close();
+    let until = sim.t + 120.0;
+    let ok = run(&mut sim, &mut ev, until, |ev| {
+        ev[1..].iter().all(|e| e.contains(&NetEvent::Closed))
+    });
+    assert!(ok, "after {:.0} s\nW5FAR {:#?}", sim.t, ev[3]);
+    assert!(!ev.iter().flatten().any(|e| *e == NetEvent::Lost));
+    assert!(!sim.stations[1].close_pending());
+}
+
+/// A member that hears nothing of NCS for `lost_after_s` gives the net up;
+/// a quiet net (idle rounds, check-ins closed so no beacons) is not lost,
+/// nor is a leaf that hears only its relay.
+#[test]
+fn a_member_that_hears_nothing_of_ncs_gives_the_net_up() {
+    let calls = ["W1AW", "K1ABC", "W5FAR"];
+    let mut sim = tree_net(&calls, &[(1, 8.0)], 23);
+    let mut ev = vec![Vec::new(); 4];
+    assert!(run(&mut sim, &mut ev, 3000.0, |ev| ev[1..].iter().all(|e| joined(e))));
+    sim.stations[0].set_open(false);
+    let until = sim.t + 2400.0;
+    run(&mut sim, &mut ev, until, |_| false);
+    assert!(
+        !ev.iter()
+            .flatten()
+            .any(|e| *e == NetEvent::Lost || *e == NetEvent::Closed),
+        "{ev:#?}"
+    );
+    // NCS goes off the air.
+    sim.on[0] = false;
+    let off = sim.t;
+    let until = off + 1200.0;
+    let ok = run(&mut sim, &mut ev, until, |ev| {
+        ev[1..].iter().all(|e| e.contains(&NetEvent::Lost))
+    });
+    assert!(ok, "after {:.0} s: {:#?}", sim.t - off, &ev[1..]);
+    let lost_after = NetConfig::new(NCS, NET, false).lost_after_s;
+    // Counted from the last burst heard, a round or so before NCS went.
+    assert!(sim.t - off >= lost_after - 60.0, "lost after only {:.0} s", sim.t - off);
+    assert!(sim.stations[1..].iter().all(|s| s.closed()));
+}

@@ -110,6 +110,7 @@ NET RELAY call VIA call
 NET ROUTE call VIA call | NET ROUTE call DIRECT
 NET OBJECT id [CACHED]
 NET CLOSED
+NET CLOSED LOST
 ```
 
 **Frames on the net's KISS port** carry a short header, both ways:
@@ -125,8 +126,12 @@ NET CLOSED
 As built (`crates/ionhf/src/host.rs`, documented in `docs/app.md`): the
 other commands answer `OK` or `WRONG`; `NET OPEN` and `NET JOIN` are
 `WRONG` while a link is called or up, and `CONNECT` while a net is up;
-`NET CLOSED` also comes when a net is refused, left or dropped. A member
-addresses only net control. Messages overheard between other stations
+`NET CLOSED` also comes when a net is refused, left or dropped, and
+`NET CLOSED LOST` when a member has heard nothing of net control (a
+leaf: of its relay) for `NetConfig::lost_after_s` (12.5 minutes, 2.5
+beacon intervals); the app takes both alike. Net control's `NET CLOSE`
+lets the turn under way end before the Closes go, so its `NET CLOSED`
+can come a few seconds later. A member addresses only net control. Messages overheard between other stations
 are not passed on. The net outlives the command client; the next one
 attaches with `NET OPEN` or `NET JOIN`.
 

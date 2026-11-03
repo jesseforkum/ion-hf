@@ -241,7 +241,7 @@ groups hold their frames until the net is over.
 | `NET LINE text` | `OK` | the check-in line (the rest of the command, at most 40 bytes) |
 | `NET TRAFFIC n R\|W\|P\|E [SHORT]` | `OK` / `WRONG` | traffic listed: count, precedence, short time |
 | `NET OFFER` | `OK` / `WRONG` | net control: the next frame on the net's port is an object to offer |
-| `NET CLOSE` | `OK` / `WRONG` | net control: close the net (its Close goes out three times); member: leave |
+| `NET CLOSE` | `OK` / `WRONG` | net control: close the net once the turn under way is over (its Close goes out three times); member: leave |
 
 Events, as they happen:
 
@@ -257,6 +257,7 @@ Events, as they happen:
 | `NET ROUTE call VIA call` / `NET ROUTE call DIRECT` | net control: a station's route changed |
 | `NET OBJECT id [CACHED]` | member: an object net control offers, its frame next; `id` is 20 hex digits (the first 8 bytes of its SHA-256, then its length); `CACHED`: it was held already and cost no airtime |
 | `NET CLOSED` | the net closed, we left it, or it was refused (no call, a link up) |
+| `NET CLOSED LOST` | member: nothing heard of net control (or our relay) for 12.5 minutes; the net is over for us |
 
 - Frames on the net's port (KISS data, command 0) carry a header both
   ways: `[to length][to][from length][from][data]`, calls in ASCII. From

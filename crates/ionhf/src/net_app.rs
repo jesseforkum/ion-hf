@@ -579,7 +579,7 @@ impl NetApp {
                 overheard: false,
             } => self.message(from, to.as_deref(), data, now),
             NetEvent::Object { data, .. } => self.object(data),
-            NetEvent::Closed => {
+            NetEvent::Closed | NetEvent::Lost => {
                 if let Some(log) = self.log.as_mut() {
                     log.close(now);
                 }

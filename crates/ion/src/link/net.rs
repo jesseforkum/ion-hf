@@ -86,6 +86,9 @@ pub struct NetConfig {
     pub seek_every_s: f64,
     /// ...once the channel has been quiet this long.
     pub seek_quiet_s: f64,
+    /// Member: with nothing heard from NCS (a leaf: from its relay) for
+    /// this long, the net is lost ([`NetEvent::Lost`]); 0: never.
+    pub lost_after_s: f64,
     pub caps: Caps,
     /// Compressed direct messages ([`super::compress`]): a member
     /// announces it at check-in ([`CAPS_COMPRESS`]); NCS with this on
@@ -150,6 +153,7 @@ impl NetConfig {
             seek_after_s: 360.0,
             seek_every_s: 90.0,
             seek_quiet_s: 5.0,
+            lost_after_s: 750.0,
             caps: Caps::default(),
             compress: false,
             version: software_version(),
@@ -221,6 +225,10 @@ pub enum NetEvent {
         cached: bool,
     },
     Closed,
+    /// Member: nothing heard from NCS (or our relay) for
+    /// [`NetConfig::lost_after_s`]. Over for us, as with
+    /// [`NetEvent::Closed`].
+    Lost,
 }
 
 /// NCS's view of one member.
@@ -315,8 +323,12 @@ pub struct NetStation {
     /// The bulletin cut into coded blocks as it goes out.
     bul_tx: Vec<BulTx>,
     bul_sent_round: Option<u32>,
-    /// Close messages still to send (repeated: one may collide).
+    /// NCS: close once the turn under way is over.
+    close_asked: bool,
+    /// Close messages still to send (repeated: one may collide), and when
+    /// the next goes (a relay, to its leaves).
     close_left: u32,
+    close_at: f64,
     /// Something happened in the last check-in window (a check-in, or a
     /// busy channel that may have been a collision): beacon again soon.
     window_activity: bool,
@@ -404,6 +416,8 @@ pub struct NetStation {
     started_at: Option<f64>,
     last_beacon_at: Option<f64>,
     last_rx_at: f64,
+    /// When we last heard NCS (a leaf: its relay).
+    ncs_heard_at: f64,
     next_seek_at: f64,
     /// The id of a net we hear traffic of (no beacon), to seek it.
     heard_net: Option<u8>,
@@ -456,7 +470,9 @@ impl NetStation {
             bulletin: Vec::new(),
             bul_tx: Vec::new(),
             bul_sent_round: None,
+            close_asked: false,
             close_left: 0,
+            close_at: 0.0,
             window_activity: false,
             last_now: 0.0,
             rx_sent_round: None,
@@ -510,6 +526,7 @@ impl NetStation {
             started_at: None,
             last_beacon_at: None,
             last_rx_at: f64::NEG_INFINITY,
+            ncs_heard_at: f64::NEG_INFINITY,
             next_seek_at: 0.0,
             heard_net: None,
             line_left,
@@ -558,6 +575,12 @@ impl NetStation {
 
     pub fn closed(&self) -> bool {
         self.closed
+    }
+
+    /// Closed, with Close bursts still to send (NCS, or a relay to its
+    /// leaves).
+    pub fn close_pending(&self) -> bool {
+        self.closed && self.close_left > 0
     }
 
     /// Everything that happened since the last call.
@@ -687,14 +710,11 @@ impl NetStation {
         self.open
     }
 
-    /// NCS: end the net.
+    /// NCS: end the net, once the turn under way is over (its answer in,
+    /// or given up on): then [`NetEvent::Closed`] and the Close bursts.
     pub fn close(&mut self) {
-        if self.cfg.ncs && !self.closed {
-            self.closed = true;
-            self.wait = None;
-            self.deadline = None;
-            self.close_left = 3;
-            self.events.push(NetEvent::Closed);
+        if self.cfg.ncs {
+            self.close_asked = true;
         }
     }
 
@@ -735,6 +755,9 @@ impl NetStation {
             return None;
         }
         self.started_at.get_or_insert(now);
+        if !self.cfg.ncs {
+            self.check_lost(now);
+        }
         if self.busy {
             if let Some(d) = self.deadline.as_mut() {
                 *d = d.max(now + self.cfg.reply_slack_s);
