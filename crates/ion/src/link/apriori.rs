@@ -9,14 +9,15 @@
 //! byte  0      kind (Data)              format
 //!       1      flags (control, to all)  format
 //!       2..5   field (0)                format
-//!       5      payload length (10)      format
+//!       5      payload length (11)      format
 //!       6      subtype (check-in)       format
 //!       7..12  packed callsign          roster
 //!       12     how well it hears NCS    unknown
 //!       13     capabilities             unknown
 //!       14     protocol version         format
 //!       15     software version         unknown
-//!       16..28 zero padding             format
+//!       16     traffic                  unknown
+//!       17..28 zero padding             format
 //!       28..32 CRC-32                   unknown
 //! ```
 
@@ -24,7 +25,7 @@ use std::ops::Range;
 
 use super::audio::{bits_to_bytes, bytes_to_bits};
 use super::frame::Frame;
-use super::net::{Caps, checkin_call, checkin_frame_bytes, report_frame_bytes};
+use super::net::{Caps, REPORT_LEN, checkin_call, checkin_frame_bytes, report_frame_bytes};
 use crate::fec;
 use crate::phy_mfsk::{MfskBurst, decode_short_frames_prior};
 
@@ -34,8 +35,9 @@ pub const SURE: f32 = 20.0;
 
 /// Bytes of the packed callsign.
 const CALL: Range<usize> = 7..12;
-/// Bytes no assumption fixes: SNR, capabilities, software version, CRC.
-const UNKNOWN: [Range<usize>; 4] = [12..13, 13..14, 15..16, 28..32];
+/// Bytes no assumption fixes: SNR, capabilities, software version,
+/// traffic, CRC.
+const UNKNOWN: [Range<usize>; 4] = [12..13, 13..14, 15..17, 28..32];
 
 /// What the receiver assumes about a check-in before decoding it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,12 +85,12 @@ pub fn checkin_prior(assume: Assume) -> Vec<f32> {
 /// A priori LLRs of member `slot`'s report frame listing `hears`
 /// stations (0..=4), as NCS expects it when it polls that member at the
 /// floor. Known: the frame header (kind, flags with the slot, field 0,
-/// length), the subtype and slot bytes, and the zero padding (up to 144
+/// length), the subtype and slot bytes, and the zero padding (up to 128
 /// of the 256 bits with nothing heard). The values in it are unknown, and
 /// so is the CRC.
 pub fn report_prior(slot: u8, hears: usize) -> Vec<f32> {
     let bits = bytes_to_bits(&report_frame_bytes(slot, hears));
-    let len = 12 + 2 * hears;
+    let len = REPORT_LEN + 2 * hears;
     // Header (6), subtype and slot (2), then padding up to the CRC.
     let known = |b: usize| b < 8 || (6 + len..fec::K_SHORT / 8 - 4).contains(&b);
     bits.iter()
@@ -192,10 +194,13 @@ mod tests {
             let bits = bytes_to_bits(&fr.encode(32));
             let p = report_prior(9, h);
             assert!(bits.iter().zip(&p).all(|(&b, &l)| l == 0.0 || (l > 0.0) == (b == 0)));
-            assert_eq!(p.iter().filter(|&&l| l != 0.0).count(), 8 * (8 + 22 - 12 - 2 * h));
+            assert_eq!(
+                p.iter().filter(|&&l| l != 0.0).count(),
+                8 * (8 + 22 - REPORT_LEN - 2 * h)
+            );
         }
         let known_f = f.iter().filter(|&&l| l != 0.0).count();
         let known_c = c.iter().filter(|&&l| l != 0.0).count();
-        assert_eq!((known_f, known_c), (160, 200));
+        assert_eq!((known_f, known_c), (152, 192));
     }
 }

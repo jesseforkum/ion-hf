@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use ion::link::Air;
-use ion::link::net::{NetConfig, NetEvent, NetStation};
+use ion::link::net::{MAX_LINE, NetConfig, NetEvent, NetStation, ObjectId, Precedence, Traffic};
 use ion::link::net_sim::NetSim;
 use ion::link::sim::ModelAir;
 
@@ -629,4 +629,350 @@ fn coded_repair_needs_fewer_sends_than_resending() {
     assert!(coded < sel / 2.5, "selective {sel:.1} coded {coded:.1}");
     assert!(coded < rewind / 2.5, "rewind {rewind:.1} coded {coded:.1}");
     assert!(coded < 15.0, "coded {coded:.1}");
+}
+
+fn joined(ev: &[NetEvent]) -> bool {
+    ev.iter().any(|e| matches!(e, NetEvent::Joined { .. }))
+}
+
+fn lines(ev: &[NetEvent], call: &str) -> Vec<String> {
+    ev.iter()
+        .filter_map(|e| match e {
+            NetEvent::Line { call: c, line } if c == call => Some(line.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn traffic_of(ev: &[NetEvent], call: &str) -> Vec<Traffic> {
+    ev.iter()
+        .filter_map(|e| match e {
+            NetEvent::Traffic { call: c, traffic } if c == call => Some(*traffic),
+            _ => None,
+        })
+        .collect()
+}
+
+fn objects(ev: &[NetEvent]) -> Vec<(ObjectId, Vec<u8>, bool)> {
+    ev.iter()
+        .filter_map(|e| match e {
+            NetEvent::Object { id, data, cached } => Some((*id, data.clone(), *cached)),
+            _ => None,
+        })
+        .collect()
+}
+
+const LINE: &str = "Trousdale County ARES, EOC net control!!";
+
+#[test]
+fn traffic_and_lines_reach_the_roster() {
+    let calls = ["K1ABC", "W1AW"];
+    let listed = Traffic {
+        items: 2,
+        precedence: Precedence::Priority,
+        short: true,
+    };
+    let mut sim = net(&calls, 10.0, 12, |c| {
+        if c.call == "K1ABC" {
+            c.line = LINE.into();
+            c.traffic = listed;
+        } else if c.call == "W1AW" {
+            c.line = "Wilson Co.".into();
+        }
+    });
+    assert_eq!(LINE.len(), MAX_LINE);
+    let mut ev = vec![Vec::new(); 3];
+    let ok = run(&mut sim, &mut ev, 1200.0, |ev| {
+        lines(&ev[0], "K1ABC") == [LINE] && lines(&ev[0], "W1AW") == ["Wilson Co."]
+    });
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    // The traffic came with the check-in.
+    assert_eq!(traffic_of(&ev[0], "K1ABC"), vec![listed]);
+    assert!(traffic_of(&ev[0], "W1AW").is_empty());
+    let roster = sim.stations[0].roster(sim.t);
+    let k = roster.iter().find(|r| r.call == "K1ABC").unwrap();
+    assert_eq!((k.line.as_str(), k.traffic), (LINE, listed));
+    // Changed later: they come with the next report.
+    let welfare = Traffic {
+        items: 1,
+        precedence: Precedence::Welfare,
+        short: false,
+    };
+    sim.stations[2].set_traffic(welfare);
+    sim.stations[2].set_line("Wilson County EMA");
+    sim.stations[1].set_traffic(Traffic::default());
+    let until = sim.t + 900.0;
+    let ok = run(&mut sim, &mut ev, until, |ev| {
+        traffic_of(&ev[0], "W1AW") == [welfare]
+            && lines(&ev[0], "W1AW").len() == 2
+            && traffic_of(&ev[0], "K1ABC").len() == 2
+    });
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    assert_eq!(lines(&ev[0], "W1AW")[1], "Wilson County EMA");
+    let roster = sim.stations[0].roster(sim.t);
+    let w = roster.iter().find(|r| r.call == "W1AW").unwrap();
+    assert_eq!((w.line.as_str(), w.traffic), ("Wilson County EMA", welfare));
+    let k = roster.iter().find(|r| r.call == "K1ABC").unwrap();
+    assert_eq!((k.line.as_str(), k.traffic), (LINE, Traffic::default()));
+    // A line goes once.
+    assert_eq!(lines(&ev[0], "K1ABC").len(), 1);
+}
+
+#[test]
+fn a_leafs_line_and_traffic_come_through_its_relay() {
+    let calls = ["W1AW", "K1ABC", "W5FAR"];
+    let mut sim = tree_net(&calls, &[(1, 8.0)], 13);
+    let urgent = Traffic {
+        items: 1,
+        precedence: Precedence::Emergency,
+        short: false,
+    };
+    sim.stations[3].set_line(LINE);
+    sim.stations[3].set_traffic(urgent);
+    let mut ev = vec![Vec::new(); 4];
+    let ok = run(&mut sim, &mut ev, 3000.0, |ev| {
+        joined(&ev[3]) && lines(&ev[0], "W5FAR") == [LINE] && traffic_of(&ev[0], "W5FAR") == [urgent]
+    });
+    assert!(ok, "after {:.0} s\nNCS {:#?}\nW5FAR {:#?}", sim.t, ev[0], ev[3]);
+    let roster = sim.stations[0].roster(sim.t);
+    let far = roster.iter().find(|r| r.call == "W5FAR").unwrap();
+    assert_eq!(far.via.as_deref(), Some("W1AW"));
+    assert_eq!((far.line.as_str(), far.traffic), (LINE, urgent));
+}
+
+#[test]
+fn priority_and_emergency_members_are_polled_first() {
+    let calls = ["K1ABC", "W1AW", "N0CALL", "W5XYZ", "N0ABC"];
+    let tr = |p: Precedence, short: bool| Traffic {
+        items: 1,
+        precedence: p,
+        short,
+    };
+    let mut sim = net(&calls, 10.0, 14, |c| {
+        c.traffic = match c.call.as_str() {
+            "N0ABC" => tr(Precedence::Emergency, false),
+            "W5XYZ" => tr(Precedence::Priority, false),
+            "N0CALL" => tr(Precedence::Routine, true),
+            "W1AW" => tr(Precedence::Welfare, false),
+            _ => Traffic::default(),
+        }
+    });
+    let mut ev = vec![Vec::new(); calls.len() + 1];
+    let ok = run(&mut sim, &mut ev, 1800.0, |ev| {
+        ev[1..].iter().all(|e| joined(e)) && traffic_of(&ev[0], "N0ABC").len() == 1
+    });
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    // At the start of a round everyone queues one short message: they
+    // arrive in the order NCS polls.
+    let r = sim.stations[0].stats.rounds;
+    let until = sim.t + 600.0;
+    assert!(sim.run_until(until, |s| s.stations[0].stats.rounds > r));
+    for (i, c) in calls.iter().enumerate() {
+        sim.stations[i + 1].send(c.as_bytes());
+    }
+    ev[0].clear();
+    let until = sim.t + 900.0;
+    let ok = run(&mut sim, &mut ev, until, |ev| {
+        calls.iter().all(|c| messages_from(&ev[0], c).len() == 1)
+    });
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    let order: Vec<String> = ev[0]
+        .iter()
+        .filter_map(|e| match e {
+            NetEvent::Message { from, .. } => Some(from.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut rest: Vec<(u8, String)> = sim.stations[0]
+        .roster(sim.t)
+        .into_iter()
+        .filter(|r| ["K1ABC", "W1AW"].contains(&r.call.as_str()))
+        .map(|r| (r.slot, r.call))
+        .collect();
+    rest.sort();
+    let mut want: Vec<String> = ["N0ABC", "W5XYZ", "N0CALL"].iter().map(|s| s.to_string()).collect();
+    want.extend(rest.into_iter().map(|r| r.1));
+    assert_eq!(order, want);
+}
+
+/// The store directory of one member in one test.
+fn store(test: &str, call: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ion-net-{}-{test}-{call}", std::process::id()))
+}
+
+/// An announcement-sized object: about 6 kB, three blocks of the code.
+fn announcement() -> Vec<u8> {
+    let mut a = b"# Trousdale County ARES net\n\nNet control N0NCS, alternate W1AW.\n\n".to_vec();
+    while a.len() < 6000 {
+        a.extend(format!("| {} | shelter {} | open |\n", a.len(), a.len() % 97).as_bytes());
+    }
+    a
+}
+
+/// Pieces of the code an object of `len` bytes takes.
+fn sources(len: usize) -> u32 {
+    (0..len.div_ceil(2560))
+        .map(|j| (len - j * 2560).min(2560).div_ceil(20) as u32)
+        .sum()
+}
+
+/// A net with a store for each member, `held` holding `data` already,
+/// run until everyone is in; then NCS offers `data`.
+fn object_net(test: &str, calls: &[&str], held: &[&str], data: &[u8], seed: u64) -> (NetSim, Vec<Vec<NetEvent>>) {
+    let id = ObjectId::of(data);
+    let mut sim = net(calls, 10.0, seed, |c| {
+        if !c.ncs {
+            let dir = store(test, &c.call);
+            let _ = std::fs::remove_dir_all(&dir);
+            if held.contains(&c.call.as_str()) {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(id.to_string()), data).unwrap();
+            }
+            c.store = Some(dir);
+        }
+    });
+    let mut ev = vec![Vec::new(); calls.len() + 1];
+    assert!(run(&mut sim, &mut ev, 1200.0, |ev| ev[1..].iter().all(|e| joined(e))));
+    assert_eq!(sim.stations[0].offer(data), id);
+    (sim, ev)
+}
+
+fn all_have_it(ev: &[Vec<NetEvent>]) -> bool {
+    ev[1..].iter().all(|e| !objects(e).is_empty())
+}
+
+#[test]
+fn an_offered_object_reaches_every_member_once() {
+    let calls = ["K1ABC", "W1AW", "N0CALL"];
+    let data = announcement();
+    let id = ObjectId::of(&data);
+    let (mut sim, mut ev) = object_net("once", &calls, &[], &data, 15);
+    let t0 = sim.t;
+    let ok = run(&mut sim, &mut ev, 2400.0, all_have_it);
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    println!("object of {} bytes to 3 members: {:.0} s", data.len(), sim.t - t0);
+    let until = sim.t + 600.0;
+    run(&mut sim, &mut ev, until, |_| false);
+    for (i, c) in calls.iter().enumerate() {
+        assert_eq!(objects(&ev[i + 1]), vec![(id, data.clone(), false)], "{c}");
+        // Kept in its store, named by the id.
+        let file = store("once", c).join(id.to_string());
+        assert_eq!(std::fs::read(&file).unwrap(), data);
+        let _ = std::fs::remove_dir_all(store("once", c));
+    }
+    let roster = sim.stations[0].roster(sim.t);
+    assert!(roster.iter().all(|r| r.holds == 1), "{roster:#?}");
+    // Sent once for all of them: the sources, and few repairs.
+    let st = &sim.stations[0].stats;
+    let k = sources(data.len());
+    println!("{} pieces ({} repairs) for {k} sources", st.obj_pieces, st.obj_repairs);
+    assert!(
+        st.obj_pieces >= k && st.obj_pieces < k + k / 4,
+        "{} pieces for {k}",
+        st.obj_pieces
+    );
+    assert_eq!(st.bul_pieces, 0);
+}
+
+#[test]
+fn a_member_that_holds_the_object_costs_no_pieces() {
+    let calls = ["K1ABC", "W1AW", "N0CALL"];
+    let data = announcement();
+    let id = ObjectId::of(&data);
+    // Everyone holds it: nothing goes on the air but the offer.
+    let (mut sim, mut ev) = object_net("held", &calls, &calls, &data, 16);
+    assert!(run(&mut sim, &mut ev, 1800.0, all_have_it));
+    let until = sim.t + 600.0;
+    run(&mut sim, &mut ev, until, |_| false);
+    for e in &ev[1..] {
+        assert_eq!(objects(e), vec![(id, data.clone(), true)]);
+    }
+    assert_eq!(sim.stations[0].stats.obj_pieces, 0);
+    assert!(sim.stations[0].roster(sim.t).iter().all(|r| r.holds == 1));
+    // Only N0CALL lacks it: what it needs goes, once.
+    let (mut sim, mut ev) = object_net("held1", &calls, &["K1ABC", "W1AW"], &data, 16);
+    assert!(run(&mut sim, &mut ev, 2400.0, all_have_it));
+    assert_eq!(objects(&ev[3]), vec![(id, data.clone(), false)]);
+    let one = sim.stations[0].stats.obj_pieces;
+    let k = sources(data.len());
+    println!("one member lacking: {one} pieces for {k} sources");
+    assert!(one >= k && one < k + k / 4, "{one} pieces for {k}");
+    for c in calls {
+        let _ = std::fs::remove_dir_all(store("held", c));
+        let _ = std::fs::remove_dir_all(store("held1", c));
+    }
+}
+
+#[test]
+fn a_late_joiner_gets_the_object() {
+    let calls = ["K1ABC", "W1AW", "W5LATE"];
+    let data = announcement();
+    let id = ObjectId::of(&data);
+    let mut sim = net(&calls, 10.0, 17, |_| {});
+    sim.on[3] = false;
+    sim.stations[0].offer(&data);
+    let mut ev = vec![Vec::new(); 4];
+    let ok = run(&mut sim, &mut ev, 2400.0, |ev| {
+        !objects(&ev[1]).is_empty() && !objects(&ev[2]).is_empty()
+    });
+    assert!(ok, "after {:.0} s: NCS {:#?}", sim.t, ev[0]);
+    let before = sim.stations[0].stats.obj_pieces;
+    sim.on[3] = true;
+    let until = sim.t + 3000.0;
+    let ok = run(&mut sim, &mut ev, until, |ev| !objects(&ev[3]).is_empty());
+    assert!(ok, "after {:.0} s: W5LATE {:#?}", sim.t, ev[3]);
+    assert_eq!(objects(&ev[3]), vec![(id, data.clone(), false)]);
+    println!(
+        "late joiner: {} pieces before, {} after",
+        before, sim.stations[0].stats.obj_pieces
+    );
+    assert!(sim.stations[0].stats.obj_pieces > before);
+    for e in &ev[1..3] {
+        assert_eq!(objects(e).len(), 1);
+    }
+}
+
+#[test]
+fn a_store_copy_that_does_not_match_its_id_is_not_trusted() {
+    let calls = ["K1ABC", "W1AW"];
+    let data = announcement();
+    let id = ObjectId::of(&data);
+    let (mut sim, mut ev) = object_net("bad", &calls, &calls, &data, 18);
+    // K1ABC's copy has gone bad: it must fetch it.
+    let dir = store("bad", "K1ABC");
+    let mut bad = data.clone();
+    bad[100] ^= 1;
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(id.to_string()), &bad).unwrap();
+    let ok = run(&mut sim, &mut ev, 2400.0, all_have_it);
+    assert!(ok, "after {:.0} s: K1ABC {:#?}", sim.t, ev[1]);
+    assert_eq!(objects(&ev[1]), vec![(id, data.clone(), false)]);
+    assert_eq!(objects(&ev[2]), vec![(id, data.clone(), true)]);
+    assert_eq!(std::fs::read(dir.join(id.to_string())).unwrap(), data);
+    assert!(sim.stations[0].stats.obj_pieces > 0);
+    for c in calls {
+        let _ = std::fs::remove_dir_all(store("bad", c));
+    }
+}
+
+#[test]
+fn an_object_reaches_a_leaf_through_its_relay() {
+    let calls = ["W1AW", "K1ABC", "W5FAR"];
+    let mut sim = tree_net(&calls, &[(1, 8.0)], 19);
+    let data = announcement();
+    let id = ObjectId::of(&data);
+    let mut ev = vec![Vec::new(); 4];
+    assert!(run(&mut sim, &mut ev, 3000.0, |ev| joined(&ev[3])));
+    sim.stations[0].offer(&data);
+    let until = sim.t + 3600.0;
+    let ok = run(&mut sim, &mut ev, until, all_have_it);
+    assert!(
+        ok,
+        "after {:.0} s\nW5FAR {:#?}\nroster {:#?}",
+        sim.t,
+        ev[3],
+        sim.stations[0].roster(sim.t)
+    );
+    assert_eq!(objects(&ev[3]), vec![(id, data, false)]);
+    assert!(sim.stations[1].stats.obj_pieces > 0, "the relay sent it");
 }

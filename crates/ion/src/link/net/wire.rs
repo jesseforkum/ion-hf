@@ -29,6 +29,10 @@ pub(super) const C_TREE: u8 = 8;
 pub(super) const C_CHILD: u8 = 9;
 /// A relay to NCS: which of its leaves answered, and how well it hears them.
 pub(super) const C_KIDS: u8 = 10;
+/// A member's check-in line, in one or two parts (relayed like a report).
+pub(super) const C_LINE: u8 = 11;
+/// NCS (or a relay, to its leaves): the objects on offer.
+pub(super) const C_OFFER: u8 = 12;
 
 /// Header-only message kinds (the burst's `user` high nibble).
 pub(super) const K_POLL: u8 = 1;
@@ -47,7 +51,7 @@ pub(super) const K_SUBACK: u8 = 8;
 pub(super) const ASIDE: u8 = 8;
 
 /// Protocol version, sent at check-in.
-pub const PROTOCOL: u8 = 2;
+pub const PROTOCOL: u8 = 3;
 
 /// What a station can do, announced at check-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -101,6 +105,90 @@ impl Caps {
     pub fn bandwidth_hz(self) -> u32 {
         if self.wide { 2750 } else { 2400 }
     }
+}
+
+/// How urgent a station's most urgent traffic is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Precedence {
+    #[default]
+    Routine,
+    Welfare,
+    Priority,
+    Emergency,
+}
+
+/// The traffic a station lists, sent at check-in and in its reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Traffic {
+    /// Items listed (7 means 7 or more).
+    pub items: u8,
+    /// Of the most urgent.
+    pub precedence: Precedence,
+    /// Short time: in and out.
+    pub short: bool,
+}
+
+impl Traffic {
+    /// Bits 0–2 items, 3–4 precedence, 5 short time.
+    pub fn to_byte(self) -> u8 {
+        self.items.min(7) | (self.precedence as u8) << 3 | (self.short as u8) << 5
+    }
+
+    pub fn from_byte(b: u8) -> Self {
+        Self {
+            items: b & 7,
+            precedence: match b >> 3 & 3 {
+                0 => Precedence::Routine,
+                1 => Precedence::Welfare,
+                2 => Precedence::Priority,
+                _ => Precedence::Emergency,
+            },
+            short: b & 32 != 0,
+        }
+    }
+
+    /// Where NCS polls it in a round: Emergency, Priority, short time, the rest.
+    pub(super) fn rank(self) -> u8 {
+        match self.precedence {
+            Precedence::Emergency => 0,
+            Precedence::Priority => 1,
+            _ if self.short => 2,
+            _ => 3,
+        }
+    }
+}
+
+/// Longest check-in line, bytes.
+pub const MAX_LINE: usize = 40;
+/// Text bytes in one `C_LINE` frame.
+pub(super) const LINE_PART: usize = 20;
+
+/// `line` cut to [`MAX_LINE`] bytes on a character boundary.
+pub(super) fn clip_line(line: &str) -> String {
+    let mut n = line.len().min(MAX_LINE);
+    while !line.is_char_boundary(n) {
+        n -= 1;
+    }
+    line[..n].to_string()
+}
+
+/// One bit per `C_LINE` frame `line` takes.
+pub(super) fn line_mask(line: &str) -> u8 {
+    if line.len() > LINE_PART { 3 } else { 1 }
+}
+
+/// The `C_LINE` payloads of `slot`'s line: subtype, then the slot with the
+/// part number in bit 6 and "two parts" in bit 7, then up to 20 bytes.
+pub(super) fn line_payloads(slot: u8, line: &str) -> Vec<Vec<u8>> {
+    let b = line.as_bytes();
+    let parts = if b.len() > LINE_PART { 2 } else { 1 };
+    (0..parts)
+        .map(|i| {
+            let mut p = vec![C_LINE, slot & 63 | (i as u8) << 6 | (parts as u8 - 1) << 7];
+            p.extend(&b[(i * LINE_PART).min(b.len())..((i + 1) * LINE_PART).min(b.len())]);
+            p
+        })
+        .collect()
 }
 
 /// Check-in caps byte, bit 7 (of the reserved 4–7): the member can take
@@ -171,28 +259,37 @@ pub(super) fn ctrl_frame(slot: u8, payload: Vec<u8>) -> Frame {
 }
 
 /// A check-in's control payload: subtype, packed call, how well we hear
-/// NCS, capabilities, protocol and software version (10 bytes).
-pub(super) fn checkin_payload(call: &str, snr_ncs_db: f32, caps: Caps, version: u8) -> Vec<u8> {
+/// NCS, capabilities, protocol and software version, traffic (11 bytes).
+pub(super) fn checkin_payload(call: &str, snr_ncs_db: f32, caps: Caps, version: u8, traffic: Traffic) -> Vec<u8> {
     let mut p = vec![C_CHECKIN];
     p.extend(pack_call(call));
     p.push(snr_q(snr_ncs_db));
-    p.extend([caps.to_byte(), PROTOCOL, version]);
+    p.extend([caps.to_byte(), PROTOCOL, version, traffic.to_byte()]);
     p
 }
 
 /// The whole check-in frame as it goes on the air (one short-code
-/// codeword's information bytes).
+/// codeword's information bytes), with no traffic listed.
 pub fn checkin_frame_bytes(call: &str, snr_ncs_db: f32, caps: Caps, version: u8) -> Vec<u8> {
-    ctrl_frame(ALL, checkin_payload(call, snr_ncs_db, caps, version)).encode(LADDER[CTRL_CODE].frame_bytes())
+    ctrl_frame(
+        ALL,
+        checkin_payload(call, snr_ncs_db, caps, version, Traffic::default()),
+    )
+    .encode(LADDER[CTRL_CODE].frame_bytes())
 }
 
 /// A template of member `slot`'s report frame listing `hears` stations
 /// heard, with every field NCS cannot know zero (for priors).
 pub fn report_frame_bytes(slot: u8, hears: usize) -> Vec<u8> {
     let mut p = vec![C_REPORT, slot];
-    p.resize(12 + 2 * hears, 0);
+    p.resize(REPORT_LEN + 2 * hears, 0);
     ctrl_frame(slot, p).encode(LADDER[CTRL_CODE].frame_bytes())
 }
+
+/// A report's fixed part: subtype, slot, how well it hears NCS, bytes
+/// queued (u24), bulletin block (u16) and shortfall, direct bytes held
+/// (u24), traffic, objects held. The stations it hears follow, 2 bytes each.
+pub const REPORT_LEN: usize = 14;
 
 /// PHY header (`user`, `extra`) of member `slot`'s Idle in net `id`,
 /// hearing NCS at `snr_db`.
@@ -288,6 +385,28 @@ mod tests {
         }
         assert_eq!(unpack_call(&pack_call("k1abc")), "K1ABC");
         assert_eq!(unpack_call(&pack_call("DL1ABCD/P")), "DL1ABCD");
+    }
+
+    #[test]
+    fn traffic_and_lines_pack() {
+        for b in 0..64u8 {
+            assert_eq!(Traffic::from_byte(b).to_byte(), b);
+        }
+        let t = Traffic {
+            items: 9,
+            precedence: Precedence::Priority,
+            short: true,
+        };
+        assert_eq!(Traffic::from_byte(t.to_byte()).items, 7);
+        let line = "Trousdale County ARES, EOC net control!!";
+        assert_eq!(line.len(), MAX_LINE);
+        let p = line_payloads(5, line);
+        assert_eq!(p.len(), 2);
+        assert!(p.iter().all(|x| x.len() <= Frame::max_payload(32)));
+        assert_eq!((p[0][1], p[1][1]), (5 | 0x80, 5 | 0xC0));
+        assert_eq!(line_payloads(5, "")[0], vec![C_LINE, 5]);
+        assert_eq!(clip_line(&"é".repeat(30)).len(), 40);
+        assert_eq!(clip_line(&format!("a{}", "é".repeat(30))).len(), 39);
     }
 
     #[test]
