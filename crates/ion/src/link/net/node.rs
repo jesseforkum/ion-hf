@@ -55,6 +55,31 @@ impl NetNode {
         &mut self.station
     }
 
+    /// See [`NetStation::set_line`].
+    pub fn set_line(&mut self, line: &str) {
+        self.station.set_line(line);
+    }
+
+    /// See [`NetStation::set_traffic`].
+    pub fn set_traffic(&mut self, traffic: Traffic) {
+        self.station.set_traffic(traffic);
+    }
+
+    /// See [`NetStation::offer`].
+    pub fn offer(&mut self, data: &[u8]) -> ObjectId {
+        self.station.offer(data)
+    }
+
+    /// See [`NetStation::withdraw`].
+    pub fn withdraw(&mut self, id: ObjectId) {
+        self.station.withdraw(id);
+    }
+
+    /// See [`NetStation::take_events`].
+    pub fn take_events(&mut self) -> Vec<NetEvent> {
+        self.station.take_events()
+    }
+
     /// Received 48 kHz audio ending at `now` (ignored while we transmit).
     pub fn push_audio(&mut self, samples: &[f32], now: f64) {
         if self.on_air {

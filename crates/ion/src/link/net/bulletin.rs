@@ -75,7 +75,8 @@ impl NetStation {
     }
 
     /// New bulletin text goes out in blocks of up to [`net_code::MAX_K`]
-    /// pieces; each round, what the members furthest behind lack.
+    /// pieces; each round, what the members furthest behind lack. Then the
+    /// offered objects members are fetching, coded the same way.
     pub(super) fn bulletin_burst(&mut self) -> Option<Outgoing> {
         self.direct().next()?;
         let mut sealed: usize = self.bul_tx.iter().map(|b| b.len).sum();
@@ -88,13 +89,27 @@ impl NetStation {
             });
             sealed += len;
         }
-        let level = self.direct().map(|m| self.down_level(m)).min().unwrap_or(FLOOR);
+        let bul: Vec<usize> = (0..self.bul_tx.len()).map(|b| self.bul_need(b)).collect();
+        let obj = self.obj_needs();
+        if bul.iter().all(|&n| n == 0) && obj.is_empty() {
+            return None;
+        }
+        // Objects alone go at the level the weakest member fetching one can
+        // decode: those that hold them cost nothing.
+        let level = if bul.iter().any(|&n| n > 0) {
+            self.direct().map(|m| self.down_level(m)).min()
+        } else {
+            self.direct()
+                .filter(|m| m.bul.is_some_and(|(b, _)| b >= OBJ_BLOCK))
+                .map(|m| self.down_level(m))
+                .min()
+        }
+        .unwrap_or(FLOOR);
         let size = LADDER[level].frame_bytes();
         let per = pieces_per_frame(Frame::max_payload(size));
         let room = self.room(level, 64);
         let mut frames: Vec<Frame> = Vec::new();
-        for b in 0..self.bul_tx.len() {
-            let need = self.bul_need(b);
+        for (b, &need) in bul.iter().enumerate() {
             let n = need.min((room - frames.len()) * per);
             if n == 0 {
                 continue;
@@ -109,6 +124,20 @@ impl NetStation {
             if frames.len() >= room {
                 break;
             }
+        }
+        for (i, j, need) in obj {
+            if frames.len() >= room {
+                break;
+            }
+            let n = need.min((room - frames.len()) * per);
+            let Some(o) = self.offers[i].as_mut() else { continue };
+            let at = j * BLOCK_BYTES;
+            let data = &o.data[at..at + o.id.block_len(j)];
+            let k = net_code::k_of(data.len()) as u32;
+            frames.extend(bul_frames(obj_block(i, j), data, o.sent[j], n, per));
+            self.stats.obj_pieces += n as u32;
+            self.stats.obj_repairs += (o.sent[j]..o.sent[j] + n as u32).filter(|x| x % 256 >= k).count() as u32;
+            o.sent[j] += n as u32;
         }
         if frames.is_empty() {
             return None;
@@ -136,6 +165,10 @@ impl NetStation {
         let first = f.field as u8;
         let len = u16::from_le_bytes([p[0], p[1]]) as usize;
         if len == 0 || len > BLOCK_BYTES {
+            return;
+        }
+        if block >= OBJ_BLOCK {
+            self.obj_piece(f, block, len);
             return;
         }
         self.bul_known = self.bul_known.max(block + 1);
@@ -169,6 +202,8 @@ impl NetStation {
 
     /// The first bulletin block we lack, and how many pieces short of it we
     /// are (255: we know of it but have none; 0 with no such block: done).
+    /// With every bulletin block, the first block of an offered object we
+    /// lack, numbered from [`OBJ_BLOCK`].
     pub(super) fn bul_status(&self) -> (u16, u8) {
         let mut b = 0u16;
         while self.bul_rx.get(&b).is_some_and(|r| r.data.is_some()) {
@@ -177,7 +212,7 @@ impl NetStation {
         match self.bul_rx.get(&b) {
             Some(r) => (b, r.dec.short().min(254) as u8),
             None if b < self.bul_known => (b, 255),
-            None => (b, 0),
+            None => self.obj_status().unwrap_or((b, 0)),
         }
     }
 }

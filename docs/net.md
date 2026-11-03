@@ -8,9 +8,9 @@ beacon at all) with an occasional "looking for a net" call.
 
 Code: `crates/ion/src/link/net.rs` (`NetStation`, `NetConfig`) and its
 submodules in `crates/ion/src/link/net/`: `wire.rs` (formats), `stream.rs`
-(messages), `ncs.rs`, `member.rs`, `relay.rs`, `bulletin.rs`, `prime.rs`
-(primed receivers, chorus) and `node.rs` (`NetNode`, which adds the
-receivers and audio). `link/net_code.rs` is the bulletin erasure code,
+(messages), `ncs.rs`, `member.rs`, `relay.rs`, `bulletin.rs`, `object.rs`
+(objects by hash), `prime.rs` (primed receivers, chorus) and `node.rs`
+(`NetNode`, which adds the receivers and audio). `link/net_code.rs` is the bulletin erasure code,
 `link/net_sim.rs` an N-station simulator on a model channel, and
 `crates/ion/src/phy_chorus.rs` the chorus waveform. Tests:
 `crates/ion/tests/net.rs` (model channel), `net_audio.rs` (real modulated
@@ -41,6 +41,13 @@ with per-path SNR and fading), `apriori.rs`, `slotted.rs` and `chorus.rs`
   many as the member furthest short lacks.
 - **Capabilities** (rig control, bandwidth, relaying, attended, chorus,
   version) come with the check-in and show in the roster.
+- **Traffic and the check-in line.** Each member lists its traffic (how
+  many items, the most urgent precedence, short time) at check-in and in
+  its reports, and sends a free-text line once. NCS polls Emergency, then
+  Priority, then short-time members first.
+- **Objects by hash.** NCS offers objects (an announcement, say) by their
+  SHA-256. A member that already holds one never costs a piece of it; the
+  others fetch it with the bulletin's coded repair.
 
 What this gives an ARES/RACES-style net: every check-in and report is
 acknowledged; a station NCS cannot hear (or that cannot hear NCS) joins
@@ -68,17 +75,19 @@ it hears.
 | header-only, kind 7 **SubPoll** | relay | polls one of its leaves: slot, cap, burst id |
 | header-only, kind 8 **SubAck** | relay | ACK bitmap for its leaf's burst |
 | control 1 **Beacon** | NCS | NCS call, net name, open flag, window slots, window timing, chorus slots; roster |
-| control 2 **CheckIn** | member | call, SNR it heard the beacon at, caps, protocol, software version |
-| control 3 **Report** | member | how well it hears NCS, bytes still queued, bulletin block and shortfall, direct bytes held, up to 4 (slot, SNR) it hears |
-| control 4 **Overheard** | member | up to 2 stations it heard asking in that NCS has not taken: call, SNR, caps, version |
+| control 2 **CheckIn** | member | call, SNR it heard the beacon at, caps, protocol, software version, traffic |
+| control 3 **Report** | member | how well it hears NCS, bytes still queued, bulletin (or object) block and shortfall, direct bytes held, traffic, objects held, up to 4 (slot, SNR) it hears |
+| control 4 **Overheard** | member | up to 2 stations it heard asking in that NCS has not taken: call, SNR, caps, version, traffic |
 | control 5 **Acks** | NCS | slot ← call assignments |
 | control 6 **RxList** | NCS | the end-of-round received list (below) |
-| control 7 **Seek** | lone station | "looking for a net": call, caps, protocol, version |
+| control 7 **Seek** | lone station | "looking for a net": call, caps, protocol, version, traffic |
 | control 8 **Tree** | NCS | (leaf slot, relay slot) pairs, up to 10 per frame; relay 63 = polled directly |
 | control 9 **Child** | relay | to its leaf: leaf slot and call, relay slot and call, NCS call |
 | control 10 **Kids** | relay | to NCS: per leaf polled this turn, answered (bit 7) and the SNR it is heard at |
+| control 11 **Line** | member (or relay) | one part of a member's check-in line: slot, part, text |
+| control 12 **Offer** | NCS (or relay) | the objects on offer: index of the first entry and the list's length, then 2 × (id, length) |
 | data **Up** | member (or relay) | one message's piece: slot of the *originator*, `field = message number (8 bits) << 16 \| offset in the message` |
-| data **Down**, slot 63 | NCS (or relay) | coded bulletin pieces: `field = block << 8 \| first piece number`, payload `[block length u16][20-byte pieces…]` |
+| data **Down**, slot 63 | NCS (or relay) | coded bulletin pieces: `field = block << 8 \| first piece number`, payload `[block length u16][20-byte pieces…]`; blocks from 0x8000 are object blocks |
 | data **Down**, slot n | NCS (or relay) | member n's direct messages, by byte offset |
 
 - **Control frames** are short-code frames (32 bytes, 22 of payload) in the
@@ -114,9 +123,102 @@ version:
 | 5–6 | reserved (QSY sub-nets) |
 | 7 | takes compressed direct messages (check-in only) |
 
-The check-in also carries the protocol version (`PROTOCOL` = 2) and the
+The check-in also carries the protocol version (`PROTOCOL` = 3) and the
 software version (major and minor, a nibble each). NCS shows all of it in
 the roster (`RosterEntry`), and picks only willing stations as relays.
+
+### Payloads
+
+Control payloads are at most 22 bytes. Multi-byte numbers are little
+endian; SNRs are dB + 24 in one byte.
+
+```text
+CheckIn  [2][call 5][snr][caps][protocol][version][traffic]               11 bytes
+Report   [3][slot][snr][queued u24][block u16][short][direct u24]
+         [traffic][objects][(slot, snr) × 0–4]                         14–22 bytes
+Line     [11][slot | part << 6 | two parts << 7][text, up to 20]          2–22 bytes
+Offer    [12][first | total << 4][(hash 8, length u16) × 1–2]           12 or 22 bytes
+```
+
+### Traffic and the check-in line
+
+**Traffic byte** (`Traffic`), in the check-in, the report, a seek and an
+overheard entry:
+
+| Bits | Meaning |
+|---|---|
+| 0–2 | items listed (0–7, 7 meaning 7 or more) |
+| 3–4 | precedence of the most urgent: 0 Routine, 1 Welfare, 2 Priority, 3 Emergency |
+| 5 | short time ("in and out") |
+| 6–7 | reserved |
+
+- **Changes:** a member's traffic (`NetConfig::traffic`,
+  `NetStation::set_traffic`) goes in its next report. A chorus check-in
+  carries none; it comes with the first report.
+- **In the roster:** NCS keeps the latest in `RosterEntry::traffic` and
+  says `NetEvent::Traffic` when it changes, for leaves too (their reports
+  and overheard entries carry it).
+- **Polling order:** each round NCS polls the members it reaches directly
+  in this order: Emergency, then Priority, then short time, then the rest,
+  each group in slot order. A relay goes as early as its most urgent leaf.
+
+**Check-in line** (`NetConfig::line`, `NetStation::set_line`): free text,
+at most `MAX_LINE` (40) bytes, cut on a character boundary.
+
+- **On the air:** one or two Line frames of up to 20 bytes. The second
+  byte holds the member's slot (bits 0–5), the part (bit 6) and whether
+  there are two parts (bit 7), so a relay can forward a leaf's line as it
+  is.
+- **When:** in the member's first turn with room for it (as with the
+  report, traffic goes first at the floor), each part until NCS
+  acknowledges it, and again when the line changes. An empty line clears
+  it.
+- **At NCS:** `RosterEntry::line` and `NetEvent::Line` once every part has
+  arrived.
+
+### Objects by hash
+
+An object is opaque bytes, up to `MAX_MSG`, named by its `ObjectId`: the
+first 8 bytes of its SHA-256 and its length (20 hex digits, the hash then
+the length). SHA-256 is implemented in the crate (`object.rs`, checked
+against the FIPS vectors).
+
+- **Offers:** `NetStation::offer(data)` at NCS puts it on the offer list
+  (up to `MAX_OFFERS`, 8; when full, the oldest goes); `withdraw(id)` takes
+  it off. NCS sends the list in Offer frames (two entries each, an empty
+  entry for a free index) in its own burst before the round's bulletin
+  pieces, at the level the weakest member it polls can decode. It sends it
+  when the list changed, after every beacon (for late joiners), and in any
+  round in which a member that has every bulletin block reports that it
+  neither holds nor is fetching an offer (it missed the list).
+- **The store:** a member keeps received objects in memory, and in
+  `NetConfig::store` if set, one file per object named by its id. When it
+  hears an offer it holds (in memory, from `NetStation::offer` at a
+  member, or in the store) it hands it to the host as
+  `NetEvent::Object { cached: true }`. A file whose bytes do not match its
+  name is not trusted: the member fetches the object over the air and
+  rewrites the file.
+- **Objects byte** in the report: bit i says the member holds offer i
+  (`RosterEntry::holds`).
+- **Fetching:** an object is cut into blocks of the bulletin code (2 560
+  bytes, at most 26 blocks), numbered `0x8000 | offer << 5 | block` in the
+  bulletin's block space. A member with every bulletin block reports the
+  first object block it lacks, and how short of it it is, in the report's
+  block and shortfall field. NCS sends an object's pieces only while a
+  member it polls reports one of its blocks: all its sources once, for all
+  of them, then each round as many repairs as the member furthest short
+  needs (a member with none of a block counts as lacking every block from
+  there on). Bursts with only object pieces go at the level the weakest
+  fetching member can decode. A member that holds an object never reports
+  it, so it costs no pieces and does not lower the level.
+- **Leaves:** a relay passes the offer list to its leaves (when it changed,
+  or the leaf's report says it missed it) and serves a leaf's object blocks
+  from its own copy, decoded or from its store; NCS sends nothing for a
+  leaf whose relay holds the object.
+- **Checked:** once a member has every block it puts the object together
+  and checks it against the id. A mismatch is dropped
+  (`NetStats::obj_rejected`) and fetched again; a match is stored and
+  handed over as `NetEvent::Object { cached: false }`, once per object.
 
 ### The received list
 
@@ -187,13 +289,15 @@ the block back, so one repair fills a *different* hole at every station
    relay of any new leaf, in the waveform the weakest new member (or, for a
    leaf, its relay) can hear. A leaf learns its slot from its relay's Child
    frame, even when it can hear NCS at the floor.
-3. **Rounds.** NCS polls every member it reaches directly, in slot order.
+3. **Rounds.** NCS polls every member it reaches directly: Emergency,
+   Priority and short-time members first, then the rest, in slot order.
    - **Polling:** a poll goes in the fastest waveform the member reports
      hearing NCS in.
    - **The answer:** a member with nothing to say answers with a
      header-only Idle. Otherwise it sends a burst of up to 6 frames, in
-     order: its report (when something in it changed), stations it heard
-     asking in, what its leaves sent, any traffic NCS named it to relay,
+     order: its report (when something in it changed), its check-in line
+     (until acknowledged), stations it heard asking in, what its leaves
+     sent (their reports and lines), any traffic NCS named it to relay,
      then its own. At the floor, where only one frame fits, traffic goes
      first.
    - **Speed:** each member gear-shifts its own uplink as a link does. It
@@ -205,10 +309,11 @@ the block back, so one repair fills a *different* hole at every station
      4 per turn. Ack ends the turn.
    - **End of the round:** the received list, if it has news. A round in
      which nobody had traffic is followed by a 15 s pause.
-4. **Bulletins.** Once per round, before polling, NCS sends the coded
-   pieces above at the level the weakest member it polls can decode. A
-   message for one member goes just before that member's poll (or its
-   relay's), at its level.
+4. **Bulletins and objects.** Once per round, before polling, NCS sends
+   the offer list when it is due, then the coded pieces above at the level
+   the weakest member it polls can decode, then what members are fetching
+   of the objects on offer. A message for one member goes just before that
+   member's poll (or its relay's), at its level.
 5. **Relays** (the tree has two levels: NCS → relay → leaf).
    - **Finding the net:** a station that has heard no beacon for
      `seek_after_s` (default 6 min) sends a Seek about every `seek_every_s`
@@ -279,8 +384,9 @@ Inside the slot weaker preambles become candidates, and a header that does
 not decode is tested against the expected one; it must also beat every
 other header by 6 nats, so another net's check-in is not taken for ours.
 A check-in frame that does not decode on its own is decoded again with
-priors (`link::apriori`): the check-in format fixes 160 of the frame's 256
-bits, a known caller 40 more, leaving 56 to the channel. The priors are
+priors (`link::apriori`): the check-in format fixes 152 of the frame's 256
+bits, a known caller 40 more, leaving 64 to the channel (protocol 2, before
+the traffic byte, fixed 160 and 200; the tables below were measured then). The priors are
 the check-in format, then each member's call, then each of
 `NetConfig::regulars` (at most 30). Each pass costs one iterative decode
 (a few ms) and still has to pass the frame's CRC-32.
@@ -296,7 +402,7 @@ header, `Expect::alt`); the margin test then runs over every other `user`
 and, for an Idle, every other `extra`, so another member's Idle is not
 taken for the polled one's. A one-frame answer that does not decode is
 decoded again with the layout of a report from that slot (0–4 stations
-heard) as priors.
+heard) as priors (its traffic and objects bytes unknown).
 
 **Calibration.** NCS compares where every decoded check-in and reply
 started with its prediction and keeps a running offset (one for
@@ -313,8 +419,9 @@ timing is unknown), seeks, and the members' own receivers.
 
 **Compatibility.** The beacon's timing and chorus fields come after the
 fields a member without priming reads, and the chorus flag is a caps bit
-such a member ignores. `PROTOCOL` stays 2: the check-in format prior
-assumes that version byte.
+such a member ignores. `PROTOCOL` is 3 since the traffic byte, the line
+and objects (the net has not been on the air, so nothing older is
+understood); the check-in format prior assumes that version byte.
 
 ### Measured (over real modulated audio)
 
@@ -354,6 +461,10 @@ the fraction whose burst the receiver took on the expected-header test:
 
 The 90% point moves about 2.5 dB on AWGN (−12.5 → −15 dB) and about 3.5 dB
 on CCIR poor and NVIS disturbed (−9 → −12.5 dB).
+
+The report prior's gain shrinks a little with protocol 3: the traffic and
+objects bytes are 16 more unknown bits (128 known with nothing heard,
+against 144).
 
 **Polled turns**, a member with nothing to send at the floor (it answers
 with an Idle), polled round after round for 150 s once NCS has heard it at
@@ -489,6 +600,15 @@ the channel model matter there):
 | Its relay goes silent: NCS moves the leaf to the other member that hears it, and its next message gets through (`a_leaf_is_moved_when_its_relay_goes_silent`) | passes |
 | A weak member at −9 dB gets through at the floor while the others run at OFDM levels (`a_weak_station_gets_through_at_the_floor`) | passes |
 | Capability flags reach the roster; with relaying off on the best hearer, NCS names the willing one (`capability_flags_reach_the_roster_and_steer_relays`) | passes |
+| Traffic (with the check-in) and a 40-byte line reach the roster and events, and changes come with the next report (`traffic_and_lines_reach_the_roster`) | passes |
+| A leaf's line and traffic reach NCS through its relay (`a_leafs_line_and_traffic_come_through_its_relay`) | passes |
+| Emergency, then Priority, then short time, then slot order (`priority_and_emergency_members_are_polled_first`) | passes |
+| A 6 011-byte object to 3 members (`an_offered_object_reaches_every_member_once`) | 102 s, 301 pieces (its sources, no repairs), one `Object` each |
+| All 3 hold it in their store (`a_member_that_holds_the_object_costs_no_pieces`) | 0 pieces; with one lacking it, 301 |
+| A member that joins after the others have it (`a_late_joiner_gets_the_object`) | gets it: 301 more pieces |
+| A store copy that does not match its id (`a_store_copy_that_does_not_match_its_id_is_not_trusted`) | fetched over the air, file rewritten |
+| An object to a leaf (`an_object_reaches_a_leaf_through_its_relay`) | its relay serves it |
+| Pieces that do not hash to the offer's id (`an_object_that_does_not_match_its_id_is_rejected`, unit test) | rejected, never stored or handed over |
 
 Over real modulated audio, `tests/net_audio.rs` runs NCS and two members
 (`a_net_over_real_audio`) and a four-station net with a leaf
@@ -554,4 +674,14 @@ The pieces are shaped for them:
   settles between them if they differ.
 - **Primed timing assumes stable latencies.** NCS learns the mean offset;
   jitter beyond ±60 ms (`slot_tol_s`) falls back to blind reception.
+- **One object block at a time per member,** after every bulletin block,
+  as for bulletins; only a member with none of a block is counted as
+  lacking all the blocks after it.
+- **The offer list repeats** each round while a member that has
+  everything else neither holds nor fetches an offer. A member whose
+  report cannot get out (at the floor, with traffic queued) keeps it
+  repeating until it does.
+- **Offer indices are reused** after a withdrawal: pieces of the old
+  object that reach a member which has not heard the new list fail the id
+  check and are fetched again.
 - **Not tried on the air,** like the rest of Ion.
