@@ -89,7 +89,7 @@ NET HEARD call up_db down_db
 NET MISSED call
 NET RELAY call VIA call
 NET ROUTE call VIA call | NET ROUTE call DIRECT
-NET OBJECT id len [CACHED]
+NET OBJECT id [CACHED]
 NET CLOSED
 ```
 
@@ -100,7 +100,16 @@ NET CLOSED
   for net control when sent by a member.
 - To the host, both are filled in; an empty `to` was a bulletin.
 - An object comes to the host as a frame with `to` = `#` followed by the
-  id in hex, after its `NET OBJECT` line.
+  id in hex (20 digits, `ObjectId`'s `Display`), after its `NET OBJECT`
+  line.
+
+As built (`crates/ionhf/src/host.rs`, documented in `docs/app.md`): the
+other commands answer `OK` or `WRONG`; `NET OPEN` and `NET JOIN` are
+`WRONG` while a link is called or up, and `CONNECT` while a net is up;
+`NET CLOSED` also comes when a net is refused, left or dropped. A member
+addresses only net control. Messages overheard between other stations
+are not passed on. The net outlives the command client; the next one
+attaches with `NET OPEN` or `NET JOIN`.
 
 The engine side (`ion_engine.rs`) ports the private prototype's
 `IonCmd::Net*`, `NetStatus` and `NetEvent` handling to ion-hf's newer net

@@ -2,6 +2,7 @@
 //! bulletins, and a box to send.
 
 use eframe::egui::{self, Margin, RichText};
+use ion::link::net::Precedence;
 
 use crate::app::{App, NetLine};
 use crate::ion_engine::IonCmd;
@@ -109,8 +110,8 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                 },
             ),
             ("Line", if n.line.is_empty() { dash() } else { n.line.clone() }),
-            ("Traffic", n.traffic.to_string()),
-            ("Offers", n.offers.to_string()),
+            ("Traffic", crate::ion_engine::traffic_words(n.traffic)),
+            ("Offers", n.offers.len().to_string()),
         ];
         egui::Grid::new("net_kv")
             .num_columns(2)
@@ -156,17 +157,28 @@ fn roster(app: &mut App, ui: &mut egui::Ui) {
         let mut to: Option<String> = None;
         egui::ScrollArea::vertical().id_salt("roster").show(ui, |ui| {
             egui::Grid::new("roster_rows")
-                .num_columns(8)
+                .num_columns(10)
                 .spacing([18.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    for h in ["Slot", "Call", "Up", "Down", "Via", "Level", "Missed", ""] {
+                    for h in [
+                        "Slot", "Call", "Line", "Traffic", "Up", "Down", "Via", "Level", "Missed", "",
+                    ] {
                         caption(ui, h);
                     }
                     ui.end_row();
                     for r in &n.roster {
                         ui.label(RichText::new(r.slot.to_string()).monospace().color(theme::MUTED));
                         ui.label(RichText::new(&r.call).monospace().strong());
+                        ui.label(&r.line);
+                        let tc = match r.traffic.precedence {
+                            _ if r.traffic.items == 0 => theme::MUTED,
+                            Precedence::Emergency => theme::BAD,
+                            Precedence::Priority => theme::WARN,
+                            _ => theme::TEXT,
+                        };
+                        let words = crate::ion_engine::traffic_words(r.traffic);
+                        ui.label(RichText::new(words).monospace().color(tc));
                         ui.label(RichText::new(db(r.snr_up)).monospace());
                         ui.label(RichText::new(db(r.snr_down)).monospace());
                         ui.label(

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use ion::link::bcast::{BcastConfig, BcastEvent, BcastStation};
-use ion::link::net::{Caps, NetConfig, NetEvent, NetNode, RosterEntry};
+use ion::link::net::{Caps, MAX_LINE, NetConfig, NetEvent, NetNode, ObjectId, Precedence, RosterEntry, Traffic};
 use ion::link::node::{DEFAULT_LEAD_S, NodeAir};
 use ion::link::{Air, Gear, Node, Role, State};
 
@@ -100,70 +100,42 @@ pub enum IonCmd {
     NetClose,
     /// What we announce at check-in, from the next net on.
     NetCaps(Caps),
-    /// The check-in line, at most [`NET_LINE_MAX`] bytes.
+    /// The check-in line, at most [`MAX_LINE`] bytes (empty: none).
     NetLine(String),
-    /// The traffic we list at check-in.
-    NetTraffic(NetTraffic),
+    /// The traffic we list.
+    NetTraffic(Traffic),
     /// Net control: an object to offer the net.
     NetOffer(Vec<u8>),
+    /// Where a member keeps the objects it receives, from the next net on
+    /// (`None`: only while in the net).
+    NetStore(Option<std::path::PathBuf>),
 }
 
-/// Longest check-in line (docs/ion-net.md, Wire changes).
-pub const NET_LINE_MAX: usize = 40;
-
-/// Precedence of listed traffic, most urgent last.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Precedence {
-    #[default]
-    Routine,
-    Welfare,
-    Priority,
-    Emergency,
+/// R, W, P or E, as the host interface writes a precedence.
+pub fn precedence_letter(p: Precedence) -> char {
+    match p {
+        Precedence::Routine => 'R',
+        Precedence::Welfare => 'W',
+        Precedence::Priority => 'P',
+        Precedence::Emergency => 'E',
+    }
 }
 
-impl Precedence {
-    pub const ALL: [Precedence; 4] = [
+pub fn precedence_of(letter: &str) -> Option<Precedence> {
+    [
         Precedence::Routine,
         Precedence::Welfare,
         Precedence::Priority,
         Precedence::Emergency,
-    ];
-
-    /// R, W, P or E, as the host interface writes it.
-    pub fn letter(self) -> char {
-        match self {
-            Precedence::Routine => 'R',
-            Precedence::Welfare => 'W',
-            Precedence::Priority => 'P',
-            Precedence::Emergency => 'E',
-        }
-    }
-
-    pub fn from_letter(c: &str) -> Option<Precedence> {
-        Self::ALL
-            .into_iter()
-            .find(|p| c.len() == 1 && c.starts_with(p.letter()))
-    }
+    ]
+    .into_iter()
+    .find(|&p| letter.len() == 1 && letter.starts_with(precedence_letter(p)))
 }
 
-/// Traffic a member lists at check-in: how many items, the precedence of
-/// the most urgent, and short time ("in and out").
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NetTraffic {
-    pub items: u8,
-    pub precedence: Precedence,
-    pub short: bool,
-}
-
-impl std::fmt::Display for NetTraffic {
-    /// "2 P SHORT", as `NET TRAFFIC` takes it.
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} {}", self.items, self.precedence.letter())?;
-        if self.short {
-            write!(f, " SHORT")?;
-        }
-        Ok(())
-    }
+/// "2 P SHORT", as `NET TRAFFIC` writes traffic.
+pub fn traffic_words(t: Traffic) -> String {
+    let short = if t.short { " SHORT" } else { "" };
+    format!("{} {}{short}", t.items, precedence_letter(t.precedence))
 }
 
 /// The net as the UI and the host interface see it.
@@ -191,10 +163,11 @@ pub struct NetStatus {
     /// Net control closed it (its Close bursts may still be going out).
     pub closed: bool,
     pub rounds: u32,
-    /// Our check-in line and traffic, and the objects we offer.
+    /// Our check-in line and traffic.
     pub line: String,
-    pub traffic: NetTraffic,
-    pub offers: usize,
+    pub traffic: Traffic,
+    /// The objects on offer (a member: as last heard).
+    pub offers: Vec<ObjectId>,
 }
 
 #[derive(Clone, Debug)]
@@ -358,8 +331,8 @@ struct Worker {
     net_close_sent: u32,
     net_caps: Caps,
     net_line: String,
-    net_traffic: NetTraffic,
-    net_offers: Vec<Vec<u8>>,
+    net_traffic: Traffic,
+    net_store: Option<std::path::PathBuf>,
 }
 
 impl Worker {
@@ -398,8 +371,8 @@ impl Worker {
             net_close_sent: 0,
             net_caps: Caps::default(),
             net_line: String::new(),
-            net_traffic: NetTraffic::default(),
-            net_offers: Vec::new(),
+            net_traffic: Traffic::default(),
+            net_store: None,
         }
     }
 
@@ -517,13 +490,15 @@ impl Worker {
         }
         let mut cfg = NetConfig::new(&self.call, &name, ncs);
         cfg.caps = self.net_caps;
+        cfg.line = self.net_line.clone();
+        cfg.traffic = self.net_traffic;
+        cfg.store = self.net_store.clone();
         self.net_max_burst_s = cfg.max_burst_s;
         self.net_tx_end = self.now();
         self.net_close_sent = 0;
         let mut n = NetNode::new(cfg, DEFAULT_LEAD_S);
         n.set_ofdm_gain_db(self.ofdm_db);
         self.net = Some(n);
-        self.apply_net_prefs();
         self.note(match (ncs, name.is_empty()) {
             (true, _) => format!("Ion net {name}: net control"),
             (false, true) => "Ion net: joining the first net heard".to_string(),
@@ -543,7 +518,6 @@ impl Worker {
             events.push(NetEvent::Closed);
         }
         self.forward_net(events);
-        self.net_offers.clear();
         if id && self.keyed_since_id && self.id_due.is_none() && !self.id_on_air {
             self.id_due = Some(self.now());
         }
@@ -557,12 +531,12 @@ impl Worker {
         }
     }
 
-    /// The check-in line, the traffic listed and the objects offered: the
-    /// one place they reach the net, once `crates/ion` takes them
-    /// (`NetStation::set_line`, `set_traffic`, `offer`; docs/ion-net.md,
-    /// Wire changes). Until then they show in [`NetStatus`] only.
+    /// A new check-in line or traffic, to the net we are in (the next one
+    /// takes them at check-in).
     fn apply_net_prefs(&mut self) {
-        let Some(_net) = self.net.as_mut() else { return };
+        let Some(n) = self.net.as_mut() else { return };
+        n.set_line(&self.net_line);
+        n.set_traffic(self.net_traffic);
     }
 
     /// The net is over: net control's once its Close bursts have gone (our
@@ -629,7 +603,7 @@ impl Worker {
             rounds: s.stats.rounds,
             line: self.net_line.clone(),
             traffic: self.net_traffic,
-            offers: self.net_offers.len(),
+            offers: s.offers().into_iter().flatten().collect(),
         })
     }
 
@@ -679,7 +653,7 @@ impl Worker {
             IonCmd::NetCaps(c) => self.net_caps = c,
             IonCmd::NetLine(line) => {
                 let mut line = line.trim().to_string();
-                while line.len() > NET_LINE_MAX {
+                while line.len() > MAX_LINE {
                     line.pop();
                 }
                 self.net_line = line;
@@ -689,14 +663,14 @@ impl Worker {
                 self.net_traffic = t;
                 self.apply_net_prefs();
             }
-            IonCmd::NetOffer(data) => {
-                if self.net.as_ref().is_some_and(|n| n.station().is_ncs()) {
-                    self.net_offers.push(data);
-                    self.apply_net_prefs();
-                } else {
-                    self.note("! only net control offers objects");
+            IonCmd::NetOffer(data) => match self.net.as_mut().filter(|n| n.station().is_ncs()) {
+                Some(n) => {
+                    let id = n.offer(&data);
+                    self.note(format!("Ion net: offering {id}"));
                 }
-            }
+                None => self.note("! only net control offers objects"),
+            },
+            IonCmd::NetStore(dir) => self.net_store = dir,
             _ => {}
         }
     }

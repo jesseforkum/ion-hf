@@ -29,13 +29,16 @@
 //! frame on the net's port is an object to offer) and `NET CLOSE` (net
 //! control: close the net; member: leave), each `OK` or `WRONG`. Events:
 //! `NET JOINED ncs net slot`, `NET IN call slot [VIA call]`,
+//! `NET LINE call text`, `NET TRAFFIC call n R|W|P|E [SHORT]`,
 //! `NET HEARD call up_db down_db` (net control, as the roster changes;
 //! `-` not known yet), `NET MISSED call`, `NET RELAY call VIA call`,
-//! `NET ROUTE call VIA call|DIRECT`, `NET CLOSED`. Frames on the net's
+//! `NET ROUTE call VIA call|DIRECT`, `NET OBJECT id [CACHED]` (`id`: 20
+//! hex digits, `ObjectId`), `NET CLOSED`. Frames on the net's
 //! port (KISS data) carry `[to length][to][from length][from][data]`, both
 //! ways: from the host `from` is empty and an empty `to` is the whole net
 //! (net control: a bulletin; member: traffic for net control); to the host
-//! both are filled in and an empty `to` was a bulletin. Messages overheard
+//! both are filled in, an empty `to` was a bulletin and `#id` an object
+//! (after its `NET OBJECT` line). Messages overheard
 //! between other stations are not passed on. `CONNECT` is `WRONG` while a
 //! net is up. When the command client goes the net keeps running (the Net
 //! screen shows it) and a new client attaches to it with `NET OPEN` or
@@ -60,7 +63,9 @@ use ion::link::net::NetEvent;
 use ion::link::station::End;
 
 use crate::engine::UiEvent;
-use crate::ion_engine::{IonCmd, IonStatus, NetTraffic, Precedence};
+use ion::link::net::Traffic;
+
+use crate::ion_engine::{IonCmd, IonStatus, precedence_of, traffic_words};
 
 /// Data2G's words for why a link ended (`DISCONNECTED reason [detail]
 /// [unconfirmed]`).
@@ -104,7 +109,7 @@ enum NetCmd {
     Join(String),
     Checkins(bool),
     Line(String),
-    Traffic(NetTraffic),
+    Traffic(Traffic),
     Offer,
     Close,
 }
@@ -122,9 +127,9 @@ fn parse_net(text: &str) -> Option<NetCmd> {
             let line = rest.split_once(char::is_whitespace).map_or("", |(_, t)| t.trim());
             Some(NetCmd::Line(line.to_string()))
         }
-        ["NET", "TRAFFIC", n, p, rest @ ..] if matches!(rest, [] | ["SHORT"]) => Some(NetCmd::Traffic(NetTraffic {
+        ["NET", "TRAFFIC", n, p, rest @ ..] if matches!(rest, [] | ["SHORT"]) => Some(NetCmd::Traffic(Traffic {
             items: n.parse().ok()?,
-            precedence: Precedence::from_letter(p)?,
+            precedence: precedence_of(p)?,
             short: !rest.is_empty(),
         })),
         ["NET", "OFFER"] => Some(NetCmd::Offer),
@@ -359,6 +364,8 @@ struct Host {
     net_ncs: bool,
     /// A net is up (the client's, or one started on the screen).
     net_up: bool,
+    /// Its net control, who objects come from.
+    net_ncs_call: String,
     /// The next frame on the net's port is an object to offer.
     offer_next: bool,
     /// S/N last told with `NET HEARD`, rounded to dB, by call.
@@ -393,6 +400,7 @@ impl Host {
             net_port: None,
             net_ncs: false,
             net_up: false,
+            net_ncs_call: String::new(),
             offer_next: false,
             net_heard: std::collections::BTreeMap::new(),
         }
@@ -747,7 +755,19 @@ impl Host {
     fn net_event(&mut self, e: NetEvent) {
         let Some(p) = self.net_port else { return };
         match e {
-            NetEvent::Joined { ncs, net, slot } => self.say(&format!("NET JOINED {ncs} {net} {slot}")),
+            NetEvent::Joined { ncs, net, slot } => {
+                self.say(&format!("NET JOINED {ncs} {net} {slot}"));
+                self.net_ncs_call = ncs;
+            }
+            NetEvent::Line { call, line } => self.say(format!("NET LINE {call} {line}").trim_end()),
+            NetEvent::Traffic { call, traffic } => {
+                self.say(&format!("NET TRAFFIC {call} {}", traffic_words(traffic)));
+            }
+            NetEvent::Object { id, data, cached } => {
+                self.say(&format!("NET OBJECT {id}{}", if cached { " CACHED" } else { "" }));
+                let frame = net_frame(&format!("#{id}"), &self.net_ncs_call, &data);
+                self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &frame));
+            }
             NetEvent::CheckedIn { call, slot, via } => {
                 let via = via.map(|v| format!(" VIA {v}")).unwrap_or_default();
                 self.say(&format!("NET IN {call} {slot}{via}"));
@@ -837,6 +857,9 @@ impl Host {
             && self.net_port.is_some()
         {
             self.net_ncs = n.ncs;
+            if let Some(c) = &n.ncs_call {
+                self.net_ncs_call.clone_from(c);
+            }
             self.net_heard(n);
         }
         let state = s.state;
@@ -910,7 +933,7 @@ mod tests {
     fn net_commands_parse() {
         use NetCmd::*;
         let t = |items, precedence, short| {
-            Some(Traffic(NetTraffic {
+            Some(Traffic(ion::link::net::Traffic {
                 items,
                 precedence,
                 short,
@@ -931,10 +954,16 @@ mod tests {
             ),
             ("net line  w5abc portable", Some(Line("w5abc portable".into()))),
             ("NET LINE", Some(Line(String::new()))),
-            ("NET TRAFFIC 2 P SHORT", t(2, Precedence::Priority, true)),
-            ("NET TRAFFIC 0 R", t(0, Precedence::Routine, false)),
-            ("net traffic 7 e short", t(7, Precedence::Emergency, true)),
-            ("NET TRAFFIC 1 W", t(1, Precedence::Welfare, false)),
+            (
+                "NET TRAFFIC 2 P SHORT",
+                t(2, ion::link::net::Precedence::Priority, true),
+            ),
+            ("NET TRAFFIC 0 R", t(0, ion::link::net::Precedence::Routine, false)),
+            (
+                "net traffic 7 e short",
+                t(7, ion::link::net::Precedence::Emergency, true),
+            ),
+            ("NET TRAFFIC 1 W", t(1, ion::link::net::Precedence::Welfare, false)),
             ("NET TRAFFIC 1 X", None),
             ("NET TRAFFIC 1 PR", None),
             ("NET TRAFFIC 1 E LONG", None),
@@ -1032,9 +1061,9 @@ mod tests {
                 IonCmd::NetStart("TNARES".into()),
                 IonCmd::NetCheckins(false),
                 IonCmd::NetLine("Trousdale County ARES".into()),
-                IonCmd::NetTraffic(NetTraffic {
+                IonCmd::NetTraffic(Traffic {
                     items: 2,
-                    precedence: Precedence::Priority,
+                    precedence: ion::link::net::Precedence::Priority,
                     short: true,
                 }),
                 IonCmd::NetOffer(b"the announcement".to_vec()),
@@ -1076,6 +1105,22 @@ mod tests {
                 data: b"not ours".to_vec(),
                 overheard: true,
             },
+            NetEvent::Line {
+                call: "KJ5ET".into(),
+                line: "Trousdale County ARES".into(),
+            },
+            NetEvent::Line {
+                call: "KJ5ET".into(),
+                line: String::new(),
+            },
+            NetEvent::Traffic {
+                call: "AG5B".into(),
+                traffic: Traffic {
+                    items: 3,
+                    precedence: ion::link::net::Precedence::Emergency,
+                    short: true,
+                },
+            },
         ];
         for e in events {
             h.net_event(e);
@@ -1086,6 +1131,9 @@ mod tests {
             "NET MISSED KJ5ET",
             "NET RELAY W5FAR VIA AG5B",
             "NET ROUTE W5FAR DIRECT",
+            "NET LINE KJ5ET Trousdale County ARES",
+            "NET LINE KJ5ET",
+            "NET TRAFFIC AG5B 3 E SHORT",
         ] {
             assert_eq!(said.next(), want);
         }
@@ -1097,6 +1145,31 @@ mod tests {
             net_unframe(&frames[0].1),
             Some(("N0JLF".into(), "KJ5ET".into(), &b"all well"[..]))
         );
+
+        // An object, as a member gets it: its line, then its frame.
+        h.net_event(NetEvent::Joined {
+            ncs: "N0JLF".into(),
+            net: "TNARES".into(),
+            slot: 3,
+        });
+        assert_eq!(said.next(), "NET JOINED N0JLF TNARES 3");
+        let data = b"# TNARES\nFrequency 3.975 MHz".to_vec();
+        let id = ion::link::net::ObjectId::of(&data);
+        for cached in [false, true] {
+            h.net_event(NetEvent::Object {
+                id,
+                data: data.clone(),
+                cached,
+            });
+        }
+        assert_eq!(said.next(), format!("NET OBJECT {id}"));
+        assert_eq!(said.next(), format!("NET OBJECT {id} CACHED"));
+        assert_eq!(id.to_string().len(), 20);
+        let mut out = std::mem::take(&mut h.kiss_out);
+        let frames = kiss_frames(&mut out);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        let to = format!("#{id}");
+        assert_eq!(net_unframe(&frames[1].1), Some((to, "N0JLF".into(), &data[..])));
 
         let mut net = crate::ion_engine::NetStatus {
             ncs: true,
@@ -1116,6 +1189,9 @@ mod tests {
             caps: None,
             version: None,
             children: Vec::new(),
+            line: String::new(),
+            traffic: Traffic::default(),
+            holds: 0,
         };
         for (up, down) in [(Some(4.2), None), (Some(4.4), None), (Some(5.6), Some(-3.0))] {
             net.roster = vec![entry(up, down)];

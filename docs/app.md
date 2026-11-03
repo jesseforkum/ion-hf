@@ -231,10 +231,13 @@ Events, as they happen:
 |---|---|
 | `NET JOINED ncs net slot` | we are in the net, as `slot` |
 | `NET IN call slot [VIA call]` | a station checked in (through another, `VIA`) |
+| `NET LINE call text` | net control: a member's check-in line, new or changed (no text: none) |
+| `NET TRAFFIC call n R\|W\|P\|E [SHORT]` | net control: the traffic a member lists, new or changed |
 | `NET HEARD call up_db down_db` | net control: how it hears a member and how the member hears it, when either moves a dB; `-` not known yet |
 | `NET MISSED call` | net control: a member did not answer its poll |
 | `NET RELAY call VIA call` | net control: traffic or a check-in came through another member |
 | `NET ROUTE call VIA call` / `NET ROUTE call DIRECT` | net control: a station's route changed |
+| `NET OBJECT id [CACHED]` | member: an object net control offers, its frame next; `id` is 20 hex digits (the first 8 bytes of its SHA-256, then its length); `CACHED`: it was held already and cost no airtime |
 | `NET CLOSED` | the net closed, we left it, or it was refused (no call, a link up) |
 
 - Frames on the net's port (KISS data, command 0) carry a header both
@@ -242,16 +245,19 @@ Events, as they happen:
   the host `from` is empty (Ion puts in its own call) and an empty `to`
   is the whole net: a bulletin from net control, traffic for net control
   from a member. Net control may address one member; a member only net
-  control. To the host both are filled in; an empty `to` was a bulletin.
+  control. To the host both are filled in; an empty `to` was a bulletin,
+  and `#` and the id an object.
   Messages overheard between other stations are not passed on.
 - `NET OPEN` or `NET JOIN` while a net is up (the client's, or one
   started on the Net screen) answers that net's port.
 - When the command client goes, the net keeps running; the next client
   attaches with `NET OPEN` or `NET JOIN`.
-- The check-in line, traffic and offered objects are kept and shown, but
-  do not reach the air until Ion's net protocol carries them
-  ([ion-net.md](ion-net.md), Wire changes); `NET LINE`, `NET TRAFFIC` and
-  `NET OBJECT` events come with that.
+- `NET LINE` and `NET TRAFFIC` hold from one net to the next: set them
+  before `NET JOIN` and they go with the check-in. Net control offers up
+  to 8 objects at once (the oldest goes); each goes on the air only while
+  a member lacks it. Ion HF keeps received objects in `nets/objects/` in
+  its settings folder, one file per id, so one offered again costs
+  nothing.
 - Net control sends its CW ID once the Close bursts are over, a member
   after net control's (members in slot order), and both at least every
   570 s, right after a burst of their own.

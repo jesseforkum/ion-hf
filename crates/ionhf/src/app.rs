@@ -146,6 +146,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         let _ = cmds.send(IonCmd::SetStream(cfg.stream));
+        let _ = cmds.send(IonCmd::NetStore(Some(Config::dir().join("nets").join("objects"))));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
             let _ = lb.send(LoopCmd::IonPeer(true));
@@ -350,6 +351,14 @@ impl App {
                 Some(v) => self.net_note(format!("{call} via {v}")),
                 None => self.net_note(format!("{call} direct")),
             },
+            NetEvent::Line { call, line } => self.net_note(format!("{call}: {line}")),
+            NetEvent::Traffic { call, traffic } => {
+                self.net_note(format!("{call} traffic {}", crate::ion_engine::traffic_words(traffic)))
+            }
+            NetEvent::Object { id, data, cached } => {
+                let held = if cached { ", held" } else { "" };
+                self.net_note(format!("Object {id}, {}{held}", theme::bytes(data.len() as u64)));
+            }
             NetEvent::Closed => self.net_note("Closed".into()),
         }
     }

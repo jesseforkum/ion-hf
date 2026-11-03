@@ -519,8 +519,8 @@ fn net_until(cs: &mut [NetClient], secs: u64, done: impl Fn(&[NetClient]) -> boo
 
 /// A net on the simulated band (`sim`), in real time, driven only through
 /// each station's host interface: N0NCS runs TNARES, KJ5ET and AG5B join
-/// it and check in, their traffic reaches net control and its bulletin
-/// reaches them, and the Close reaches them too. About 3 minutes of three
+/// it and check in with a line and traffic listed, their traffic reaches
+/// net control, and its object and bulletin reach them, and the Close too. About 3 minutes of three
 /// stations decoding: `cargo test -p ionhf -- --ignored a_net_runs`.
 #[test]
 #[ignore]
@@ -544,12 +544,20 @@ fn a_net_runs_over_the_host_interface() {
     for (c, call) in cs.iter_mut().zip(calls) {
         c.send(&format!("MYCALL {call}"));
     }
+    cs[1].send("NET LINE Trousdale County ARES");
+    cs[2].send("NET TRAFFIC 1 P");
     for c in &mut cs[1..] {
         c.send("NET JOIN TNARES");
     }
     cs[0].send("NET OPEN TNARES");
-    let ok = net_until(&mut cs, 10, |cs| cs.iter().all(|c| c.said("NET PORT 1")));
+    cs[0].send("NET OFFER");
+    let ok = net_until(&mut cs, 10, |cs| {
+        cs.iter().all(|c| c.said("NET PORT 1")) && cs[0].said.iter().filter(|l| *l == "OK").count() >= 2
+    });
     assert!(ok, "{:?}", cs.iter().map(|c| &c.said).collect::<Vec<_>>());
+    let announcement = b"# TNARES\nNet control N0NCS, 3.975 MHz".to_vec();
+    let id = ion::link::net::ObjectId::of(&announcement);
+    cs[0].frame("", &announcement);
     cs[0].frame("", b"Net closes at 2130. de N0NCS");
     cs[1].frame("", b"KJ5ET: no traffic, all well");
     cs[2].frame("N0NCS", b"AG5B: generator test complete");
@@ -558,6 +566,11 @@ fn a_net_runs_over_the_host_interface() {
     let ok = net_until(&mut cs, 600, |cs| {
         cs[0].said_like("NET IN KJ5ET ")
             && cs[0].said_like("NET IN AG5B ")
+            && cs[0].said("NET LINE KJ5ET Trousdale County ARES")
+            && cs[0].said("NET TRAFFIC AG5B 1 P")
+            && cs[1..]
+                .iter()
+                .all(|c| c.said(&format!("NET OBJECT {id}")) && c.got(&format!("#{id}"), "N0NCS", &announcement))
             && cs[0].got("N0NCS", "KJ5ET", b"KJ5ET: no traffic, all well")
             && cs[0].got("N0NCS", "AG5B", b"AG5B: generator test complete")
             && cs[1..]
