@@ -449,11 +449,12 @@ impl NetApp {
             id,
             until: now_s + CLOSE_WAIT_S,
         });
-        let mut cmds = vec![IonCmd::NetCheckins(false)];
+        // Offered before the announcement goes, so it takes an index no
+        // report in flight can claim it holds.
+        let mut cmds = vec![IonCmd::NetCheckins(false), IonCmd::NetOffer(bytes)];
         if let Some(old) = self.offered.take() {
             cmds.push(IonCmd::NetWithdraw(old));
         }
-        cmds.push(IonCmd::NetOffer(bytes));
         cmds
     }
 
@@ -794,9 +795,8 @@ mod tests {
         assert!(matches!(&cmds[1], IonCmd::NetOffer(_)));
 
         let cmds = a.close(10.0);
-        let IonCmd::NetOffer(sum) = cmds.last().unwrap() else {
-            panic!()
-        };
+        let IonCmd::NetOffer(sum) = &cmds[1] else { panic!() };
+        assert!(matches!(cmds[2], IonCmd::NetWithdraw(_)));
         let Record::Summary(s) = Record::decode(sum) else {
             panic!()
         };

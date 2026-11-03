@@ -201,7 +201,8 @@ In `crates/ionhf`: `net_doc.rs` (records), `markdown.rs`, `net_log.rs`,
   announcement as `NetOffer`. An edit to the profile is offered again
   when the field is left (or a choice made), the old one withdrawn
   (`NetWithdraw`), so members never fetch stale versions. Close stops
-  check-ins, withdraws the announcement, offers the summary and closes
+  check-ins, offers the summary, then withdraws the announcement (so the
+  summary takes an index no report in flight claims to hold), and closes
   once every roster entry's `holds` has it, after 180 s, or at once with
   no members (**Now** closes at once).
 - **Member.** The form's traffic is queued until `NetEvent::Joined` and
