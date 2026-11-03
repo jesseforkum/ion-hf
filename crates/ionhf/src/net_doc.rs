@@ -105,7 +105,15 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 7] = [Mode::Ion, Mode::Usb, Mode::Lsb, Mode::Fm, Mode::Cw, Mode::Am, Mode::Mixed];
+    pub const ALL: [Mode; 7] = [
+        Mode::Ion,
+        Mode::Usb,
+        Mode::Lsb,
+        Mode::Fm,
+        Mode::Cw,
+        Mode::Am,
+        Mode::Mixed,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -289,7 +297,11 @@ pub fn clip(s: &str, max: usize) -> &str {
 
 /// The first line of `text`, cut to [`MAX_SUBJECT`] bytes.
 pub fn subject(text: &str) -> String {
-    clip(text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim(), MAX_SUBJECT).to_string()
+    clip(
+        text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim(),
+        MAX_SUBJECT,
+    )
+    .to_string()
 }
 
 fn flags(p: Precedence, to: To) -> u8 {
@@ -447,15 +459,9 @@ fn decode_announcement(b: &[u8]) -> Option<Announcement> {
             unpack_call(r.take(5)?)
         };
     }
-    for (i, v) in [
-        &mut a.freq_hz,
-        &mut a.backup_hz,
-        &mut a.start,
-        &mut a.end,
-        &mut a.next,
-    ]
-    .into_iter()
-    .enumerate()
+    for (i, v) in [&mut a.freq_hz, &mut a.backup_hz, &mut a.start, &mut a.end, &mut a.next]
+        .into_iter()
+        .enumerate()
     {
         if fields & A_FREQ << i != 0 {
             *v = Some(r.u32()?);
@@ -678,7 +684,10 @@ impl Announcement {
         row("End", self.end.map(minutes_text).unwrap_or_default());
         row("Next", self.next.map(minutes_text).unwrap_or_default());
         row("Mode", self.mode.map(|m| m.name().to_string()).unwrap_or_default());
-        row("Purpose", self.purpose.map(|p| p.name().to_string()).unwrap_or_default());
+        row(
+            "Purpose",
+            self.purpose.map(|p| p.name().to_string()).unwrap_or_default(),
+        );
         s.push('\n');
         s.push_str(&self.body);
         s
@@ -718,11 +727,17 @@ mod tests {
 
     #[test]
     fn plain_bytes_are_text() {
-        assert_eq!(Record::decode(b"KJ5ET: all well"), Record::Text("KJ5ET: all well".into()));
+        assert_eq!(
+            Record::decode(b"KJ5ET: all well"),
+            Record::Text("KJ5ET: all well".into())
+        );
         assert_eq!(Record::decode(b""), Record::Text(String::new()));
         // Our magic with a type we do not know, or cut short.
         assert!(matches!(Record::decode(&[0xFF, b'I', 99, 1]), Record::Text(_)));
-        assert!(matches!(Record::decode(&[0xFF, b'I', T_ANNOUNCE, 0xFF]), Record::Text(_)));
+        assert!(matches!(
+            Record::decode(&[0xFF, b'I', T_ANNOUNCE, 0xFF]),
+            Record::Text(_)
+        ));
         assert!(matches!(Record::decode(&[0xFF, b'I']), Record::Text(_)));
     }
 

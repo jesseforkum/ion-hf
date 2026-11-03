@@ -833,9 +833,14 @@ pub(crate) mod tests {
         // The head, 2 check-ins, an item, a bulletin and a missed poll; the
         // item's and the bulletin's text hold a line break each.
         assert_eq!(lines.len(), 1 + 2 + 1 + 1 + 1 + 2);
-        assert!(lines[1].starts_with("2026-11-03 01:00:40Z,checkin,KJ5ET,N0JLF,,,,0 R,"), "{csv}");
         assert!(
-            csv.contains("message,AG5B,N0JLF,Priority,Handled,,,\"Shelter open, 40 cots\nNeed water, \"\"bottled\"\"\""),
+            lines[1].starts_with("2026-11-03 01:00:40Z,checkin,KJ5ET,N0JLF,,,,0 R,"),
+            "{csv}"
+        );
+        assert!(
+            csv.contains(
+                "message,AG5B,N0JLF,Priority,Handled,,,\"Shelter open, 40 cots\nNeed water, \"\"bottled\"\"\""
+            ),
             "{csv}"
         );
         assert!(csv.contains("missed,N0JLF,W5XYZ"), "{csv}");
@@ -844,7 +849,10 @@ pub(crate) mod tests {
         let l: Vec<&str> = ics.lines().collect();
         assert_eq!(l[0], "COMMUNICATIONS LOG (ICS 309)");
         assert_eq!(l[1], "1. Incident Name: TNARES");
-        assert_eq!(l[2], "2. Operational Period: From 2026-11-03 01:00:00Z To 2026-11-03 02:00:00Z");
+        assert_eq!(
+            l[2],
+            "2. Operational Period: From 2026-11-03 01:00:00Z To 2026-11-03 02:00:00Z"
+        );
         assert_eq!(l[3], "3. Radio Operator (Name, Station ID): N0JLF on 3.975 MHz");
         let head = l.iter().position(|x| x.starts_with("Time ")).unwrap();
         let cols: Vec<&str> = l[head].split('|').map(str::trim).collect();
@@ -855,7 +863,10 @@ pub(crate) mod tests {
             .map(|x| x.split(" | ").map(str::trim).collect())
             .collect();
         assert_eq!(rows[0], ["01:00", "N0JLF", "ALL", "Net TNARES opened"]);
-        assert_eq!(rows[1], ["01:00", "KJ5ET", "N0JLF", "Check-in: Trousdale County ARES, no traffic"]);
+        assert_eq!(
+            rows[1],
+            ["01:00", "KJ5ET", "N0JLF", "Check-in: Trousdale County ARES, no traffic"]
+        );
         assert_eq!(rows[2], ["01:01", "AG5B", "N0JLF", "Check-in (traffic 1 P) via KJ5ET"]);
         assert_eq!(rows[3], ["01:02", "N0JLF", "ALL", "Bulletin: Net closes at 2130"]);
         assert_eq!(rows[4], ["01:05", "AG5B", "N0JLF", "Priority: Shelter open, 40 cots"]);

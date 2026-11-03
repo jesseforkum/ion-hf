@@ -323,11 +323,8 @@ pub fn show(ui: &mut egui::Ui, blocks: &[Block]) {
                         let top = ui.cursor().min;
                         para(ui, job(spans, BODY, theme::MUTED));
                         let bottom = ui.min_rect().max.y;
-                        ui.painter().vline(
-                            top.x - 8.0,
-                            top.y..=bottom,
-                            Stroke::new(2.0, theme::LINE),
-                        );
+                        ui.painter()
+                            .vline(top.x - 8.0, top.y..=bottom, Stroke::new(2.0, theme::LINE));
                     });
             }
             Block::Code(text) => {
@@ -337,8 +334,7 @@ pub fn show(ui: &mut egui::Ui, blocks: &[Block]) {
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(egui::RichText::new(text).monospace().color(theme::TEXT))
-                                .selectable(true),
+                            egui::Label::new(egui::RichText::new(text).monospace().color(theme::TEXT)).selectable(true),
                         );
                     });
             }
@@ -393,11 +389,17 @@ mod tests {
     #[test]
     fn headings_emphasis_and_code() {
         let b = parse("# Net\n\nSome **bold**, *em*, ~~old~~ and `code`.\n\n---\n\n```\nfreq 3.975\n```");
-        assert_eq!(b[0], Block::Heading(1, vec![Span {
-            text: "Net".into(),
-            strong: true,
-            ..Span::default()
-        }]));
+        assert_eq!(
+            b[0],
+            Block::Heading(
+                1,
+                vec![Span {
+                    text: "Net".into(),
+                    strong: true,
+                    ..Span::default()
+                }]
+            )
+        );
         let Block::Para(p) = &b[1] else { panic!("{b:?}") };
         assert!(p.iter().any(|s| s.text == "bold" && s.strong));
         assert!(p.iter().any(|s| s.text == "em" && s.em));
@@ -449,11 +451,20 @@ mod tests {
              ![map of the county](https://example.com/map.png)\n\n<b>raw</b> <script>x</script>",
         );
         let t = all_text(&b);
-        assert!(t.contains("See the plan (https://example.com/plan) and https://ares.example."), "{t}");
-        assert!(!t.contains("https://ares.example (https"), "an autolink shows once: {t}");
+        assert!(
+            t.contains("See the plan (https://example.com/plan) and https://ares.example."),
+            "{t}"
+        );
+        assert!(
+            !t.contains("https://ares.example (https"),
+            "an autolink shows once: {t}"
+        );
         assert!(t.contains("map of the county"), "{t}");
         assert!(!t.contains("map.png"), "an image's address is not even shown: {t}");
-        assert!(t.contains("<b>raw</b>") && t.contains("<script>x</script>"), "HTML as written: {t}");
+        assert!(
+            t.contains("<b>raw</b>") && t.contains("<script>x</script>"),
+            "HTML as written: {t}"
+        );
         // The spans have no link in them to follow: an address is a muted span.
         let Block::Para(p) = &b[0] else { panic!() };
         assert!(p.iter().any(|s| s.muted && s.text == " (https://example.com/plan)"));

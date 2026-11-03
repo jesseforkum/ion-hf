@@ -17,6 +17,7 @@ mod host;
 mod ion_engine;
 mod logbook;
 mod markdown;
+mod net_app;
 mod net_doc;
 mod net_log;
 mod panel;

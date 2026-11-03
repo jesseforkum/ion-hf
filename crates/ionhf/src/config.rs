@@ -17,7 +17,12 @@ pub struct Config {
     /// Newest first.
     pub recent: Vec<String>,
     pub mini: bool,
+    /// The net to join (empty: the first heard).
     pub net: String,
+    /// The net we run, kept between nets.
+    pub net_profile: NetProfile,
+    /// Our check-in line (the call comes from `call`).
+    pub net_line: String,
     /// Percent.
     pub drive: u32,
     /// OFDM level above the single-tone signals, 0 to 3 dB.
@@ -47,6 +52,8 @@ impl Default for Config {
             recent: Vec::new(),
             mini: false,
             net: String::new(),
+            net_profile: NetProfile::default(),
+            net_line: String::new(),
             drive: 50,
             ofdm_db: ion::link::audio::OFDM_AIR_GAIN_DB,
             gear: Gear::Goodput,
@@ -118,6 +125,63 @@ impl Config {
         match self.tci_sample_rate {
             12_000 | 24_000 => self.tci_sample_rate,
             _ => 48_000,
+        }
+    }
+}
+
+/// Net control's profile: the announcement's fields as typed, and the
+/// regulars.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NetProfile {
+    pub name: String,
+    /// As typed ("3.975", "7071.5 kHz"): `net_doc::parse_freq`.
+    pub freq: String,
+    pub backup: String,
+    /// "01:00" UTC, on the day it opens.
+    pub start: String,
+    pub end: String,
+    /// "2026-11-10 01:00" UTC.
+    pub next: String,
+    pub mode: crate::net_doc::Mode,
+    pub purpose: crate::net_doc::Purpose,
+    pub alt: String,
+    /// Calls, by spaces or commas.
+    pub regulars: String,
+    /// Markdown.
+    pub body: String,
+}
+
+impl NetProfile {
+    pub fn regulars(&self) -> Vec<String> {
+        self.regulars
+            .split([' ', ',', ';', '\n'])
+            .map(|c| c.trim().to_ascii_uppercase())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
+    /// The announcement as it stands, net control `ncs`, for a net opening
+    /// at `day` (UTC seconds).
+    pub fn announcement(&self, ncs: &str, day: i64) -> crate::net_doc::Announcement {
+        use crate::net_doc::{minutes_on, parse_freq, parse_minutes};
+        let start = minutes_on(day, &self.start);
+        let end = minutes_on(day, &self.end).map(|e| match start {
+            Some(s) if e < s => e + 24 * 60,
+            _ => e,
+        });
+        crate::net_doc::Announcement {
+            net: self.name.trim().to_ascii_uppercase(),
+            ncs: ncs.to_string(),
+            alt: self.alt.trim().to_ascii_uppercase(),
+            freq_hz: parse_freq(&self.freq),
+            backup_hz: parse_freq(&self.backup),
+            start,
+            end,
+            next: parse_minutes(&self.next),
+            mode: Some(self.mode),
+            purpose: Some(self.purpose),
+            body: self.body.clone(),
         }
     }
 }
@@ -320,6 +384,42 @@ mod tests {
         let text = toml::to_string_pretty(&c).unwrap();
         assert!(text.contains("backend = \"icom\""), "{text}");
         assert_eq!(toml::from_str::<Config>(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn the_net_profile_round_trips_and_makes_the_announcement() {
+        let c = Config {
+            net_line: "Trousdale County ARES".into(),
+            net_profile: NetProfile {
+                name: "tnares".into(),
+                freq: "3.975".into(),
+                backup: "7262 kHz".into(),
+                start: "23:30".into(),
+                end: "00:30".into(),
+                next: "2026-11-10 23:30".into(),
+                mode: crate::net_doc::Mode::Lsb,
+                purpose: crate::net_doc::Purpose::Training,
+                alt: "kj5et".into(),
+                regulars: "KJ5ET, ag5b\nW5XYZ".into(),
+                body: "# Tonight\n\n- one\n".into(),
+            },
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), c);
+        let p = &c.net_profile;
+        assert_eq!(p.regulars(), ["KJ5ET", "AG5B", "W5XYZ"]);
+        // 2026-11-03 12:00Z.
+        let a = p.announcement("N0JLF", 1_793_707_200);
+        assert_eq!(a.net, "TNARES");
+        assert_eq!(a.alt, "KJ5ET");
+        assert_eq!(a.freq_hz, Some(3_975_000));
+        assert_eq!(a.backup_hz, Some(7_262_000));
+        assert_eq!(a.start.map(crate::net_doc::minutes_text).unwrap(), "2026-11-03 23:30Z");
+        assert_eq!(a.end.map(crate::net_doc::minutes_text).unwrap(), "2026-11-04 00:30Z");
+        assert_eq!(a.next.map(crate::net_doc::minutes_text).unwrap(), "2026-11-10 23:30Z");
+        let old: Config = toml::from_str("call = \"W1AW\"\n").unwrap();
+        assert_eq!(old.net_profile, NetProfile::default());
     }
 
     #[test]

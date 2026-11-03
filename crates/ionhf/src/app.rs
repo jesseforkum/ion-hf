@@ -73,6 +73,8 @@ pub struct App {
     pub net_to: String,
     /// What we announce at check-in.
     pub net_caps: ion::link::net::Caps,
+    /// The Net section: profile, check-in form, the net log.
+    pub nets: crate::net_app::NetApp,
     host: Option<crate::host::HostHandle>,
     last_state: State,
     dirty: bool,
@@ -178,6 +180,7 @@ impl App {
             net_text: String::new(),
             net_to: String::new(),
             net_caps: ion::link::net::Caps::default(),
+            nets: crate::net_app::NetApp::new(Config::dir().join("nets")),
             host: None,
             last_state: State::Idle,
             dirty: false,
@@ -260,20 +263,48 @@ impl App {
         self.link.as_ref()?.net.as_deref()
     }
 
-    /// Runs (`ncs`) or joins the net named in the Net's box.
-    pub fn net_started(&mut self, ncs: bool) {
-        let name = self.cfg.net.trim().to_ascii_uppercase();
-        let shown = if name.is_empty() {
-            "any".to_string()
-        } else {
-            name.clone()
-        };
-        self.net_note(format!("{} {shown}", if ncs { "Open" } else { "Join" }));
-        self.cmd(if ncs {
-            IonCmd::NetStart(name)
-        } else {
-            IonCmd::NetJoin(name)
-        });
+    pub fn cmds(&self, cmds: Vec<IonCmd>) {
+        for c in cmds {
+            self.cmd(c);
+        }
+    }
+
+    /// Runs the profile's net as net control.
+    pub fn net_open(&mut self) {
+        let cmds = self.nets.open(&self.cfg);
+        self.net_note(format!(
+            "Open {}",
+            self.cfg.net_profile.name.trim().to_ascii_uppercase()
+        ));
+        self.cmds(cmds);
+    }
+
+    /// Joins the net named in the Member box, with the check-in form.
+    pub fn net_join(&mut self) {
+        match self.nets.join(&self.cfg) {
+            Ok(cmds) => {
+                let name = self.cfg.net.trim().to_ascii_uppercase();
+                self.net_note(format!("Join {}", if name.is_empty() { "any" } else { &name }));
+                self.cmds(cmds);
+            }
+            Err(e) => self.note(format!("! {e}")),
+        }
+    }
+
+    /// Net control: the summary to all, then the close.
+    pub fn net_close(&mut self) {
+        let cmds = self.nets.close(self.now());
+        self.net_note("Summary offered; closing".into());
+        self.cmds(cmds);
+    }
+
+    /// The check-in form's traffic: to the net once joined, queued before.
+    pub fn net_send_form(&mut self) {
+        let call = self.cfg.call.clone();
+        match self.nets.send_form(&call) {
+            Ok(cmds) => self.cmds(cmds),
+            Err(e) => self.note(format!("! {e}")),
+        }
     }
 
     /// The Net's send box: a bulletin, a message for one member, or traffic
@@ -298,11 +329,13 @@ impl App {
             text: text.clone(),
             note: false,
         });
-        self.cmd(if direct {
-            IonCmd::NetSendTo(to, text.into_bytes())
+        let call = self.cfg.call.clone();
+        let cmds = if ncs {
+            self.nets.bulletin(&call, if direct { &to } else { "" }, &text)
         } else {
-            IonCmd::NetSend(text.into_bytes())
-        });
+            self.nets.send_text(&call, &text)
+        };
+        self.cmds(cmds);
     }
 
     fn net_push(&mut self, l: NetLine) {
@@ -324,6 +357,9 @@ impl App {
 
     fn net_event(&mut self, e: ion::link::net::NetEvent) {
         use ion::link::net::NetEvent;
+        let call = self.cfg.call.clone();
+        let cmds = self.nets.event(&e, &call);
+        self.cmds(cmds);
         match e {
             NetEvent::Message {
                 from,
@@ -331,7 +367,7 @@ impl App {
                 data,
                 overheard,
             } => {
-                let text = String::from_utf8_lossy(&data).into_owned();
+                let text = crate::net_app::shown(&data);
                 self.net_push(NetLine {
                     time: utc_now(),
                     from,
@@ -357,7 +393,12 @@ impl App {
             }
             NetEvent::Object { id, data, cached } => {
                 let held = if cached { ", held" } else { "" };
-                self.net_note(format!("Object {id}, {}{held}", theme::bytes(data.len() as u64)));
+                let what = crate::net_app::shown(&data);
+                let what = match crate::net_doc::Record::decode(&data) {
+                    crate::net_doc::Record::Text(_) => format!("Object {id}"),
+                    _ => what,
+                };
+                self.net_note(format!("{what}, {}{held}", theme::bytes(data.len() as u64)));
             }
             NetEvent::Closed => self.net_note("Closed".into()),
         }
@@ -521,6 +562,10 @@ impl App {
                     self.hist.heard_peer(&s.peer.clone(), self.hist.last_here);
                 }
                 self.link = Some(s);
+                let now = self.now();
+                let net = self.link.as_ref().and_then(|s| s.net.as_deref());
+                let cmds = self.nets.status(net, now, &self.cfg);
+                self.cmds(cmds);
             }
             // With no host program attached, what a link brings has nowhere
             // to go: say how much.

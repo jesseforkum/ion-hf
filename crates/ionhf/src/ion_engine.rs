@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use ion::link::bcast::{BcastConfig, BcastEvent, BcastStation};
-use ion::link::net::{Caps, MAX_LINE, NetConfig, NetEvent, NetNode, ObjectId, Precedence, RosterEntry, Traffic};
+use ion::link::net::{
+    Caps, MAX_LINE, MAX_OFFERS, NetConfig, NetEvent, NetNode, ObjectId, Precedence, RosterEntry, Traffic,
+};
 use ion::link::node::{DEFAULT_LEAD_S, NodeAir};
 use ion::link::{Air, Gear, Node, Role, State};
 
@@ -106,6 +108,10 @@ pub enum IonCmd {
     NetTraffic(Traffic),
     /// Net control: an object to offer the net.
     NetOffer(Vec<u8>),
+    /// Net control: stop offering it.
+    NetWithdraw(ObjectId),
+    /// Net control: the calls expected to check in, from the next net on.
+    NetRegulars(Vec<String>),
     /// Where a member keeps the objects it receives, from the next net on
     /// (`None`: only while in the net).
     NetStore(Option<std::path::PathBuf>),
@@ -166,8 +172,9 @@ pub struct NetStatus {
     /// Our check-in line and traffic.
     pub line: String,
     pub traffic: Traffic,
-    /// The objects on offer (a member: as last heard).
-    pub offers: Vec<ObjectId>,
+    /// The objects on offer by index, which `RosterEntry::holds` counts
+    /// in (a member: as last heard).
+    pub offers: [Option<ObjectId>; MAX_OFFERS],
 }
 
 #[derive(Clone, Debug)]
@@ -333,6 +340,7 @@ struct Worker {
     net_line: String,
     net_traffic: Traffic,
     net_store: Option<std::path::PathBuf>,
+    net_regulars: Vec<String>,
 }
 
 impl Worker {
@@ -373,6 +381,7 @@ impl Worker {
             net_line: String::new(),
             net_traffic: Traffic::default(),
             net_store: None,
+            net_regulars: Vec::new(),
         }
     }
 
@@ -493,6 +502,7 @@ impl Worker {
         cfg.line = self.net_line.clone();
         cfg.traffic = self.net_traffic;
         cfg.store = self.net_store.clone();
+        cfg.regulars = self.net_regulars.clone();
         self.net_max_burst_s = cfg.max_burst_s;
         self.net_tx_end = self.now();
         self.net_close_sent = 0;
@@ -603,7 +613,7 @@ impl Worker {
             rounds: s.stats.rounds,
             line: self.net_line.clone(),
             traffic: self.net_traffic,
-            offers: s.offers().into_iter().flatten().collect(),
+            offers: s.offers(),
         })
     }
 
@@ -670,6 +680,18 @@ impl Worker {
                 }
                 None => self.note("! only net control offers objects"),
             },
+            IonCmd::NetWithdraw(id) => {
+                if let Some(n) = self.net.as_mut().filter(|n| n.station().is_ncs()) {
+                    n.station_mut().withdraw(id);
+                }
+            }
+            IonCmd::NetRegulars(calls) => {
+                self.net_regulars = calls
+                    .iter()
+                    .map(|c| c.trim().to_ascii_uppercase())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+            }
             IonCmd::NetStore(dir) => self.net_store = dir,
             _ => {}
         }
