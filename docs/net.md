@@ -136,7 +136,7 @@ endian; SNRs are dB + 24 in one byte.
 CheckIn  [2][call 5][snr][caps][protocol][version][traffic]               11 bytes
 Report   [3][slot][snr][queued u24][block u16][short][direct u24]
          [traffic][objects][(slot, snr) × 0–4]                         14–22 bytes
-Line     [11][slot | part << 6 | two parts << 7][text, up to 20]          2–22 bytes
+Line     [11][slot | part << 6 | two parts << 7][tie][text, up to 19]    3–22 bytes
 Offer    [12][first | total << 4][(hash 8, length u16) × 1–2]           12 or 22 bytes
 ```
 
@@ -630,7 +630,7 @@ the channel model matter there):
 | Its relay goes silent: NCS moves the leaf to the other member that hears it, and its next message gets through (`a_leaf_is_moved_when_its_relay_goes_silent`) | passes |
 | A weak member at −9 dB gets through at the floor while the others run at OFDM levels (`a_weak_station_gets_through_at_the_floor`) | passes |
 | Capability flags reach the roster; with relaying off on the best hearer, NCS names the willing one (`capability_flags_reach_the_roster_and_steer_relays`) | passes |
-| Traffic (with the check-in) and a 40-byte line reach the roster and events, and changes come with the next report (`traffic_and_lines_reach_the_roster`) | passes |
+| Traffic (with the check-in) and a 38-byte line reach the roster and events, and changes come with the next report (`traffic_and_lines_reach_the_roster`) | passes |
 | A leaf's line and traffic reach NCS through its relay (`a_leafs_line_and_traffic_come_through_its_relay`) | passes |
 | Emergency, then Priority, then short time, then slot order (`priority_and_emergency_members_are_polled_first`) | passes |
 | A 6 011-byte object to 3 members (`an_offered_object_reaches_every_member_once`) | 102 s, 301 pieces (its sources, no repairs), one `Object` each |

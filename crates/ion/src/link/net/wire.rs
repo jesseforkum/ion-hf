@@ -163,9 +163,9 @@ impl Traffic {
 }
 
 /// Longest check-in line, bytes.
-pub const MAX_LINE: usize = 40;
+pub const MAX_LINE: usize = 38;
 /// Text bytes in one `C_LINE` frame.
-pub(super) const LINE_PART: usize = 20;
+pub(super) const LINE_PART: usize = 19;
 
 /// `line` cut to [`MAX_LINE`] bytes on a character boundary.
 pub(super) fn clip_line(line: &str) -> String {
@@ -182,13 +182,16 @@ pub(super) fn line_mask(line: &str) -> u8 {
 }
 
 /// The `C_LINE` payloads of `slot`'s line: subtype, then the slot with the
-/// part number in bit 6 and "two parts" in bit 7, then up to 20 bytes.
+/// part number in bit 6 and "two parts" in bit 7, a byte of the whole
+/// line's CRC (so parts of two versions of it are never joined), then up
+/// to 19 bytes.
 pub(super) fn line_payloads(slot: u8, line: &str) -> Vec<Vec<u8>> {
     let b = line.as_bytes();
     let parts = if b.len() > LINE_PART { 2 } else { 1 };
+    let tie = crc32(b) as u8;
     (0..parts)
         .map(|i| {
-            let mut p = vec![C_LINE, slot & 63 | (i as u8) << 6 | (parts as u8 - 1) << 7];
+            let mut p = vec![C_LINE, slot & 63 | (i as u8) << 6 | (parts as u8 - 1) << 7, tie];
             p.extend(&b[(i * LINE_PART).min(b.len())..((i + 1) * LINE_PART).min(b.len())]);
             p
         })
@@ -402,15 +405,20 @@ mod tests {
             short: true,
         };
         assert_eq!(Traffic::from_byte(t.to_byte()).items, 7);
-        let line = "Trousdale County ARES, EOC net control!!";
+        let line = "Trousdale County ARES, EOC net control";
         assert_eq!(line.len(), MAX_LINE);
         let p = line_payloads(5, line);
         assert_eq!(p.len(), 2);
         assert!(p.iter().all(|x| x.len() <= Frame::max_payload(32)));
         assert_eq!((p[0][1], p[1][1]), (5 | 0x80, 5 | 0xC0));
-        assert_eq!(line_payloads(5, "")[0], vec![C_LINE, 5]);
-        assert_eq!(clip_line(&"é".repeat(30)).len(), 40);
-        assert_eq!(clip_line(&format!("a{}", "é".repeat(30))).len(), 39);
+        assert_eq!(p[0][2], p[1][2]);
+        assert_ne!(
+            p[0][2],
+            line_payloads(5, "Trousdale County ARES, EOC net contro!")[0][2]
+        );
+        assert_eq!(line_payloads(5, "")[0], vec![C_LINE, 5, crc32(b"") as u8]);
+        assert_eq!(clip_line(&"é".repeat(30)).len(), 38);
+        assert_eq!(clip_line(&format!("a{}", "é".repeat(30))).len(), 37);
     }
 
     #[test]

@@ -431,7 +431,7 @@ impl NetStation {
                     k.report_fwd = false;
                 }
             }
-            Some(C_LINE) if p.len() >= 2 => {
+            Some(C_LINE) if p.len() >= 3 => {
                 // Our leaf's line: kept to forward.
                 if let Some(k) = self.kids.get_mut(&(p[1] & 63)) {
                     let part = (p[1] >> 6 & 1) as usize;

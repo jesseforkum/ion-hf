@@ -241,7 +241,7 @@ groups hold their frames until the net is over.
 | `NET OPEN name` | `NET PORT n` | run the net `name` as net control; `n` is its KISS port (1–15, beside the groups') |
 | `NET JOIN [name]` | `NET PORT n` | join `name`, or the first net heard |
 | `NET CHECKINS ON` / `OFF` | `OK` / `WRONG` | net control: open or close check-ins |
-| `NET LINE text` | `OK` | the check-in line (the rest of the command, at most 40 bytes) |
+| `NET LINE text` | `OK` | the check-in line (the rest of the command, at most 38 bytes) |
 | `NET TRAFFIC n R\|W\|P\|E [SHORT]` | `OK` / `WRONG` | traffic listed: count, precedence, short time |
 | `NET OFFER` | `OK` / `WRONG` | net control: the next frame on the net's port is an object to offer |
 | `NET CLOSE` | `OK` / `WRONG` | net control: close the net once the turn under way is over (its Close goes out three times); member: leave |

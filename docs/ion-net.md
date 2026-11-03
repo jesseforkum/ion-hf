@@ -32,10 +32,12 @@ format now fixes 152 of the 256 bits (was 160), a known call 40 more.
    `[3][slot][snr][queued u24][block u16][short][direct u24][traffic][objects][(slot, snr) × 0–4]`,
    14 to 22 bytes. Seeks and overheard entries carry it too, so a leaf's
    traffic reaches NCS with its admission.
-2. **Check-in line**, at most 40 bytes, in one or two `C_LINE` frames
-   (subtype 11): `[11][slot | part << 6 | two parts << 7][text, up to 20]`.
-   The index and total share the slot's byte, so 40 bytes fit in two
-   frames and a relay forwards a leaf's frames as they are. Sent in the
+2. **Check-in line**, at most 38 bytes, in one or two `C_LINE` frames
+   (subtype 11): `[11][slot | part << 6 | two parts << 7][tie][text, up to
+   19]`. The index and total share the slot's byte, and `tie` (a byte of
+   the line's CRC-32) keeps net control from joining a part of an old
+   line to one of a new one, so 38 bytes fit in two frames and a relay
+   forwards a leaf's frames as they are. Sent in the
    first turn with room, each part until acknowledged, and again when the
    line changes.
 3. **Priority polling** as designed: Emergency, then Priority, then short

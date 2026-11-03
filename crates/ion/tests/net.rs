@@ -662,7 +662,7 @@ fn objects(ev: &[NetEvent]) -> Vec<(ObjectId, Vec<u8>, bool)> {
         .collect()
 }
 
-const LINE: &str = "Trousdale County ARES, EOC net control!!";
+const LINE: &str = "Trousdale County ARES, EOC net control";
 
 #[test]
 fn traffic_and_lines_reach_the_roster() {

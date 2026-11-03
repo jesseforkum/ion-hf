@@ -156,12 +156,16 @@ impl NetStation {
         }
     }
 
-    /// NCS: one part of a member's check-in line.
+    /// NCS: one part of a member's check-in line (`p[2]` ties the parts of
+    /// one version of it).
     fn line_part(&mut self, p: &[u8]) {
         let (slot, part, parts) = (p[1] & 63, (p[1] >> 6 & 1) as usize, (p[1] >> 7) as usize + 1);
         let Some(m) = self.members.get_mut(&slot) else { return };
         if parts == 1 {
             m.line_parts = [None, None];
+        }
+        if m.line_parts[1 - part].as_ref().is_some_and(|x| x[0] != p[2]) {
+            m.line_parts[1 - part] = None;
         }
         m.line_parts[part] = Some(p[2..].to_vec());
         if m.line_parts[..parts].iter().any(Option::is_none) {
@@ -170,7 +174,7 @@ impl NetStation {
         let bytes: Vec<u8> = m
             .line_parts
             .iter_mut()
-            .flat_map(|x| x.take().unwrap_or_default())
+            .flat_map(|x| x.take().map(|x| x[1..].to_vec()).unwrap_or_default())
             .collect();
         let line = String::from_utf8_lossy(&bytes).to_string();
         if line != m.line {
@@ -822,7 +826,7 @@ impl NetStation {
                         }
                         self.note_traffic(s, Traffic::from_byte(p[12]));
                     }
-                    Some(C_LINE) if f.payload.len() >= 2 => self.line_part(&f.payload),
+                    Some(C_LINE) if f.payload.len() >= 3 => self.line_part(&f.payload),
                     Some(C_OVERHEARD) => {
                         // Stations a member heard asking in that NCS did
                         // not: they join as its leaves, if it will relay.
@@ -983,5 +987,31 @@ impl NetStation {
             via: via_call,
         });
         Some(slot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::sim::ModelAir;
+
+    /// Part 0 of an old line and part 1 of a new one are never joined.
+    #[test]
+    fn line_parts_of_two_versions_are_not_joined() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        let s = ncs.admit("K1ABC", None, 0.0).unwrap();
+        ncs.take_events();
+        let old = line_payloads(s, "Trousdale County ARES, EOC net");
+        let new = line_payloads(s, "Wilson County ARES, at the shelter");
+        ncs.line_part(&old[0]);
+        ncs.line_part(&new[1]);
+        assert!(ncs.take_events().is_empty());
+        ncs.line_part(&new[0]);
+        let want = NetEvent::Line {
+            call: "K1ABC".into(),
+            line: "Wilson County ARES, at the shelter".into(),
+        };
+        assert_eq!(ncs.take_events(), vec![want]);
     }
 }
