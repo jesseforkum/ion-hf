@@ -18,47 +18,66 @@ Status: design, 2026-11-03. Builds on the net mode in `docs/net.md`
 
 ## Wire changes (`crates/ion`, wave 1, agent A)
 
-`PROTOCOL` goes from 2 to 3. The net has never been on the air, so
-nothing older has to be understood. The check-in prior in `prime.rs`, which
-assumes the version byte, changes with it.
+Built on `ion-net`; `docs/net.md` has the formats in full. `PROTOCOL` is
+3. The net has never been on the air, so nothing older is understood. The
+check-in prior in `apriori.rs` treats the new traffic byte as unknown: the
+format now fixes 152 of the 256 bits (was 160), a known call 40 more.
 
-1. **Traffic byte**, in the check-in (after the software version) and in
-   the report (after the stations heard):
-   - bits 0–2: traffic items listed (0–7, 7 meaning 7 or more);
-   - bits 3–4: precedence of the most urgent: 0 Routine, 1 Welfare,
-     2 Priority, 3 Emergency;
-   - bit 5: short time ("in and out").
-2. **Check-in line.** Free text the operator sets ("Trousdale County
-   ARES"), at most 40 bytes. It does not fit the check-in, so the member
-   sends it in its first turn, and again whenever it changes, as one or
-   two `C_LINE` control frames (subtype 11: index, total, text). It
-   relays like a report.
-3. **Priority polling.** NCS polls members whose traffic byte says
-   Priority or Emergency first in each round, Emergency before Priority,
-   then the others in slot order. Short-time members go next after those.
-4. **Objects by hash.** An object is opaque bytes, up to `MAX_MSG`, named
-   by its id: the first 8 bytes of its SHA-256 and its length.
-   - The host gives NCS objects to offer. NCS sends `C_OFFER` frames
-     (subtype 12) listing the current offers: up to 8 objects, each with
-     its index in the offer list, id and length. Offers repeat after each
-     beacon and while anyone lacks one.
-   - Each member keeps received objects in a store
-     (`NetConfig::store: Option<PathBuf>`, files named by the id in hex)
-     and reports in its report's **objects byte** which of the offer list
-     it holds (bit i for offer i).
-   - NCS sends an object through the bulletin stream only while some
-     member it polls (or a leaf through its relay) lacks it, and sends it
-     once for all of them. A member that already holds an object never
-     costs airtime for it.
-   - A member checks a received object against its id before storing it.
-   - `NetEvent::Object { id, data, cached }` hands every offered object to
-     the host, from the air or from the store.
-5. **Events and roster.** `RosterEntry` gains `line`, `traffic`
-   (`Traffic { items, precedence, short }`) and `holds` (offer bits).
-   New events: `NetEvent::Line { call, line }`,
-   `NetEvent::Traffic { call, traffic }` and `NetEvent::Object { .. }`.
-   `NetConfig` gains `line`, `traffic` and `store`, and `NetStation` gains
-   `set_line`, `set_traffic`, `offer(data) -> ObjectId` and `withdraw(id)`.
+1. **Traffic byte** (`Traffic { items, precedence, short }`, with
+   `Precedence::{Routine, Welfare, Priority, Emergency}`): bits 0–2 items
+   (7 meaning 7 or more), 3–4 precedence, 5 short time. It goes in the
+   check-in (after the software version) and in the report. Changed from
+   the design: in the report it sits at a fixed place, after the direct
+   bytes held and before the stations heard, with the objects byte:
+   `[3][slot][snr][queued u24][block u16][short][direct u24][traffic][objects][(slot, snr) × 0–4]`,
+   14 to 22 bytes. Seeks and overheard entries carry it too, so a leaf's
+   traffic reaches NCS with its admission.
+2. **Check-in line**, at most 40 bytes, in one or two `C_LINE` frames
+   (subtype 11): `[11][slot | part << 6 | two parts << 7][text, up to 20]`.
+   The index and total share the slot's byte, so 40 bytes fit in two
+   frames and a relay forwards a leaf's frames as they are. Sent in the
+   first turn with room, each part until acknowledged, and again when the
+   line changes.
+3. **Priority polling** as designed: Emergency, then Priority, then short
+   time, then the rest, each in slot order. A relay is polled as early as
+   its most urgent leaf.
+4. **Objects by hash.** `ObjectId { hash: [u8; 8], len: u16 }`, shown as
+   20 hex digits (the hash, then the length), which is also its file name
+   in the store. SHA-256 is in the crate (no new dependency).
+   - `C_OFFER` (subtype 12): `[12][first index | total << 4][(hash 8, len u16) × 2]`,
+     22 bytes; the index of each entry follows from the first. An empty
+     entry is a free index. NCS sends the list in its own burst before the
+     round's bulletin pieces: when it changes, after every beacon, and in
+     a round in which a member that has every bulletin block neither holds
+     nor fetches an offer.
+   - The objects byte in the report: bit i, holds offer i.
+   - Changed from the design: objects do not go in the bulletin's byte
+     stream (where a member that holds one would still have to decode,
+     and so could still need repairs for, the blocks it rides in). They use
+     the bulletin's *code* in their own blocks, numbered
+     `0x8000 | offer << 5 | block`. A member that has every bulletin block
+     reports the first object block it lacks in the report's block and
+     shortfall field, and NCS sends an object's pieces only while a member
+     it polls reports one: its sources once for all, then the largest
+     shortfall in repairs. A member that holds an object never reports it,
+     so it never drives a piece and never lowers the level (object-only
+     bursts go at the weakest fetching member's level).
+   - A relay passes the list to its leaves and serves their object blocks
+     from its own copy; NCS sends nothing while the relay holds it.
+   - The member checks the whole object against the id before it keeps
+     it; a store file that does not match its name is not trusted.
+   - `NetEvent::Object { id, data, cached }`, once per object per session;
+     `cached` when it was already held (store, or `offer` at a member).
+5. **Events and roster**, as designed: `RosterEntry` gains `line: String`
+   (empty: none), `traffic: Traffic` and `holds: u8`. `NetEvent::Line
+   { call, line }`, `NetEvent::Traffic { call, traffic }` and
+   `NetEvent::Object { id, data, cached }`. `NetConfig` gains `line`,
+   `traffic` and `store: Option<PathBuf>`. `NetStation` gains
+   `set_line(&str)`, `set_traffic(Traffic)`, `offer(&[u8]) -> ObjectId`
+   (at a member: hold it as received) and `withdraw(ObjectId)`, plus
+   `line()`, `traffic()` and `offers() -> [Option<ObjectId>; MAX_OFFERS]`.
+   `NetNode` passes the four setters and `take_events` through.
+   `NetStats` gains `obj_pieces`, `obj_repairs` and `obj_rejected`.
 
 The report keeps to 22 bytes: with four stations heard it was 20, so the
 traffic and objects bytes fill it.
@@ -100,7 +119,8 @@ NET CLOSED
   for net control when sent by a member.
 - To the host, both are filled in; an empty `to` was a bulletin.
 - An object comes to the host as a frame with `to` = `#` followed by the
-  id in hex, after its `NET OBJECT` line.
+  id in hex (20 digits, `ObjectId`'s `Display`), after its `NET OBJECT`
+  line.
 
 The engine side (`ion_engine.rs`) ports the private prototype's
 `IonCmd::Net*`, `NetStatus` and `NetEvent` handling to ion-hf's newer net
