@@ -92,6 +92,9 @@ pub enum IonCmd {
     NetJoin(String),
     /// Member: traffic for net control. Net control: a bulletin for all.
     NetSend(Vec<u8>),
+    /// As [`IonCmd::NetSend`], counted in [`NetStatus::items`] (the Net
+    /// section's traffic, so it can tell when its own is delivered).
+    NetItem(Vec<u8>),
     /// Net control: a message for one member. Member: for net control only
     /// (taken as such before it is known).
     NetSendTo(String, Vec<u8>),
@@ -175,6 +178,8 @@ pub struct NetStatus {
     /// The objects on offer by index, which `RosterEntry::holds` counts
     /// in (a member: as last heard).
     pub offers: [Option<ObjectId>; MAX_OFFERS],
+    /// [`IonCmd::NetItem`]s handled so far (ever, not per net).
+    pub items: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -336,6 +341,7 @@ struct Worker {
     net_max_burst_s: f64,
     net_tx_end: f64,
     net_close_sent: u32,
+    net_items: u32,
     net_caps: Caps,
     net_line: String,
     net_traffic: Traffic,
@@ -377,6 +383,7 @@ impl Worker {
             net_max_burst_s: 0.0,
             net_tx_end: 0.0,
             net_close_sent: 0,
+            net_items: 0,
             net_caps: Caps::default(),
             net_line: String::new(),
             net_traffic: Traffic::default(),
@@ -620,6 +627,7 @@ impl Worker {
             line: self.net_line.clone(),
             traffic: self.net_traffic,
             offers: s.offers(),
+            items: self.net_items,
         })
     }
 
@@ -631,6 +639,10 @@ impl Worker {
                 Some(n) => n.station_mut().send(&bytes),
                 None => self.note("! not in a net"),
             },
+            IonCmd::NetItem(bytes) => {
+                self.net_items += 1;
+                self.net_command(IonCmd::NetSend(bytes));
+            }
             IonCmd::NetSendTo(call, bytes) => {
                 let call = call.trim().to_ascii_uppercase();
                 let ok = self.net.as_mut().is_some_and(|n| {

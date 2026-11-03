@@ -92,9 +92,11 @@ pub struct NetApp {
     pub reoffer: bool,
     pub closing: Option<Closing>,
     queue: Vec<Out>,
-    /// Member: our items handed to the net, not yet delivered.
-    sent: Vec<usize>,
-    saw_pending: bool,
+    /// Member: our items handed to the net, not yet delivered: (index in
+    /// the log, its count in [`NetStatus::items`]).
+    sent: Vec<(usize, u32)>,
+    /// [`IonCmd::NetItem`]s issued.
+    items: u32,
     joined: bool,
     listed: Option<Traffic>,
     /// The Log page: past nets, newest first, and the one shown.
@@ -148,7 +150,7 @@ impl NetApp {
             closing: None,
             queue: Vec::new(),
             sent: Vec::new(),
-            saw_pending: false,
+            items: 0,
             joined: false,
             listed: None,
             past: Vec::new(),
@@ -235,7 +237,7 @@ impl NetApp {
         let precs = self.queue.iter().map(|o| o.item.precedence).chain(
             self.sent
                 .iter()
-                .filter_map(|&i| log.and_then(|l| l.rec.traffic.get(i)).map(|it| it.precedence)),
+                .filter_map(|&(i, _)| log.and_then(|l| l.rec.traffic.get(i)).map(|it| it.precedence)),
         );
         let (n, p) = precs.fold((0usize, Precedence::Routine), |(n, p), q| (n + 1, p.max(q)));
         Traffic {
@@ -355,8 +357,9 @@ impl NetApp {
             Some(log) => {
                 item.to = log.rec.ncs.clone();
                 let i = log.item(item);
-                self.sent.push(i);
-                cmds.push(IonCmd::NetSend(bytes));
+                self.items += 1;
+                self.sent.push((i, self.items));
+                cmds.push(IonCmd::NetItem(bytes));
             }
             None => self.queue.push(Out { item, bytes }),
         }
@@ -470,16 +473,18 @@ impl NetApp {
         let Some(n) = n else { return Vec::new() };
         let mut cmds = Vec::new();
         if !n.ncs {
-            if n.pending > 0 {
-                self.saw_pending = true;
-            } else if self.saw_pending && !self.sent.is_empty() {
-                self.saw_pending = false;
+            // Nothing left to send of what the worker had been handed when
+            // it built this status.
+            if n.pending == 0 {
+                let (done, left): (Vec<_>, Vec<_>) = std::mem::take(&mut self.sent)
+                    .into_iter()
+                    .partition(|&(_, k)| k <= n.items);
+                self.sent = left;
                 if let Some(log) = self.log.as_mut() {
-                    for i in self.sent.drain(..) {
+                    for (i, _) in done {
                         log.set_state(i, State::Delivered);
                     }
                 }
-                self.sent.clear();
             }
             cmds.extend(self.sync_listing());
             return cmds;
@@ -542,8 +547,9 @@ impl NetApp {
                     for Out { mut item, bytes } in self.queue.drain(..) {
                         item.to = ncs.clone();
                         item.at = now;
-                        self.sent.push(log.item(item));
-                        cmds.push(IonCmd::NetSend(bytes));
+                        self.items += 1;
+                        self.sent.push((log.item(item), self.items));
+                        cmds.push(IonCmd::NetItem(bytes));
                     }
                 }
             }
@@ -615,7 +621,11 @@ impl NetApp {
                         ..Item::default()
                     });
                 }
-                Record::Announcement(_) | Record::Summary(_) => self.object(data),
+                Record::Announcement(_) | Record::Summary(_) => {
+                    if log.rec.role == Role::Member && from == log.rec.ncs {
+                        self.object(data);
+                    }
+                }
                 _ => log.bulletin(from, &shown(data), now),
             }
             return;
@@ -648,7 +658,12 @@ impl NetApp {
                     ..Item::default()
                 }
             }
-            Record::Announcement(_) | Record::Summary(_) => return self.object(data),
+            Record::Announcement(_) | Record::Summary(_) => {
+                if log.rec.role == Role::Member && from == log.rec.ncs {
+                    self.object(data);
+                }
+                return;
+            }
         };
         log.item(Item {
             at: now,
@@ -659,8 +674,11 @@ impl NetApp {
         });
     }
 
-    /// Member: an object net control offers.
+    /// Member: an object net control offers (or sent us).
     fn object(&mut self, data: &[u8]) {
+        if self.log.as_ref().is_some_and(|l| l.rec.role != Role::Member) {
+            return;
+        }
         match Record::decode(data) {
             Record::Announcement(a) => {
                 if let Some(log) = self.log.as_mut() {
@@ -766,7 +784,28 @@ mod tests {
             },
             "N0JLF",
         );
+        let mut fake = NetLog::create(
+            &d.0.join("fake"),
+            NetRecord {
+                net: "TNARES".into(),
+                ncs: "N0JLF".into(),
+                ..NetRecord::default()
+            },
+        );
+        fake.close(1);
+        let sum = Record::Summary(fake.summary(1)).encode();
+        a.event(
+            &NetEvent::Message {
+                from: "KJ5ET".into(),
+                to: Some("N0JLF".into()),
+                data: sum,
+                overheard: false,
+            },
+            "N0JLF",
+        );
         let log = &a.log.as_ref().unwrap().rec;
+        assert_eq!(log.checkins.len(), 1, "a member's summary rewrote the log");
+        assert!(log.closed.is_none());
         assert_eq!(log.checkins[0].line, "Trousdale County ARES");
         let it = &log.traffic[0];
         assert_eq!(
@@ -857,7 +896,7 @@ mod tests {
             },
             "AG5B",
         );
-        let IonCmd::NetSend(b) = &cmds[0] else {
+        let IonCmd::NetItem(b) = &cmds[0] else {
             panic!("{cmds:?}")
         };
         assert!(matches!(Record::decode(b), Record::Message(m) if m.precedence == Precedence::Priority));
@@ -873,9 +912,18 @@ mod tests {
         st.pending = 40;
         a.status(Some(&st), 2.0, &c);
         st.pending = 0;
+        st.items = 1;
+        // Another item, handed over after the worker built the status.
+        a.send_text("AG5B", "Second report");
         let cmds = a.status(Some(&st), 3.0, &c);
+        assert!(matches!(cmds[..], [IonCmd::NetTraffic(t)] if t.items == 1));
+        let state = |a: &NetApp, i: usize| a.log.as_ref().unwrap().rec.traffic[i].state;
+        assert_eq!(state(&a, 0), State::Delivered);
+        assert_eq!(state(&a, 1), State::Queued, "delivered before the worker had it");
+        st.items = 2;
+        let cmds = a.status(Some(&st), 4.0, &c);
         assert!(matches!(cmds[..], [IonCmd::NetTraffic(t)] if t.items == 0));
-        assert_eq!(a.log.as_ref().unwrap().rec.traffic[0].state, State::Delivered);
+        assert_eq!(state(&a, 1), State::Delivered);
 
         // The announcement, a bulletin, a file and the summary.
         let ann = Record::Announcement(c.net_profile.announcement("N0JLF", 0)).encode();
@@ -917,7 +965,7 @@ mod tests {
         );
         let log = a.log.as_ref().unwrap();
         assert_eq!(log.rec.bulletins[0].text, "Net closes at 2130");
-        let f = &log.rec.traffic[1];
+        let f = &log.rec.traffic[2];
         assert_eq!(std::fs::read(&f.saved).unwrap(), b"KJ5ET\nAG5B\n");
 
         let mut ncs_log = NetLog::create(
@@ -931,6 +979,17 @@ mod tests {
         );
         ncs_log.checked_in("AG5B", 2, None, log.rec.opened);
         let sum = Record::Summary(ncs_log.summary(log.rec.opened + 600)).encode();
+        // Only net control's summary counts.
+        a.event(
+            &NetEvent::Message {
+                from: "KJ5ET".into(),
+                to: Some("AG5B".into()),
+                data: sum.clone(),
+                overheard: false,
+            },
+            "AG5B",
+        );
+        assert!(!a.log.as_ref().unwrap().rec.summary);
         a.event(
             &NetEvent::Object {
                 id: ObjectId::of(&sum),

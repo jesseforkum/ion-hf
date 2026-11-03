@@ -211,9 +211,11 @@ In `crates/ionhf`: `net_doc.rs` (records), `markdown.rs`, `net_log.rs`,
   once every roster entry's `holds` has it, after 180 s, or at once with
   no members (**Now** closes at once).
 - **Member.** The form's traffic is queued until `NetEvent::Joined` and
-  sent then; the listing (`NetTraffic`) is what is not yet delivered (an
-  item counts as delivered once the outbox has drained after it was
-  seen pending). A file is at most 32 kB, read from a path: `rfd` has no
+  sent then (as `NetItem`, which the worker counts in
+  `NetStatus::items`); the listing (`NetTraffic`) is what is not yet
+  delivered (an item counts as delivered once a status that counts it
+  shows the outbox drained). Summaries and announcements count only at
+  a member, and only from net control. A file is at most 32 kB, read from a path: `rfd` has no
   Linux backend without zbus or GTK, so no file dialog. The size shows
   with the uplink time at the floor (one frame a burst).
 - **Addressee.** A member's traffic always goes to net control on the
