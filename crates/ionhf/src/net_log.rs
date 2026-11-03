@@ -126,8 +126,25 @@ fn safe_name(name: &str) -> String {
             }
         })
         .collect();
-    let s = s.trim().trim_start_matches('.').to_string();
-    if s.is_empty() { "file".into() } else { s }
+    // Windows refuses trailing dots and spaces, and device names with any
+    // extension.
+    let s = s
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .to_string();
+    let stem = s.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    if s.is_empty() {
+        "file".into()
+    } else if device {
+        format!("_{s}")
+    } else {
+        s
+    }
 }
 
 impl NetLog {
@@ -503,10 +520,16 @@ pub fn to_text(r: &NetRecord) -> String {
 }
 
 fn csv_field(v: &str) -> String {
+    // A leading = + - or @ makes a spreadsheet take the field for a formula.
+    let v = if v.starts_with(['=', '+', '-', '@']) {
+        format!("'{v}")
+    } else {
+        v.to_string()
+    };
     if v.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", v.replace('"', "\"\""))
     } else {
-        v.to_string()
+        v
     }
 }
 
@@ -766,6 +789,35 @@ pub(crate) mod tests {
         log.missed("W5XYZ", T0 + 200);
         log.close(T0 + 3600);
         log
+    }
+
+    #[test]
+    fn file_names_are_safe_on_windows() {
+        for (name, want) in [
+            ("CON", "_CON"),
+            ("con.txt", "_con.txt"),
+            ("Aux.tar.gz", "_Aux.tar.gz"),
+            ("nul", "_nul"),
+            ("COM1.log", "_COM1.log"),
+            ("lpt9", "_lpt9"),
+            ("COM0", "COM0"),
+            ("COM10", "COM10"),
+            ("console.txt", "console.txt"),
+            ("report. . ", "report"),
+            ("..\\..\\x.txt", "x.txt"),
+            ("...", "file"),
+        ] {
+            assert_eq!(safe_name(name), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn csv_fields_never_start_a_formula() {
+        assert_eq!(csv_field("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
+        assert_eq!(csv_field("+1"), "'+1");
+        assert_eq!(csv_field("-3 dB"), "'-3 dB");
+        assert_eq!(csv_field("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(csv_field("K1ABC"), "K1ABC");
     }
 
     #[test]
