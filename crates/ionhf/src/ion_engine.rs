@@ -64,6 +64,9 @@ pub enum IonCmd {
     DisconnectWhenSent,
     /// Drop everything locally, without transmitting.
     Stop,
+    /// As [`IonCmd::Stop`], but a net that is up stays (a host client that
+    /// never attached to it): there is no link while one is.
+    StopLink,
     /// End a call or link now (a host program gave up): what is on the
     /// air stops, then our CW ID goes out if we have keyed since the last.
     GiveUp,
@@ -101,6 +104,9 @@ pub enum IonCmd {
     /// Net control: a message for one member. Member: for net control only
     /// (taken as such before it is known).
     NetSendTo(String, Vec<u8>),
+    /// After a `NetSend`/`NetSendTo` from a host's ACKMODE frame: tells the
+    /// host (as [`crate::host::HostIn::GroupSent`]) once the net has it.
+    NetAck(u16),
     /// Net control: check-ins open or closed.
     NetCheckins(bool),
     /// Net control: close the net (transmits). Member: leave it (keys
@@ -692,6 +698,11 @@ impl Worker {
                     self.note(format!("! not sent: {call} is not in the net, or not net control"));
                 }
             }
+            IonCmd::NetAck(tag) => {
+                if self.net.is_some() {
+                    self.send_host(crate::host::HostIn::GroupSent(tag));
+                }
+            }
             IonCmd::NetCheckins(open) => {
                 if let Some(n) = self.net.as_mut().filter(|n| n.station().is_ncs()) {
                     n.station_mut().set_open(open);
@@ -795,7 +806,8 @@ impl Worker {
                 self.closing = true;
                 self.node.station_mut().disconnect_when_sent(now, HOST_DRAIN_S);
             }
-            IonCmd::Stop => {
+            IonCmd::StopLink if self.net.is_some() => {}
+            IonCmd::Stop | IonCmd::StopLink => {
                 // Stop cuts a CW ID or a broadcast burst that is playing,
                 // and drops the broadcast queue, too.
                 if self.id_on_air || self.bcast_on_air {

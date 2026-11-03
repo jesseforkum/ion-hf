@@ -411,9 +411,38 @@ impl Host {
         let _ = self.ui.try_send(UiEvent::Host(s));
     }
 
+    /// The whole KISS frames the client has sent so far.
+    fn kiss_in_frames(&mut self) {
+        for (command, payload) in kiss_frames(&mut self.kiss_in) {
+            let port = command >> 4;
+            match command & 0x0F {
+                KISS_DATA if self.net_port == Some(port) => self.net_frame_in(&payload, None),
+                KISS_ACKMODE if self.net_port == Some(port) && payload.len() > 2 => {
+                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
+                    self.net_frame_in(&payload[2..], Some(tag));
+                }
+                KISS_DATA if self.ports.contains_key(&port) && !payload.is_empty() => {
+                    let _ = self.ion.send(IonCmd::GroupSend(port, payload, None));
+                }
+                KISS_ACKMODE if self.ports.contains_key(&port) && payload.len() > 2 => {
+                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
+                    let _ = self.ion.send(IonCmd::GroupSend(port, payload[2..].to_vec(), Some(tag)));
+                }
+                KISS_PERSIST if !payload.is_empty() => {
+                    let _ = self.ion.send(IonCmd::GroupPersist(payload[0]));
+                }
+                // Other ports, and settings that mean nothing to Ion.
+                _ => {}
+            }
+        }
+    }
+
     fn say(&mut self, line: &str) {
         if let Some(c) = self.cmd.as_mut() {
-            let mut b = line.as_bytes().to_vec();
+            // Lines carry text from the air (check-in lines, net names): a
+            // CR in one must not start a line of its own.
+            let line: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            let mut b = line.into_bytes();
             b.push(b'\r');
             if c.write_all(&b).is_err() {
                 self.cmd = None;
@@ -489,24 +518,7 @@ impl Host {
             self.kiss = None;
             self.close_port(0);
         }
-        for (command, payload) in kiss_frames(&mut self.kiss_in) {
-            let port = command >> 4;
-            match command & 0x0F {
-                KISS_DATA if self.net_port == Some(port) => self.net_frame_in(&payload),
-                KISS_DATA if self.ports.contains_key(&port) && !payload.is_empty() => {
-                    let _ = self.ion.send(IonCmd::GroupSend(port, payload, None));
-                }
-                KISS_ACKMODE if self.ports.contains_key(&port) && payload.len() > 2 => {
-                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
-                    let _ = self.ion.send(IonCmd::GroupSend(port, payload[2..].to_vec(), Some(tag)));
-                }
-                KISS_PERSIST if !payload.is_empty() => {
-                    let _ = self.ion.send(IonCmd::GroupPersist(payload[0]));
-                }
-                // Other ports, and settings that mean nothing to Ion.
-                _ => {}
-            }
-        }
+        self.kiss_in_frames();
         // Data from the host goes onto the link.
         if let Some(d) = self.data.as_mut() {
             match d.read(&mut buf) {
@@ -616,7 +628,12 @@ impl Host {
             }
             ["ABORT"] => {
                 self.say("OK");
-                let _ = self.ion.send(IonCmd::Stop);
+                // A net goes with it only for a client attached to the net.
+                let _ = self.ion.send(if self.net_port.is_some() {
+                    IonCmd::Stop
+                } else {
+                    IonCmd::StopLink
+                });
                 self.calling = None;
                 if self.connected.take().is_some() {
                     self.disconnected("ABORT");
@@ -738,7 +755,9 @@ impl Host {
     }
 
     /// A frame from the host on the net's port.
-    fn net_frame_in(&mut self, payload: &[u8]) {
+    /// A frame from the host on the net's port; `tag` (ACKMODE): told back
+    /// once the net has taken it.
+    fn net_frame_in(&mut self, payload: &[u8], tag: Option<u16>) {
         let Some((to, _, data)) = net_unframe(payload) else {
             log::info!("Winlink host: net frame without its header");
             return;
@@ -751,6 +770,9 @@ impl Host {
             IonCmd::NetSendTo(to, data.to_vec())
         };
         let _ = self.ion.send(cmd);
+        if let Some(t) = tag {
+            let _ = self.ion.send(IonCmd::NetAck(t));
+        }
     }
 
     fn net_event(&mut self, e: NetEvent) {
@@ -1055,10 +1077,10 @@ mod tests {
             h.command(c);
             assert_eq!(said.next(), reply, "{c}");
         }
-        h.net_frame_in(&net_frame("", "", b"the announcement"));
-        h.net_frame_in(&net_frame("", "", b"a bulletin"));
-        h.net_frame_in(&net_frame("KJ5ET", "", b"for KJ5ET"));
-        h.net_frame_in(b"\x09short");
+        h.net_frame_in(&net_frame("", "", b"the announcement"), None);
+        h.net_frame_in(&net_frame("", "", b"a bulletin"), None);
+        h.net_frame_in(&net_frame("KJ5ET", "", b"for KJ5ET"), None);
+        h.net_frame_in(b"\x09short", None);
         let cmds: Vec<IonCmd> = ion.try_iter().filter(|c| !matches!(c, IonCmd::GroupOpen(..))).collect();
         let want = format!(
             "{:?}",
@@ -1235,6 +1257,62 @@ mod tests {
         h.command("CONNECT N0ABC LOOP");
         assert_eq!(said.next(), "WRONG");
         assert!(!ion.try_iter().any(|c| matches!(c, IonCmd::Connect(_))));
+    }
+
+    /// ABORT ends a net only for the client attached to it; one that never
+    /// attached (the net runs from the Net screen) stops the link alone.
+    #[test]
+    fn abort_ends_a_net_only_for_its_client() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("ABORT");
+        assert_eq!(said.next(), "OK");
+        assert!(ion.try_iter().any(|c| matches!(c, IonCmd::StopLink)));
+        h.command("NET JOIN TNARES");
+        assert_eq!(said.next(), "NET PORT 1");
+        h.command("ABORT");
+        assert_eq!(said.next(), "OK");
+        assert!(ion.try_iter().any(|c| matches!(c, IonCmd::Stop)));
+    }
+
+    /// Text from the air (a check-in line, a net name) cannot start a line
+    /// of its own on the command port.
+    #[test]
+    fn on_air_text_cannot_inject_lines() {
+        let (mut h, _ion, mut said) = client_host();
+        h.command("NET OPEN TNARES");
+        assert_eq!(said.next(), "NET PORT 1");
+        h.net_event(NetEvent::Line {
+            call: "KJ5ET".into(),
+            line: "ARES\rDISCONNECTED\nNET CLOSED".into(),
+        });
+        h.net_event(NetEvent::Joined {
+            ncs: "N0JLF".into(),
+            net: "TN\rBUSY".into(),
+            slot: 1,
+        });
+        assert_eq!(said.next(), "NET LINE KJ5ET ARES DISCONNECTED NET CLOSED");
+        assert_eq!(said.next(), "NET JOINED N0JLF TN BUSY 1");
+    }
+
+    /// An ACKMODE frame on the net's port is sent like a data frame, and its
+    /// tag told back once the net has it.
+    #[test]
+    fn ackmode_frames_on_the_net_port_are_sent_and_acked() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("NET JOIN TNARES");
+        assert_eq!(said.next(), "NET PORT 1");
+        let mut f = 0x1234u16.to_be_bytes().to_vec();
+        f.extend(net_frame("", "", b"AG5B: all well"));
+        h.kiss_in = kiss_frame(1 << 4 | KISS_ACKMODE, &f);
+        h.kiss_in_frames();
+        let cmds: Vec<IonCmd> = ion.try_iter().filter(|c| !matches!(c, IonCmd::NetJoin(_))).collect();
+        assert_eq!(
+            format!("{cmds:?}"),
+            format!(
+                "{:?}",
+                [IonCmd::NetSend(b"AG5B: all well".to_vec()), IonCmd::NetAck(0x1234)]
+            )
+        );
     }
 
     /// A port another program holds (as a closing Ion would): the host

@@ -180,7 +180,10 @@ far end has not yet acknowledged (Pat waits for 0 before closing).
 `ABORT` closes at once.
 `PTT ON/OFF` is for information only: Ion keys the radio itself. `SN`
 gives the S/N of the last burst heard. `ABORT` also drops what broadcast
-frames are queued.
+frames are queued, and ends a net (keying nothing) only for a client
+attached to it with `NET OPEN` or `NET JOIN`. Event lines carry text
+from the air (check-in lines, net names) with control characters made
+spaces, so none starts a line of its own.
 
 `DATA2G ON` (answered `OK`; off with `DATA2G OFF` or when the command
 client leaves) is how a client made for Data2G's host (Ragtime) says it
@@ -271,6 +274,10 @@ Events, as they happen:
   started on the Net screen) answers that net's port.
 - When the command client goes, the net keeps running; the next client
   attaches with `NET OPEN` or `NET JOIN`.
+- ACKMODE frames (0x0C, a 2-byte tag, then the frame) work on the net's
+  port too; the tag comes back once the net has taken the frame (it goes
+  on the air over the polls that follow, so not once it has gone, as for
+  a group).
 - `NET LINE` and `NET TRAFFIC` hold from one net to the next: set them
   before `NET JOIN` and they go with the check-in. Net control offers up
   to 8 objects at once (the oldest goes); each goes on the air only while
