@@ -1,5 +1,6 @@
-//! The Ion worker thread: owns the link [`Node`] and the broadcast groups
-//! a host program opens ([`BcastStation`]); takes
+//! The Ion worker thread: owns the link [`Node`], the broadcast groups
+//! a host program opens ([`BcastStation`]) and, while one is up, a net
+//! ([`NetNode`], in place of the link); takes
 //! received audio from the DSP thread and commands from the UI, and hands
 //! back bursts to transmit, status and received bytes. Decoding a burst
 //! takes tens of milliseconds, so it stays off the DSP and loopback threads.
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use ion::link::bcast::{BcastConfig, BcastEvent, BcastStation};
+use ion::link::net::{Caps, NetConfig, NetEvent, NetNode, RosterEntry};
 use ion::link::node::{DEFAULT_LEAD_S, NodeAir};
 use ion::link::{Air, Gear, Node, Role, State};
 
@@ -26,6 +28,11 @@ const BCAST_ID_HOLD_S: f64 = 10.0;
 const ID_GAP_S: f64 = 1.5;
 /// How long a host program's DISCONNECT waits for what is queued to go.
 pub const HOST_DRAIN_S: f64 = 30.0;
+/// Net control sends its Close this many times, a longest burst apart
+/// (`NetStation::close`); it has gone once nothing more has gone for a
+/// longest burst and this long.
+const NET_CLOSE_BURSTS: f64 = 3.0;
+const NET_END_SLACK_S: f64 = 1.0;
 
 /// From the DSP thread.
 #[derive(Debug)]
@@ -77,6 +84,116 @@ pub enum IonCmd {
     GroupPersist(u8),
     /// Decode plots of the bursts heard (off by default).
     Plot(bool),
+    /// Run the net with this name, as net control (not while a link is up).
+    NetStart(String),
+    /// Join this net (empty: the first one heard).
+    NetJoin(String),
+    /// Member: traffic for net control. Net control: a bulletin for all.
+    NetSend(Vec<u8>),
+    /// Net control: a message for one member. Member: for net control only.
+    NetSendTo(String, Vec<u8>),
+    /// Net control: check-ins open or closed.
+    NetCheckins(bool),
+    /// Net control: close the net (transmits). Member: leave it (keys
+    /// nothing but our CW ID).
+    NetClose,
+    /// What we announce at check-in, from the next net on.
+    NetCaps(Caps),
+    /// The check-in line, at most [`NET_LINE_MAX`] bytes.
+    NetLine(String),
+    /// The traffic we list at check-in.
+    NetTraffic(NetTraffic),
+    /// Net control: an object to offer the net.
+    NetOffer(Vec<u8>),
+}
+
+/// Longest check-in line (docs/ion-net.md, Wire changes).
+pub const NET_LINE_MAX: usize = 40;
+
+/// Precedence of listed traffic, most urgent last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Precedence {
+    #[default]
+    Routine,
+    Welfare,
+    Priority,
+    Emergency,
+}
+
+impl Precedence {
+    pub const ALL: [Precedence; 4] = [
+        Precedence::Routine,
+        Precedence::Welfare,
+        Precedence::Priority,
+        Precedence::Emergency,
+    ];
+
+    /// R, W, P or E, as the host interface writes it.
+    pub fn letter(self) -> char {
+        match self {
+            Precedence::Routine => 'R',
+            Precedence::Welfare => 'W',
+            Precedence::Priority => 'P',
+            Precedence::Emergency => 'E',
+        }
+    }
+
+    pub fn from_letter(c: &str) -> Option<Precedence> {
+        Self::ALL
+            .into_iter()
+            .find(|p| c.len() == 1 && c.starts_with(p.letter()))
+    }
+}
+
+/// Traffic a member lists at check-in: how many items, the precedence of
+/// the most urgent, and short time ("in and out").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetTraffic {
+    pub items: u8,
+    pub precedence: Precedence,
+    pub short: bool,
+}
+
+impl std::fmt::Display for NetTraffic {
+    /// "2 P SHORT", as `NET TRAFFIC` takes it.
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{} {}", self.items, self.precedence.letter())?;
+        if self.short {
+            write!(f, " SHORT")?;
+        }
+        Ok(())
+    }
+}
+
+/// The net as the UI and the host interface see it.
+#[derive(Clone, Debug, Default)]
+pub struct NetStatus {
+    pub ncs: bool,
+    pub net: String,
+    pub ncs_call: Option<String>,
+    /// Member: our slot.
+    pub slot: Option<u8>,
+    /// Net control: everyone checked in.
+    pub roster: Vec<RosterEntry>,
+    /// Member: the stations announced so far.
+    pub members: Vec<(u8, String)>,
+    /// Member: the relay we go through (net control cannot reach us).
+    pub relay: Option<String>,
+    /// Member: the stations we relay for.
+    pub leaves: Vec<String>,
+    /// What we announced at check-in.
+    pub caps: Caps,
+    /// Net control: check-ins open.
+    pub open: bool,
+    /// Bytes still to send.
+    pub pending: usize,
+    /// Net control closed it (its Close bursts may still be going out).
+    pub closed: bool,
+    pub rounds: u32,
+    /// Our check-in line and traffic, and the objects we offer.
+    pub line: String,
+    pub traffic: NetTraffic,
+    pub offers: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +248,8 @@ pub struct IonStatus {
     pub cw_id: bool,
     /// The stream gear and the cues.
     pub stream: Box<StreamView>,
+    /// The net we are in, if any.
+    pub net: Option<Box<NetStatus>>,
 }
 
 /// What the stream and cue lamps need.
@@ -148,6 +267,9 @@ pub enum IonEvent {
     Note(String),
     /// A burst heard, as its receiver saw it ([`IonCmd::Plot`]).
     Plot(Arc<ion::link::node::BurstPlot>),
+    /// Something happened in the net. [`NetEvent::Closed`] also when we
+    /// leave it, or it is dropped.
+    Net(NetEvent),
 }
 
 /// The worker's command channel, and its audio channel for the DSP thread.
@@ -155,6 +277,11 @@ pub struct IonHandle {
     pub cmds: Sender<IonCmd>,
     pub audio: Sender<IonIn>,
     _thread: std::thread::JoinHandle<()>,
+}
+
+/// How long `call`'s CW ID keys the radio, s.
+fn id_secs(call: &str) -> f64 {
+    DEFAULT_LEAD_S + ion::sounding::cw(&format!("DE {call}")).len() as f64 / SAMPLE_RATE as f64
 }
 
 /// Our own station's node, with OFDM at the on-air level (the loopback test
@@ -220,6 +347,18 @@ struct Worker {
     streaming: bool,
     /// Broadcast bursts sent since the last status, for the log.
     bcast_sent: Vec<ion::link::node::BurstNote>,
+    /// The net, while one is up: it has the radio, and `node` is neither
+    /// fed nor polled.
+    net: Option<NetNode>,
+    /// Its longest burst, when our last burst in it ended, and net
+    /// control's Close bursts sent so far.
+    net_max_burst_s: f64,
+    net_tx_end: f64,
+    net_close_sent: u32,
+    net_caps: Caps,
+    net_line: String,
+    net_traffic: NetTraffic,
+    net_offers: Vec<Vec<u8>>,
 }
 
 impl Worker {
@@ -252,6 +391,14 @@ impl Worker {
             plot: false,
             streaming: false,
             bcast_sent: Vec::new(),
+            net: None,
+            net_max_burst_s: 0.0,
+            net_tx_end: 0.0,
+            net_close_sent: 0,
+            net_caps: Caps::default(),
+            net_line: String::new(),
+            net_traffic: NetTraffic::default(),
+            net_offers: Vec::new(),
         }
     }
 
@@ -302,7 +449,7 @@ impl Worker {
         let wait = if self.closing || peer.is_empty() {
             0.0
         } else {
-            DEFAULT_LEAD_S + ion::sounding::cw(&format!("DE {peer}")).len() as f64 / SAMPLE_RATE as f64 + ID_GAP_S
+            id_secs(peer) + ID_GAP_S
         };
         self.id_due = Some(now + wait);
     }
@@ -340,12 +487,226 @@ impl Worker {
         }
     }
 
+    fn linked(&self) -> bool {
+        matches!(
+            self.node.station().state(),
+            State::Connecting | State::Connected | State::Disconnecting
+        )
+    }
+
+    /// A net in place of the link (which stays as it was, unheard, until
+    /// the net is over).
+    fn start_net(&mut self, name: String, ncs: bool) {
+        let name = name.trim().to_ascii_uppercase();
+        let why = if self.call.is_empty() || (ncs && name.is_empty()) {
+            Some("! a net needs your call (Setup) and a net name")
+        } else if self.linked() {
+            Some("! a link is up: no net until it ends")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.note(why);
+            self.send_host(crate::host::HostIn::Net(NetEvent::Closed));
+            return;
+        }
+        if self.net.is_some() {
+            self.note("! already in a net");
+            return;
+        }
+        let mut cfg = NetConfig::new(&self.call, &name, ncs);
+        cfg.caps = self.net_caps;
+        self.net_max_burst_s = cfg.max_burst_s;
+        self.net_tx_end = self.now();
+        self.net_close_sent = 0;
+        let mut n = NetNode::new(cfg, DEFAULT_LEAD_S);
+        n.set_ofdm_gain_db(self.ofdm_db);
+        self.net = Some(n);
+        self.apply_net_prefs();
+        self.note(match (ncs, name.is_empty()) {
+            (true, _) => format!("Ion net {name}: net control"),
+            (false, true) => "Ion net: joining the first net heard".to_string(),
+            (false, false) => format!("Ion net {name}: joining"),
+        });
+    }
+
+    /// Ends our part in the net at once (a member leaves; net control's
+    /// net just stops), with our CW ID now if `id`.
+    fn leave_net(&mut self, id: bool) {
+        let Some(mut n) = self.net.take() else { return };
+        if n.on_air() {
+            let _ = self.engine.send(Msg::Abort);
+        }
+        let mut events = n.station_mut().take_events();
+        if !n.station().closed() {
+            events.push(NetEvent::Closed);
+        }
+        self.forward_net(events);
+        self.net_offers.clear();
+        if id && self.keyed_since_id && self.id_due.is_none() && !self.id_on_air {
+            self.id_due = Some(self.now());
+        }
+    }
+
+    /// Net events to the screen and the host.
+    fn forward_net(&mut self, events: Vec<NetEvent>) {
+        for e in events {
+            self.send_host(crate::host::HostIn::Net(e.clone()));
+            self.event(IonEvent::Net(e));
+        }
+    }
+
+    /// The check-in line, the traffic listed and the objects offered: the
+    /// one place they reach the net, once `crates/ion` takes them
+    /// (`NetStation::set_line`, `set_traffic`, `offer`; docs/ion-net.md,
+    /// Wire changes). Until then they show in [`NetStatus`] only.
+    fn apply_net_prefs(&mut self) {
+        let Some(_net) = self.net.as_mut() else { return };
+    }
+
+    /// The net is over: net control's once its Close bursts have gone (our
+    /// CW ID at once), a member's once it heard the Close (its CW ID after
+    /// the rest of net control's and its CW ID, members in slot order).
+    fn net_over(&mut self, now: f64) {
+        let Some(n) = &self.net else { return };
+        let s = n.station();
+        if !s.closed() || n.on_air() {
+            return;
+        }
+        let name = s.net_name().to_string();
+        if s.is_ncs() {
+            if self.net_close_sent == 0 || now < self.net_tx_end + self.net_max_burst_s + NET_END_SLACK_S {
+                return;
+            }
+            self.leave_net(true);
+        } else {
+            let ncs = s.ncs_call().unwrap_or_default().to_string();
+            let slot = s.slot().unwrap_or(0) as f64;
+            let wait = NET_CLOSE_BURSTS * self.net_max_burst_s
+                + NET_END_SLACK_S
+                + id_secs(&ncs)
+                + ID_GAP_S
+                + slot * (id_secs(&self.call) + ID_GAP_S);
+            self.leave_net(false);
+            if self.keyed_since_id && self.id_due.is_none() && !self.id_on_air {
+                self.id_due = Some(now + wait);
+            }
+        }
+        self.note(format!("Ion net {name}: closed"));
+    }
+
+    /// Mid-net CW ID, once [`ID_EVERY_S`] has passed since we first keyed:
+    /// right after a burst of ours that nobody answers at once (net
+    /// control), or after any of ours (a member, which may cost it an
+    /// acknowledgement it then misses).
+    fn net_id_due(&self, now: f64) -> bool {
+        let Some(n) = &self.net else { return false };
+        let s = n.station();
+        let answered = s.is_ncs() && s.expectation(now).is_some();
+        self.keyed_from.is_some_and(|t| now - t >= ID_EVERY_S) && !answered
+    }
+
+    fn net_status(&self) -> Option<NetStatus> {
+        let n = self.net.as_ref()?;
+        let s = n.station();
+        Some(NetStatus {
+            ncs: s.is_ncs(),
+            net: s.net_name().to_string(),
+            ncs_call: s
+                .ncs_call()
+                .map(str::to_string)
+                .or_else(|| s.is_ncs().then(|| self.call.clone())),
+            slot: s.slot(),
+            roster: if s.is_ncs() { s.roster(self.now()) } else { Vec::new() },
+            members: s.members().iter().map(|(&k, v)| (k, v.clone())).collect(),
+            relay: s.relay_call(),
+            leaves: s.leaf_calls(),
+            caps: s.caps(),
+            open: s.is_open(),
+            pending: s.pending(),
+            closed: s.closed(),
+            rounds: s.stats.rounds,
+            line: self.net_line.clone(),
+            traffic: self.net_traffic,
+            offers: self.net_offers.len(),
+        })
+    }
+
+    fn net_command(&mut self, cmd: IonCmd) {
+        match cmd {
+            IonCmd::NetStart(name) => self.start_net(name, true),
+            IonCmd::NetJoin(name) => self.start_net(name, false),
+            IonCmd::NetSend(bytes) => match self.net.as_mut() {
+                Some(n) => n.station_mut().send(&bytes),
+                None => self.note("! not in a net"),
+            },
+            IonCmd::NetSendTo(call, bytes) => {
+                let call = call.trim().to_ascii_uppercase();
+                let ok = self.net.as_mut().is_some_and(|n| {
+                    let s = n.station_mut();
+                    if s.is_ncs() {
+                        s.send_to(&call, &bytes)
+                    } else if s.ncs_call() == Some(call.as_str()) {
+                        s.send(&bytes);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if !ok {
+                    self.note(format!("! not sent: {call} is not in the net, or not net control"));
+                }
+            }
+            IonCmd::NetCheckins(open) => {
+                if let Some(n) = self.net.as_mut().filter(|n| n.station().is_ncs()) {
+                    n.station_mut().set_open(open);
+                }
+            }
+            IonCmd::NetClose => match self.net.as_ref().map(|n| n.station().is_ncs()) {
+                Some(true) => {
+                    if let Some(n) = self.net.as_mut() {
+                        n.station_mut().close();
+                    }
+                }
+                Some(false) => {
+                    let name = self.net.as_ref().map(|n| n.station().net_name().to_string());
+                    self.leave_net(true);
+                    self.note(format!("Ion net {}: left", name.unwrap_or_default()));
+                }
+                None => {}
+            },
+            IonCmd::NetCaps(c) => self.net_caps = c,
+            IonCmd::NetLine(line) => {
+                let mut line = line.trim().to_string();
+                while line.len() > NET_LINE_MAX {
+                    line.pop();
+                }
+                self.net_line = line;
+                self.apply_net_prefs();
+            }
+            IonCmd::NetTraffic(t) => {
+                self.net_traffic = t;
+                self.apply_net_prefs();
+            }
+            IonCmd::NetOffer(data) => {
+                if self.net.as_ref().is_some_and(|n| n.station().is_ncs()) {
+                    self.net_offers.push(data);
+                    self.apply_net_prefs();
+                } else {
+                    self.note("! only net control offers objects");
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn command(&mut self, cmd: IonCmd) {
         let now = self.now();
         match cmd {
             IonCmd::SetCall(c) => {
                 let c = c.trim().to_ascii_uppercase();
                 if c != self.call {
+                    self.leave_net(true);
                     self.bcast.set_call(&c);
                     self.call = c;
                     self.reset();
@@ -364,6 +725,10 @@ impl Worker {
                 let peer = peer.trim().to_ascii_uppercase();
                 if self.call.is_empty() || peer.is_empty() || peer.contains(char::is_whitespace) {
                     self.note("! Ion needs your call (Settings) and one call to connect to");
+                    return;
+                }
+                if self.net.is_some() {
+                    self.note("! in a net: no link until it ends");
                     return;
                 }
                 self.reset();
@@ -396,6 +761,7 @@ impl Worker {
                         self.send_host(crate::host::HostIn::GroupDropped(p, n));
                     }
                 }
+                self.leave_net(false);
                 self.reset();
                 // Stop keys nothing, not even the ID (it goes out at the end
                 // of the next link instead).
@@ -441,6 +807,9 @@ impl Worker {
             IonCmd::SetOfdmDb(db) => {
                 self.ofdm_db = db;
                 self.node.set_ofdm_gain_db(db);
+                if let Some(n) = self.net.as_mut() {
+                    n.set_ofdm_gain_db(db);
+                }
             }
             IonCmd::SetBurstClip(on) => ion::phy::set_td_clip(on),
             IonCmd::SetGear(g) => {
@@ -451,6 +820,7 @@ impl Worker {
                 self.stream = on;
                 self.refresh_idle();
             }
+            net => self.net_command(net),
         }
     }
 
@@ -513,7 +883,7 @@ impl Worker {
             harq_recovered: st.harq_recovered,
             codewords_failed: st.codewords_failed,
             polls: st.polls,
-            on_air: self.node.on_air() || self.bcast_on_air,
+            on_air: self.node.on_air() || self.bcast_on_air || self.net.as_ref().is_some_and(NetNode::on_air),
             busy: self.node.busy(),
             connected_s: self.connected_at.map_or(0.0, |t| self.now() - t),
             holding: s.holding(),
@@ -525,6 +895,7 @@ impl Worker {
                 gear: s.stream_status(),
                 cues: st.cued_bursts as u64 + self.node.cues_heard(),
             }),
+            net: self.net_status().map(Box::new),
         }
     }
 
@@ -567,10 +938,19 @@ impl Worker {
                     });
                     continue;
                 }
-                match m {
-                    IonIn::Audio(samples) => self.node.push_audio(&samples, now),
-                    IonIn::TxDone => self.node.tx_done(now),
-                    IonIn::Gap(n) => self.node.push_gap(n),
+                match (m, self.net.as_mut()) {
+                    (IonIn::Audio(samples), Some(n)) => n.push_audio(&samples, now),
+                    (IonIn::TxDone, Some(n)) => {
+                        n.tx_done(now);
+                        self.net_tx_end = now;
+                        if self.net_id_due(now) {
+                            self.id_due.get_or_insert(now);
+                        }
+                    }
+                    (IonIn::Gap(_), Some(_)) => {}
+                    (IonIn::Audio(samples), None) => self.node.push_audio(&samples, now),
+                    (IonIn::TxDone, None) => self.node.tx_done(now),
+                    (IonIn::Gap(n), None) => self.node.push_gap(n),
                 }
             }
             let now = self.now();
@@ -583,20 +963,31 @@ impl Worker {
             self.bcast_events();
             // The CW ID when it is due and the channel is ours; nothing
             // else keys while it plays (status still goes out).
-            if !self.id_on_air && !self.bcast_on_air && self.id_due.is_some_and(|t| now >= t) && !self.node.busy() {
+            if !self.id_on_air
+                && !self.bcast_on_air
+                && self.id_due.is_some_and(|t| now >= t)
+                && !self.node.busy()
+                && !self.net.as_ref().is_some_and(NetNode::on_air)
+            {
                 self.id_due = None;
                 self.id_on_air = true;
+                // The net waits it out (no audio comes in while we are keyed).
+                if let Some(n) = self.net.as_mut() {
+                    n.station_mut().set_busy(true);
+                }
                 let _ = self.engine.send(Msg::IonTx(self.id_audio()));
                 self.note(format!("Ion: CW ID (DE {})", self.call));
             }
             let hold_tx = self.id_on_air;
-            // Broadcast only between sessions, as Data2G's host.
+            // Broadcast only between sessions, as Data2G's host, and
+            // never in a net.
             let link_idle = matches!(
                 self.node.station().state(),
                 State::Idle | State::Listening | State::Disconnected | State::Failed
             );
             if !hold_tx
                 && link_idle
+                && self.net.is_none()
                 && !self.bcast_on_air
                 && !self.node.on_air()
                 && let Some(b) = self.bcast.poll_tx(now)
@@ -625,7 +1016,22 @@ impl Worker {
                 });
                 let _ = self.engine.send(Msg::IonTx(audio));
             }
-            if !hold_tx
+            if let Some(n) = self.net.as_mut() {
+                if !hold_tx
+                    && !self.bcast_on_air
+                    && let Some(burst) = n.poll(now)
+                {
+                    self.keyed_since_id = true;
+                    self.keyed_from.get_or_insert(now);
+                    if n.station().closed() {
+                        self.net_close_sent += 1;
+                    }
+                    let _ = self.engine.send(Msg::IonTx(burst));
+                }
+                let events = n.station_mut().take_events();
+                self.forward_net(events);
+                self.net_over(now);
+            } else if !hold_tx
                 && !self.bcast_on_air
                 && let Some(burst) = self.node.poll(now)
             {
