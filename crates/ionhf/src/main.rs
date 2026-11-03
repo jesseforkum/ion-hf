@@ -16,6 +16,8 @@ mod history;
 mod host;
 mod ion_engine;
 mod logbook;
+mod markdown;
+mod net_doc;
 mod panel;
 #[cfg(test)]
 mod pipeline_tests;
