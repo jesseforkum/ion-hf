@@ -134,7 +134,7 @@ fn parse_net(text: &str) -> Option<NetCmd> {
 }
 
 /// A frame on the net's KISS port: `[to length][to][from length][from][data]`.
-fn net_frame(to: &str, from: &str, data: &[u8]) -> Vec<u8> {
+pub(crate) fn net_frame(to: &str, from: &str, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + to.len() + from.len() + data.len());
     for call in [to, from] {
         let b = &call.as_bytes()[..call.len().min(255)];
@@ -146,7 +146,7 @@ fn net_frame(to: &str, from: &str, data: &[u8]) -> Vec<u8> {
 }
 
 /// (to, from, data) of a frame on the net's KISS port.
-fn net_unframe(b: &[u8]) -> Option<(String, String, &[u8])> {
+pub(crate) fn net_unframe(b: &[u8]) -> Option<(String, String, &[u8])> {
     let call = |b: &[u8]| -> Option<(String, usize)> {
         let n = *b.first()? as usize;
         let c = b.get(1..1 + n)?;
@@ -178,7 +178,7 @@ const MAX_PORT: u8 = 15;
 /// level: Ion picks its own from the stations it hears).
 const ION_MODE: &str = "MODE ION 2400 255 16 3.0 30.0";
 
-fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![FEND, command];
     for &b in payload {
         match b {
@@ -193,7 +193,7 @@ fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
 
 /// Whole KISS frames out of `buf` (command byte, payload), leaving a
 /// partial one there.
-fn kiss_frames(buf: &mut Vec<u8>) -> Vec<(u8, Vec<u8>)> {
+pub(crate) fn kiss_frames(buf: &mut Vec<u8>) -> Vec<(u8, Vec<u8>)> {
     let mut out = Vec::new();
     loop {
         let Some(start) = buf.iter().position(|&b| b == FEND) else {

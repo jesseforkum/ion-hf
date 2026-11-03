@@ -90,7 +90,8 @@ pub enum IonCmd {
     NetJoin(String),
     /// Member: traffic for net control. Net control: a bulletin for all.
     NetSend(Vec<u8>),
-    /// Net control: a message for one member. Member: for net control only.
+    /// Net control: a message for one member. Member: for net control only
+    /// (taken as such before it is known).
     NetSendTo(String, Vec<u8>),
     /// Net control: check-ins open or closed.
     NetCheckins(bool),
@@ -646,7 +647,7 @@ impl Worker {
                     let s = n.station_mut();
                     if s.is_ncs() {
                         s.send_to(&call, &bytes)
-                    } else if s.ncs_call() == Some(call.as_str()) {
+                    } else if s.ncs_call().is_none_or(|c| c == call) {
                         s.send(&bytes);
                         true
                     } else {

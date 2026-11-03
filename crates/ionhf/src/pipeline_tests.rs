@@ -422,3 +422,162 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
         c.said
     );
 }
+
+/// One station's host program on the simulated band: its command port
+/// and its KISS port.
+struct NetClient {
+    cmd: TcpStream,
+    lines: BufReader<TcpStream>,
+    kiss: TcpStream,
+    kiss_in: Vec<u8>,
+    /// A line not yet whole.
+    line: Vec<u8>,
+    said: Vec<String>,
+    /// (to, from, data) of every frame on the net's port.
+    frames: Vec<(String, String, Vec<u8>)>,
+}
+
+impl NetClient {
+    fn connect(port: u16) -> NetClient {
+        let cmd = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let kiss = TcpStream::connect(("127.0.0.1", port - 200)).unwrap();
+        cmd.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+        kiss.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+        NetClient {
+            lines: BufReader::new(cmd.try_clone().unwrap()),
+            cmd,
+            kiss,
+            kiss_in: Vec::new(),
+            line: Vec::new(),
+            said: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, line: &str) {
+        self.cmd.write_all(format!("{line}\r").as_bytes()).unwrap();
+    }
+
+    /// A frame for the net (port 1): to `to`, or the whole net.
+    fn frame(&mut self, to: &str, data: &[u8]) {
+        let f = crate::host::net_frame(to, "", data);
+        self.kiss.write_all(&crate::host::kiss_frame(1 << 4, &f)).unwrap();
+    }
+
+    /// What has come in on both ports.
+    fn pump(&mut self) {
+        // A timeout keeps what came of a line.
+        while let Ok(n) = self.lines.read_until(b'\r', &mut self.line)
+            && n > 0
+            && self.line.ends_with(b"\r")
+        {
+            self.said.push(String::from_utf8_lossy(&self.line).trim().to_string());
+            self.line.clear();
+        }
+        let mut b = [0u8; 4096];
+        while let Ok(n) = self.kiss.read(&mut b)
+            && n > 0
+        {
+            self.kiss_in.extend_from_slice(&b[..n]);
+        }
+        for (command, payload) in crate::host::kiss_frames(&mut self.kiss_in) {
+            if command == 1 << 4
+                && let Some((to, from, data)) = crate::host::net_unframe(&payload)
+            {
+                self.frames.push((to, from, data.to_vec()));
+            }
+        }
+    }
+
+    fn said(&self, line: &str) -> bool {
+        self.said.iter().any(|l| l == line)
+    }
+
+    fn said_like(&self, start: &str) -> bool {
+        self.said.iter().any(|l| l.starts_with(start))
+    }
+
+    fn got(&self, to: &str, from: &str, data: &[u8]) -> bool {
+        self.frames.iter().any(|f| f.0 == to && f.1 == from && f.2 == data)
+    }
+}
+
+/// Pumps every client until `done` or `secs` have passed.
+fn net_until(cs: &mut [NetClient], secs: u64, done: impl Fn(&[NetClient]) -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < end {
+        for c in cs.iter_mut() {
+            c.pump();
+        }
+        if done(cs) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A net on the simulated band (`sim`), in real time, driven only through
+/// each station's host interface: N0NCS runs TNARES, KJ5ET and AG5B join
+/// it and check in, their traffic reaches net control and its bulletin
+/// reaches them, and the Close reaches them too. About 3 minutes of three
+/// stations decoding: `cargo test -p ionhf -- --ignored a_net_runs`.
+#[test]
+#[ignore]
+fn a_net_runs_over_the_host_interface() {
+    let calls = ["N0NCS", "KJ5ET", "AG5B"];
+    let ports: Vec<u16> = calls.iter().map(|_| crate::host::free_port()).collect();
+    let o = crate::sim::Opts {
+        stations: calls.len(),
+        mode: ion_dsp::ionos::Mode::Wgn,
+        snr_db: vec![20.0],
+        calls: calls.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    let band = crate::sim::Band::start(&o, &ports).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !band.listening() {
+        assert!(Instant::now() < end, "host ports never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut cs: Vec<NetClient> = ports.iter().map(|&p| NetClient::connect(p)).collect();
+    for (c, call) in cs.iter_mut().zip(calls) {
+        c.send(&format!("MYCALL {call}"));
+    }
+    for c in &mut cs[1..] {
+        c.send("NET JOIN TNARES");
+    }
+    cs[0].send("NET OPEN TNARES");
+    let ok = net_until(&mut cs, 10, |cs| cs.iter().all(|c| c.said("NET PORT 1")));
+    assert!(ok, "{:?}", cs.iter().map(|c| &c.said).collect::<Vec<_>>());
+    cs[0].frame("", b"Net closes at 2130. de N0NCS");
+    cs[1].frame("", b"KJ5ET: no traffic, all well");
+    cs[2].frame("N0NCS", b"AG5B: generator test complete");
+
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 600, |cs| {
+        cs[0].said_like("NET IN KJ5ET ")
+            && cs[0].said_like("NET IN AG5B ")
+            && cs[0].got("N0NCS", "KJ5ET", b"KJ5ET: no traffic, all well")
+            && cs[0].got("N0NCS", "AG5B", b"AG5B: generator test complete")
+            && cs[1..]
+                .iter()
+                .all(|c| c.said_like("NET JOINED N0NCS TNARES ") && c.got("", "N0NCS", b"Net closes at 2130. de N0NCS"))
+    });
+    let report = |cs: &[NetClient]| {
+        cs.iter()
+            .map(|c| format!("said {:?}\nframes {:?}", c.said, c.frames))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    assert!(cs[0].said_like("NET HEARD "), "{}", report(&cs));
+    println!(
+        "net over the host interface: checked in, traffic and bulletin in {:?}",
+        t.elapsed()
+    );
+
+    cs[0].send("NET CLOSE");
+    let ok = net_until(&mut cs, 60, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
+    assert!(ok, "{}", report(&cs));
+}
