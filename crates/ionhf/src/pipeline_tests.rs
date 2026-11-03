@@ -308,6 +308,38 @@ fn a_broadcast_run_ends_with_one_id() {
     h.cmds.send(IonCmd::Stop).unwrap();
 }
 
+/// An ID still owed when a link starts goes first, before the link keys,
+/// and under the call we keyed with, not the one set since.
+#[test]
+fn an_owed_id_goes_before_the_next_link_under_the_old_call() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::GroupOpen(1, "NET".into())).unwrap();
+    h.cmds.send(IonCmd::GroupSend(1, b"one".to_vec(), None)).unwrap();
+    assert!(rig.run_until(Duration::from_secs(20), |r| r.keyed), "no broadcast");
+    assert!(
+        rig.run_until(Duration::from_secs(30), |r| !r.keyed),
+        "broadcast never ended"
+    );
+    // Its ID is owed a few seconds on: a new call and a link before then.
+    h.cmds.send(IonCmd::SetCall("N0NEW".into())).unwrap();
+    h.cmds.send(IonCmd::Connect("LOOP".into())).unwrap();
+    let ok = rig.run_until(Duration::from_secs(15), |r| r.keyed);
+    assert!(ok, "nothing keyed; notes {:?}", rig.ion_notes);
+    rig.run_until(Duration::from_millis(200), |_| false);
+    assert!(rig.id_sent(), "the link keyed before the ID; notes {:?}", rig.ion_notes);
+    assert!(
+        rig.ion_notes.iter().any(|n| n.contains("CW ID (DE N0ABC)")),
+        "{:?}",
+        rig.ion_notes
+    );
+    let ok = rig.run_until(Duration::from_secs(60), |r| r.ion_state == Some(State::Connected));
+    assert!(ok, "never connected; notes {:?}", rig.ion_notes);
+    let n = rig.ion_notes.iter().filter(|n| n.contains("CW ID")).count();
+    assert_eq!(n, 1, "{:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::Stop).unwrap();
+}
+
 /// A host program (standing in for Pat) drives Ion through the VARA-style
 /// interface: connect to LOOP, send a line, read the echo, wait for
 /// BUFFER 0, disconnect.

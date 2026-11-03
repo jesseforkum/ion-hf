@@ -279,7 +279,11 @@ Events, as they happen:
   nothing.
 - Net control sends its CW ID once the Close bursts are over, a member
   after net control's (members in slot order), and both at least every
-  570 s, right after a burst of their own.
+  570 s: a member right after a burst of its own, net control after one
+  nobody answers. Past 590 s either takes the next gap, so a quiet net,
+  where every burst of net control's is answered, still hears it (net
+  control then loses one answer). A relay keeps its ID's slot while it
+  passes the Close to its leaves.
 
 ## On the air
 
@@ -297,6 +301,10 @@ instead of polling into it (`cw_id_breaks_do_not_cost_polls` in
 `crates/ion/tests/node.rs`). A link holding in the lifeline probes right
 after each ID time, so the ID still goes on time
 (`cw_ids_stay_on_time_through_a_hold` in `crates/ion/tests/lifeline.rs`).
+An ID still owed when a link or net starts (say a member's, waiting its
+turn after a Close) goes at once, before anything of the new session
+keys, and an ID owed from before a call change goes out under the old
+call.
 
 **Radio notes.**
 

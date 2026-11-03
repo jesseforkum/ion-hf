@@ -28,6 +28,9 @@ const ID_EVERY_S: f64 = 570.0;
 const BCAST_ID_HOLD_S: f64 = 10.0;
 /// From the end of the closing station's CW ID to the start of ours.
 const ID_GAP_S: f64 = 1.5;
+/// In a net, past [`ID_EVERY_S`]: how long net control waits for a burst
+/// of its own that nobody answers before it takes any gap for its ID.
+const NET_ID_GRACE_S: f64 = 20.0;
 /// How long a host program's DISCONNECT waits for what is queued to go.
 pub const HOST_DRAIN_S: f64 = 30.0;
 /// Net control sends its Close this many times, a longest burst apart
@@ -270,6 +273,13 @@ fn id_secs(call: &str) -> f64 {
     DEFAULT_LEAD_S + ion::sounding::cw(&format!("DE {call}")).len() as f64 / SAMPLE_RATE as f64
 }
 
+/// Mid-net CW ID now, `keyed_s` after we first keyed since the last:
+/// net control after a burst of its own that nobody answers at once (or,
+/// past [`NET_ID_GRACE_S`], after any), a member after any of its own.
+fn net_id_now(ncs: bool, keyed_s: f64, answer_expected: bool) -> bool {
+    keyed_s >= ID_EVERY_S && (!ncs || !answer_expected || keyed_s >= ID_EVERY_S + NET_ID_GRACE_S)
+}
+
 /// Our own station's node, with OFDM at the on-air level (the loopback test
 /// stations stay at 0 dB).
 fn on_air_node(call: &str, gear: Gear, stream: bool, ofdm_db: f32) -> Node {
@@ -317,6 +327,8 @@ struct Worker {
     id_due: Option<f64>,
     /// Our CW ID is playing.
     id_on_air: bool,
+    /// The call our owed CW ID is for, when it is not ours any more.
+    id_call: Option<String>,
     /// We asked for the goodbye (so we ID first).
     closing: bool,
     /// Broadcast groups, beside the link; sessions go first.
@@ -368,6 +380,7 @@ impl Worker {
             keyed_since_id: false,
             id_due: None,
             id_on_air: false,
+            id_call: None,
             closing: false,
             bcast: BcastStation::new(
                 BcastConfig::new(&bcast_call),
@@ -423,11 +436,18 @@ impl Worker {
         }
     }
 
-    /// Our CW ID, with the PTT lead-in.
-    fn id_audio(&self) -> Vec<f32> {
+    /// A CW ID for `call`, with the PTT lead-in.
+    fn id_audio(call: &str) -> Vec<f32> {
         let mut a = vec![0.0; (DEFAULT_LEAD_S * SAMPLE_RATE as f64) as usize];
-        a.extend(ion::sounding::cw(&format!("DE {}", self.call)));
+        a.extend(ion::sounding::cw(&format!("DE {call}")));
         a
+    }
+
+    /// A new link or net: a CW ID still owed for the last goes first.
+    fn id_before_session(&mut self, now: f64) {
+        if let Some(t) = self.id_due.as_mut() {
+            *t = t.min(now);
+        }
     }
 
     /// The link has ended: our CW ID, now if we closed it (or it failed),
@@ -477,6 +497,15 @@ impl Worker {
         }
     }
 
+    /// The channel is in use: the net's receiver while a net is up (the
+    /// link's hears nothing then), else the link's.
+    fn channel_busy(&self) -> bool {
+        match &self.net {
+            Some(n) => n.busy(),
+            None => self.node.busy(),
+        }
+    }
+
     fn linked(&self) -> bool {
         matches!(
             self.node.station().state(),
@@ -492,6 +521,8 @@ impl Worker {
             Some("! a net needs your call (Setup) and a net name")
         } else if self.linked() {
             Some("! a link is up: no net until it ends")
+        } else if self.node.on_air() {
+            Some("! a burst is on the air: no net until it ends")
         } else {
             None
         };
@@ -504,6 +535,7 @@ impl Worker {
             self.note("! already in a net");
             return;
         }
+        self.id_before_session(self.now());
         let mut cfg = NetConfig::new(&self.call, &name, ncs);
         cfg.caps = self.net_caps;
         cfg.line = self.net_line.clone();
@@ -600,8 +632,8 @@ impl Worker {
     fn net_id_due(&self, now: f64) -> bool {
         let Some(n) = &self.net else { return false };
         let s = n.station();
-        let answered = s.is_ncs() && s.expectation(now).is_some();
-        self.keyed_from.is_some_and(|t| now - t >= ID_EVERY_S) && !answered
+        self.keyed_from
+            .is_some_and(|t| net_id_now(s.is_ncs(), now - t, s.expectation(now).is_some()))
     }
 
     fn net_status(&self) -> Option<NetStatus> {
@@ -722,6 +754,9 @@ impl Worker {
                 let c = c.trim().to_ascii_uppercase();
                 if c != self.call {
                     self.leave_net(true);
+                    if self.keyed_since_id {
+                        self.id_call.get_or_insert_with(|| self.call.clone());
+                    }
                     self.bcast.set_call(&c);
                     self.call = c;
                     self.reset();
@@ -747,6 +782,7 @@ impl Worker {
                     return;
                 }
                 self.reset();
+                self.id_before_session(now);
                 self.node.station_mut().connect(&peer, now);
                 self.note(format!("Ion: calling {peer}"));
             }
@@ -781,6 +817,7 @@ impl Worker {
                 // Stop keys nothing, not even the ID (it goes out at the end
                 // of the next link instead).
                 self.id_due = None;
+                self.id_call = None;
                 self.note("Ion: stopped");
             }
             IonCmd::GiveUp => {
@@ -899,7 +936,7 @@ impl Worker {
             codewords_failed: st.codewords_failed,
             polls: st.polls,
             on_air: self.node.on_air() || self.bcast_on_air || self.net.as_ref().is_some_and(NetNode::on_air),
-            busy: self.node.busy(),
+            busy: self.channel_busy(),
             connected_s: self.connected_at.map_or(0.0, |t| self.now() - t),
             holding: s.holding(),
             end: s.end(),
@@ -976,12 +1013,32 @@ impl Worker {
             }
             self.bcast.set_busy(self.node.busy());
             self.bcast_events();
+            let link_idle = matches!(
+                self.node.station().state(),
+                State::Idle | State::Listening | State::Disconnected | State::Failed
+            );
+            if !link_idle {
+                // A link was taken (a call heard) while an ID was owed.
+                self.id_before_session(now);
+            }
+            // In a net, past the grace: any gap, so a quiet net (where every
+            // burst of net control's is answered, and no burst of a member's
+            // may come) still hears our ID.
+            if let Some(n) = &self.net
+                && !n.on_air()
+                && !self.id_on_air
+                && self.keyed_from.is_some_and(|t| now - t >= ID_EVERY_S + NET_ID_GRACE_S)
+            {
+                self.id_due.get_or_insert(now);
+            }
             // The CW ID when it is due and the channel is ours; nothing
-            // else keys while it plays (status still goes out).
+            // else keys while it plays, or while it waits for the channel
+            // (status still goes out).
+            let id_waiting = self.id_due.is_some_and(|t| now >= t);
             if !self.id_on_air
                 && !self.bcast_on_air
-                && self.id_due.is_some_and(|t| now >= t)
-                && !self.node.busy()
+                && id_waiting
+                && !self.channel_busy()
                 && !self.net.as_ref().is_some_and(NetNode::on_air)
             {
                 self.id_due = None;
@@ -990,16 +1047,13 @@ impl Worker {
                 if let Some(n) = self.net.as_mut() {
                     n.station_mut().set_busy(true);
                 }
-                let _ = self.engine.send(Msg::IonTx(self.id_audio()));
-                self.note(format!("Ion: CW ID (DE {})", self.call));
+                let call = self.id_call.take().unwrap_or_else(|| self.call.clone());
+                let _ = self.engine.send(Msg::IonTx(Self::id_audio(&call)));
+                self.note(format!("Ion: CW ID (DE {call})"));
             }
-            let hold_tx = self.id_on_air;
+            let hold_tx = self.id_on_air || id_waiting;
             // Broadcast only between sessions, as Data2G's host, and
             // never in a net.
-            let link_idle = matches!(
-                self.node.station().state(),
-                State::Idle | State::Listening | State::Disconnected | State::Failed
-            );
             if !hold_tx
                 && link_idle
                 && self.net.is_none()
@@ -1176,4 +1230,112 @@ pub fn spawn_peer() -> PeerLink {
         })
         .expect("spawn ion peer");
     PeerLink { to_peer, from_peer }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ion::link::net::{NetConfig, NetStation};
+    use ion::link::net_sim::{NetSim, SimStation};
+    use ion::link::sim::ModelAir;
+    use ion::link::{Air, Incoming, Outgoing};
+
+    use super::*;
+
+    /// A net station that keys its CW ID by the worker's rules: after a
+    /// burst of its own ([`net_id_now`]), or in any gap past the grace,
+    /// nothing else keyed while the ID waits or plays.
+    struct IdStation {
+        s: NetStation,
+        on_air: bool,
+        busy: bool,
+        keyed_from: Option<f64>,
+        id_due: bool,
+        id_until: f64,
+        /// (first keyed, ID keyed).
+        spans: Vec<(f64, f64)>,
+    }
+
+    impl SimStation for IdStation {
+        fn poll_tx(&mut self, now: f64) -> Option<Outgoing> {
+            if now < self.id_until || self.on_air {
+                return None;
+            }
+            if self.keyed_from.is_some_and(|t| now - t >= ID_EVERY_S + NET_ID_GRACE_S) {
+                self.id_due = true;
+            }
+            if self.id_due {
+                if !self.busy {
+                    self.id_due = false;
+                    self.spans.push((self.keyed_from.take().unwrap(), now));
+                    self.id_until = now + id_secs(self.s.call());
+                    self.s.set_busy(true);
+                }
+                return None;
+            }
+            let b = self.s.poll_tx(now)?;
+            self.on_air = true;
+            self.keyed_from.get_or_insert(now);
+            Some(b)
+        }
+
+        fn on_tx_done(&mut self, t: f64) {
+            self.on_air = false;
+            self.s.on_tx_done(t);
+            let expected = self.s.expectation(t).is_some();
+            if self
+                .keyed_from
+                .is_some_and(|k| net_id_now(self.s.is_ncs(), t - k, expected))
+            {
+                self.id_due = true;
+            }
+        }
+
+        fn on_rx_at(&mut self, inc: &Incoming, now: f64, air: Option<(f64, f64)>) {
+            // Deaf while keyed.
+            if now >= self.id_until {
+                self.s.on_rx_at(inc, now, air);
+            }
+        }
+
+        fn set_busy(&mut self, busy: bool) {
+            self.busy = busy;
+            self.s.set_busy(busy || self.id_due);
+        }
+    }
+
+    /// A quiet net, check-ins closed (no beacons) and nobody with traffic:
+    /// every burst of net control's is a poll that is answered, yet both it
+    /// and its members identify at least every 10 minutes.
+    #[test]
+    fn a_quiet_net_identifies_every_ten_minutes() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let station = |call: &str, ncs: bool| IdStation {
+            s: NetStation::new(NetConfig::new(call, "TNARES", ncs), air.clone()),
+            on_air: false,
+            busy: false,
+            keyed_from: None,
+            id_due: false,
+            id_until: 0.0,
+            spans: Vec::new(),
+        };
+        let stations = vec![station("N0NCS", true), station("KJ5ET", false), station("AG5B", false)];
+        let mut sim = NetSim::new(stations, 10.0, air.clone(), 7);
+        let ok = sim.run_until(900.0, |s| s.stations[1..].iter().all(|m| m.s.slot().is_some()));
+        assert!(ok, "the members never joined");
+        sim.stations[0].s.set_open(false);
+        sim.run_until(sim.t + 3600.0, |_| false);
+        for st in &sim.stations {
+            let call = st.s.call();
+            assert!(st.spans.len() >= 5, "{call}: IDs {:?}", st.spans);
+            for &(from, id) in &st.spans {
+                assert!(id - from <= 600.0, "{call}: keyed at {from:.0} s, ID at {id:.0} s");
+            }
+            if let Some(from) = st.keyed_from {
+                assert!(sim.t - from <= 600.0, "{call}: no ID since {from:.0} s");
+            }
+        }
+        assert!(sim.stations[0].s.stats.replies > 100, "the net kept going");
+    }
 }

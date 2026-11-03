@@ -220,6 +220,11 @@ impl NetNode {
         self.on_air
     }
 
+    /// Receiving a burst (or what may be one).
+    pub fn busy(&self) -> bool {
+        self.rx.busy()
+    }
+
     /// See [`crate::link::Node::set_ofdm_gain_db`].
     pub fn set_ofdm_gain_db(&mut self, db: f32) {
         self.ofdm_gain = audio::ofdm_gain(db);
