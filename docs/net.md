@@ -184,8 +184,9 @@ the length). SHA-256 is implemented in the crate (`object.rs`, checked
 against the FIPS vectors).
 
 - **Offers:** `NetStation::offer(data)` at NCS puts it on the offer list
-  (up to `MAX_OFFERS`, 8; when full, the oldest goes); `withdraw(id)` takes
-  it off. NCS sends the list in Offer frames (two entries each, an empty
+  (up to `MAX_OFFERS`, 8; when full, the oldest goes), on the free index
+  taken longest ago, so a re-offered object rarely lands where members
+  still hold the old one; `withdraw(id)` takes it off. NCS sends the list in Offer frames (two entries each, an empty
   entry for a free index) in its own burst before the round's bulletin
   pieces, at the level the weakest member it polls can decode. It sends it
   when the list changed, after every beacon (for late joiners), and in any
@@ -199,7 +200,15 @@ against the FIPS vectors).
   name is not trusted: the member fetches the object over the air and
   rewrites the file.
 - **Objects byte** in the report: bit i says the member holds offer i
-  (`RosterEntry::holds`).
+  (`RosterEntry::holds`). It names offers by index, so when index i
+  changes object NCS stops believing bit i from every member that
+  reported holding the old one, until a report of its shows bit i clear
+  (it heard the new list and lacks the new object). Until then the member
+  counts as lacking it, which keeps the list going out each round. A
+  member that held the old object and already holds the new one stays
+  unbelieved for that index (net control's close then waits its 180 s).
+- **Whose list:** a member takes Offer frames only from NCS, a leaf only
+  from its relay: another relay's list may be out of date.
 - **Fetching:** an object is cut into blocks of the bulletin code (2 560
   bytes, at most 26 blocks), numbered `0x8000 | offer << 5 | block` in the
   bulletin's block space. A member with every bulletin block reports the
@@ -212,7 +221,8 @@ against the FIPS vectors).
   fetching member can decode. A member that holds an object never reports
   it, so it costs no pieces and does not lower the level.
 - **Leaves:** a relay passes the offer list to its leaves (when it changed,
-  or the leaf's report says it missed it) and serves a leaf's object blocks
+  or the leaf's report says it missed it), as many of its frames as fit
+  in the burst and the rest in the next turns, and serves a leaf's object blocks
   from its own copy, decoded or from its store; NCS sends nothing for a
   leaf whose relay holds the object.
 - **Checked:** once a member has every block it puts the object together
@@ -439,7 +449,9 @@ timing is unknown), seeks, and the members' own receivers.
 fields a member without priming reads, and the chorus flag is a caps bit
 such a member ignores. `PROTOCOL` is 3 since the traffic byte, the line
 and objects (the net has not been on the air, so nothing older is
-understood); the check-in format prior assumes that version byte.
+understood); the check-in format prior assumes that version byte. NCS
+drops reports shorter than 14 bytes, so a protocol 2 member's reports are
+ignored.
 
 ### Measured (over real modulated audio)
 

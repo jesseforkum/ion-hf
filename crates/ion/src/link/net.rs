@@ -345,6 +345,8 @@ pub struct NetStation {
     /// NCS: the objects on offer, by index.
     offers: [Option<Offer>; MAX_OFFERS],
     offer_seq: u64,
+    /// When each index last took an offer (`offer_seq`; 0: never).
+    offer_used: [u64; MAX_OFFERS],
     /// The offer list is to go out (it changed, or a beacon went).
     offers_due: bool,
     offer_round: Option<u32>,
@@ -481,6 +483,7 @@ impl NetStation {
             tree_news: BTreeSet::new(),
             offers: Default::default(),
             offer_seq: 0,
+            offer_used: [0; MAX_OFFERS],
             offers_due: false,
             offer_round: None,
             lead_s: 0.0,
@@ -663,13 +666,18 @@ impl NetStation {
         if self.offers.iter().flatten().any(|o| o.id == id) {
             return id;
         }
-        let i = match self.offers.iter().position(Option::is_none) {
-            Some(i) => i,
-            None => (0..MAX_OFFERS)
-                .min_by_key(|&i| self.offers[i].as_ref().map_or(0, |o| o.seq))
-                .unwrap(),
-        };
+        // The free index taken longest ago, so a new object rarely lands
+        // where members may still hold an old one under the same index.
+        let i = (0..MAX_OFFERS)
+            .filter(|&i| self.offers[i].is_none())
+            .min_by_key(|&i| self.offer_used[i])
+            .unwrap_or_else(|| {
+                (0..MAX_OFFERS)
+                    .min_by_key(|&i| self.offers[i].as_ref().map_or(0, |o| o.seq))
+                    .unwrap()
+            });
         self.offer_seq += 1;
+        self.offer_used[i] = self.offer_seq;
         self.offers[i] = Some(Offer {
             id,
             data: data.to_vec(),
@@ -957,6 +965,68 @@ mod tests {
     use super::*;
     use crate::link::net_sim::NetSim;
     use crate::link::sim::ModelAir;
+
+    fn heard(b: &Outgoing) -> Incoming {
+        Incoming {
+            wave: b.wave,
+            code: b.code,
+            user: b.user,
+            extra: b.extra,
+            frames: b.frames.iter().map(|f| Some(f.clone())).collect(),
+            soft: None,
+            snr_db: 10.0,
+            chan: crate::chan::ChannelMeas::of_snr(10.0),
+            slot: 0,
+            grid: None,
+        }
+    }
+
+    /// A member takes the offer list from NCS, a leaf from its relay, and
+    /// neither from another member's relay (whose list may be stale).
+    #[test]
+    fn the_offer_list_counts_only_from_ncs_or_our_relay() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air.clone());
+        let relay = NetStation::new(NetConfig::new("W1AW", "EMCOMM", false), air.clone());
+        let mut m = NetStation::new(NetConfig::new("K1ABC", "EMCOMM", false), air);
+        let wave = LADDER[FLOOR].wave;
+        let list = |id: ObjectId| {
+            let mut l = [None; MAX_OFFERS];
+            l[0] = Some(id);
+            l
+        };
+        let (a, b, c) = (ObjectId::of(b"a"), ObjectId::of(b"b"), ObjectId::of(b"c"));
+        let from_ncs = heard(&ncs.ctrl(offer_frames(&list(a), ALL), wave));
+        let from_5 = heard(&relay.ctrl_hi(offer_frames(&list(b), 5), wave, ASIDE));
+        let from_6 = heard(&relay.ctrl_hi(offer_frames(&list(c), 6), wave, ASIDE));
+        m.on_rx(&from_5, 1.0);
+        assert_eq!(m.known_offers[0], None, "a relay's list, heard by a direct member");
+        m.on_rx(&from_ncs, 2.0);
+        assert_eq!(m.known_offers[0], Some(a));
+        m.parent = Some(5);
+        m.on_rx(&from_6, 3.0);
+        assert_eq!(m.known_offers[0], Some(a), "another relay's list, heard by a leaf");
+        m.on_rx(&from_5, 4.0);
+        assert_eq!(m.known_offers[0], Some(b));
+        m.on_rx(&from_ncs, 5.0);
+        assert_eq!(m.known_offers[0], Some(b), "NCS's list, heard by a leaf");
+    }
+
+    /// A withdrawn object's index is the last one taken again.
+    #[test]
+    fn a_new_offer_takes_the_index_free_longest() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        let a = ncs.offer(b"profile v1");
+        ncs.withdraw(a);
+        let b = ncs.offer(b"profile v2");
+        let at = |n: &NetStation, id| n.offers().iter().position(|o| *o == Some(id));
+        assert_eq!(at(&ncs, b), Some(1));
+        ncs.withdraw(b);
+        let ids: Vec<ObjectId> = (0..MAX_OFFERS as u8).map(|k| ncs.offer(&[k])).collect();
+        assert_eq!(at(&ncs, ids[0]), Some(2));
+        assert_eq!(at(&ncs, ids[MAX_OFFERS - 1]), Some(1));
+    }
 
     #[test]
     fn an_object_that_does_not_match_its_id_is_rejected() {

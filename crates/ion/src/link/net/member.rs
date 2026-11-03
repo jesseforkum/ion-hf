@@ -445,7 +445,19 @@ impl NetStation {
                     }
                 }
             }
-            Some(C_OFFER) => self.offer_frame(p),
+            Some(C_OFFER) => {
+                // NCS's list, or a leaf's relay's: never another relay's,
+                // which may be out of date.
+                let aside = user_hi(inc.user) & ASIDE != 0;
+                let from = f.flags & 63;
+                let ours = match self.parent {
+                    None => !aside && from == ALL,
+                    Some(r) => aside && from == r,
+                };
+                if ours {
+                    self.offer_frame(p);
+                }
+            }
             Some(C_TREE) => {
                 for e in p[1..].as_chunks::<2>().0 {
                     self.set_parent(e[0], e[1]);

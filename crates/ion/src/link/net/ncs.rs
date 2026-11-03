@@ -49,8 +49,14 @@ pub(super) struct Member {
     pub(super) line: String,
     /// Parts of a new line as they come in.
     pub(super) line_parts: [Option<Vec<u8>>; 2],
-    /// Which offers it holds (bit i: offer i), from its reports.
+    /// Which offers it holds (bit i: offer i), from its reports, and what
+    /// its last report said. A report names offers by index only: one
+    /// whose object changed while the member held the old one is not
+    /// believed (`stale`) until a report shows it cleared, which a member
+    /// that heard the new list and lacks the new object sends.
     pub(super) holds: u8,
+    pub(super) reported: u8,
+    pub(super) stale: u8,
 }
 
 impl Member {
@@ -82,6 +88,8 @@ impl Member {
             line: String::new(),
             line_parts: [None, None],
             holds: 0,
+            reported: 0,
+            stale: 0,
         }
     }
 
@@ -805,7 +813,9 @@ impl NetStation {
                             m.snr_down = Some(snr_from_q(p[2]));
                             m.bul = Some((u16::from_le_bytes([p[6], p[7]]), p[8]));
                             m.dir_delivered = m.dir_delivered.max(u24(&p[9..12]));
-                            m.holds = p[13];
+                            m.stale &= p[13];
+                            m.reported = p[13];
+                            m.holds = p[13] & !m.stale;
                             for h in p[REPORT_LEN..].as_chunks::<2>().0 {
                                 m.hears.insert(h[0], snr_from_q(h[1]));
                             }

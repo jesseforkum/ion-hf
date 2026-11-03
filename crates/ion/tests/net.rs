@@ -1067,3 +1067,83 @@ fn a_member_that_hears_nothing_of_ncs_gives_the_net_up() {
     assert!(sim.t - off >= lost_after - 60.0, "lost after only {:.0} s", sim.t - off);
     assert!(sim.stations[1..].iter().all(|s| s.closed()));
 }
+
+/// A net whose 8 offers are all held by both members, as the list goes.
+fn full_offers(test: &str, seed: u64) -> (NetSim, Vec<Vec<NetEvent>>, Vec<ObjectId>) {
+    let calls = ["K1ABC", "W1AW"];
+    let mut sim = net(&calls, 10.0, seed, |c| {
+        if !c.ncs {
+            let dir = store(test, &c.call);
+            let _ = std::fs::remove_dir_all(&dir);
+            c.store = Some(dir);
+        }
+    });
+    let mut ev = vec![Vec::new(); 3];
+    assert!(run(&mut sim, &mut ev, 1200.0, |ev| ev[1..].iter().all(|e| joined(e))));
+    let ids: Vec<ObjectId> = (0..8u8).map(|k| sim.stations[0].offer(&vec![b'a' + k; 300])).collect();
+    assert_eq!(sim.stations[0].offers().map(|o| o.unwrap()).to_vec(), ids);
+    let until = sim.t + 3600.0;
+    let ok = sim.run_until(until, |s| s.stations[0].roster(s.t).iter().all(|r| r.holds == 0xFF));
+    assert!(ok, "after {:.0} s: {:#?}", sim.t, sim.stations[0].roster(sim.t));
+    for (k, s) in sim.stations.iter_mut().enumerate() {
+        ev[k].extend(s.take_events());
+    }
+    (sim, ev, ids)
+}
+
+/// K1ABC misses the list that puts `data` where an object it holds was:
+/// net control must not take its old report for the new object, and it
+/// must still get the new one.
+fn missed_list_check(test: &str, sim: &mut NetSim, ev: &mut [Vec<NetEvent>], data: &[u8]) {
+    let id = ObjectId::of(data);
+    sim.on[1] = false;
+    assert_eq!(sim.stations[0].offer(data), id);
+    let i = sim.stations[0].offers().iter().position(|o| *o == Some(id)).unwrap();
+    assert_eq!(i, 0, "an index held before");
+    let until = sim.t + 120.0;
+    run(sim, ev, until, |_| false);
+    // Its next report goes (something in it changed), still with the old
+    // list's holdings.
+    sim.stations[1].set_traffic(Traffic {
+        items: 1,
+        ..Traffic::default()
+    });
+    sim.on[1] = true;
+    let until = sim.t + 2400.0;
+    let mut got = false;
+    while sim.t < until && !got {
+        for (k, s) in sim.stations.iter_mut().enumerate() {
+            ev[k].extend(s.take_events());
+        }
+        got = objects(&ev[1]).iter().any(|o| o.0 == id);
+        let r = sim.stations[0].roster(sim.t);
+        let claimed = r.iter().any(|e| e.call == "K1ABC" && e.holds & 1 << i != 0);
+        assert!(
+            got || !claimed,
+            "{test}: net control takes K1ABC to hold it before it has it"
+        );
+        for _ in 0..100 {
+            sim.step();
+        }
+    }
+    assert!(got, "{test}: K1ABC never got it: {:#?}", sim.stations[0].roster(sim.t));
+    for c in ["K1ABC", "W1AW"] {
+        let _ = std::fs::remove_dir_all(store(test, c));
+    }
+}
+
+/// Re-offering (withdraw, then offer) with every other index in use puts
+/// the new object on the old one's index.
+#[test]
+fn a_reoffer_on_a_used_index_reaches_a_member_that_missed_the_list() {
+    let (mut sim, mut ev, ids) = full_offers("reoffer", 24);
+    sim.stations[0].withdraw(ids[0]);
+    missed_list_check("reoffer", &mut sim, &mut ev, b"the profile, edited");
+}
+
+/// A ninth offer (the summary at the close) takes the oldest one's index.
+#[test]
+fn a_ninth_offer_is_not_taken_as_held_by_a_member_that_held_the_oldest() {
+    let (mut sim, mut ev, _) = full_offers("ninth", 25);
+    missed_list_check("ninth", &mut sim, &mut ev, b"the summary");
+}

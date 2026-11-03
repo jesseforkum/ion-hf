@@ -141,6 +141,9 @@ impl NetStation {
     /// again, and the list goes out.
     pub(super) fn offer_changed(&mut self, i: usize) {
         for m in self.members.values_mut() {
+            if m.reported & 1 << i != 0 {
+                m.stale |= 1 << i;
+            }
             m.holds &= !(1 << i);
         }
         self.offers_due = true;
