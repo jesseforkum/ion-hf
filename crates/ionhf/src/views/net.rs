@@ -64,6 +64,16 @@ fn title(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).strong());
 }
 
+/// Drawn: the fonts have no check mark.
+fn tick(ui: &mut egui::Ui, color: egui::Color32) {
+    let h = ui.text_style_height(&egui::TextStyle::Body);
+    let (r, _) = ui.allocate_exact_size(egui::vec2(h, h), egui::Sense::hover());
+    let p = |x: f32, y: f32| r.left_top() + egui::vec2(x, y) * h;
+    let stroke = egui::Stroke::new(2.0, color);
+    ui.painter().line_segment([p(0.15, 0.55), p(0.4, 0.8)], stroke);
+    ui.painter().line_segment([p(0.4, 0.8), p(0.85, 0.25)], stroke);
+}
+
 fn db(v: Option<f32>) -> String {
     v.map_or("—".into(), |v| format!("{v:+.0}"))
 }
@@ -469,12 +479,11 @@ fn roster(app: &mut App, ui: &mut egui::Ui) {
                     let mc = if r.missed > 0 { theme::BAD } else { theme::MUTED };
                     ui.label(RichText::new(r.missed.to_string()).monospace().color(mc));
                     let held = ann.is_some_and(|i| r.holds & 1 << i != 0);
-                    let (mark, c) = if held {
-                        ("✔", theme::OK)
+                    if held {
+                        tick(ui, theme::OK);
                     } else {
-                        ("—", theme::MUTED)
-                    };
-                    ui.label(RichText::new(mark).color(c));
+                        ui.label(RichText::new("—").color(theme::MUTED));
+                    }
                     if ui.small_button("To").clicked() {
                         to = Some(r.call.clone());
                     }

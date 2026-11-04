@@ -246,6 +246,8 @@ impl Cached {
 }
 
 const BODY: f32 = 14.0;
+/// Widest table cell before it wraps, points.
+const CELL_W: f32 = 320.0;
 
 fn job(spans: &[Span], size: f32, color: Color32) -> LayoutJob {
     let mut j = LayoutJob::default();
@@ -351,7 +353,12 @@ pub fn show(ui: &mut egui::Ui, blocks: &[Block]) {
                                 if r == 0 {
                                     spans.iter_mut().for_each(|s| s.strong = true);
                                 }
-                                para(ui, job(&spans, BODY, theme::TEXT));
+                                // Laid out here: a wrapping label in a new grid
+                                // column wraps to almost nothing.
+                                let mut j = job(&spans, BODY, theme::TEXT);
+                                j.wrap.max_width = CELL_W;
+                                let g = ui.fonts_mut(|f| f.layout_job(j));
+                                ui.add(egui::Label::new(g).selectable(true));
                             }
                             ui.end_row();
                         }
