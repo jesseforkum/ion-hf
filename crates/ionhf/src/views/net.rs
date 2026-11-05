@@ -74,6 +74,13 @@ fn tick(ui: &mut egui::Ui, color: egui::Color32) {
     ui.painter().line_segment([p(0.4, 0.8), p(0.85, 0.25)], stroke);
 }
 
+fn abort(app: &mut App, ui: &mut egui::Ui, size: egui::Vec2) {
+    let b = egui::Button::new(RichText::new("Abort").color(theme::BAD)).min_size(size);
+    if ui.add(b).on_hover_text("Stop now; keys nothing (Esc)").clicked() {
+        app.abort();
+    }
+}
+
 fn db(v: Option<f32>) -> String {
     v.map_or("—".into(), |v| format!("{v:+.0}"))
 }
@@ -173,11 +180,13 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         match app.net().cloned() {
             None => {
-                let open = ui.add_enabled(
-                    can && !app.cfg.net_profile.name.trim().is_empty(),
-                    egui::Button::new(RichText::new("Open").strong()).min_size(b),
-                );
-                if open.clicked() {
+                let start = ui
+                    .add_enabled(
+                        can && !app.cfg.net_profile.name.trim().is_empty(),
+                        egui::Button::new(RichText::new("Start").strong()).min_size(b),
+                    )
+                    .on_hover_text("Open the net as NCS; transmits");
+                if start.clicked() {
                     app.net_open();
                 }
             }
@@ -189,20 +198,23 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                         let cmds = app.nets.close_now();
                         app.cmds(cmds);
                     }
+                    abort(app, ui, egui::Vec2::ZERO);
                 });
             }
             Some(n) => {
                 ui.horizontal(|ui| {
-                    let mut open = n.open;
-                    let check = ui.add_enabled(!n.closed, egui::Checkbox::new(&mut open, "Check-ins"));
-                    if check.changed() {
-                        app.cmd(IonCmd::NetCheckins(open));
-                    }
-                    let close = egui::Button::new(RichText::new("Close").color(theme::BAD)).min_size(b);
-                    if ui.add_enabled(!n.closed, close).clicked() {
+                    let close = egui::Button::new("Close").min_size(b);
+                    let close = ui.add_enabled(!n.closed, close).on_hover_text("Summary, then close");
+                    if close.clicked() {
                         app.net_close();
                     }
+                    abort(app, ui, b);
                 });
+                let mut open = n.open;
+                let check = ui.add_enabled(!n.closed, egui::Checkbox::new(&mut open, "Check-ins"));
+                if check.changed() {
+                    app.cmd(IonCmd::NetCheckins(open));
+                }
             }
         }
         ui.add_space(14.0);
@@ -226,8 +238,13 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
             if ui.add_enabled(can, egui::Button::new("Join").min_size(b)).clicked() {
                 app.net_join();
             }
-        } else if ui.add(egui::Button::new("Leave").min_size(b)).clicked() {
-            app.cmd(IonCmd::NetClose);
+        } else {
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new("Leave").min_size(b)).clicked() {
+                    app.cmd(IonCmd::NetClose);
+                }
+                abort(app, ui, b);
+            });
         }
         ui.add_space(6.0);
         let mut c = app.net().map_or(app.net_caps, |n| n.caps);

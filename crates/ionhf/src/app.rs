@@ -637,14 +637,13 @@ impl App {
             ui.label(RichText::new(&self.cfg.call).monospace().color(theme::MUTED));
             let (color, text, detail) = self.state_pill();
             theme::pill(ui, color, &text, &detail);
-            if self.linked() {
-                // Abort (Esc) drops the link without transmitting.
-                if ui.button("Disconnect").clicked() {
-                    self.cmd(IonCmd::Disconnect);
-                }
-                if ui.button(RichText::new("Abort").color(theme::BAD)).clicked() {
-                    self.abort();
-                }
+            if self.linked() && ui.button("Disconnect").clicked() {
+                self.cmd(IonCmd::Disconnect);
+            }
+            // Abort (Esc) drops the link or the net without transmitting.
+            if (self.linked() || self.net().is_some()) && ui.button(RichText::new("Abort").color(theme::BAD)).clicked()
+            {
+                self.abort();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
