@@ -55,6 +55,9 @@ pub struct App {
     pub host_client: bool,
     /// The level of our last broadcast burst.
     pub bcast_level: Option<usize>,
+    /// The last net burst's level, and whether it was ours.
+    pub net_level: Option<usize>,
+    pub net_tx: bool,
     /// The Log fills the window below the panel.
     pub log_view: bool,
     /// The Call box while it is being edited.
@@ -169,6 +172,8 @@ impl App {
             lit_until: Flash::default(),
             host_client: false,
             bcast_level: None,
+            net_level: None,
+            net_tx: false,
             log_view: false,
             call_draft: None,
             audio_devices: None,
@@ -310,10 +315,6 @@ impl App {
     /// The Net's send box: a bulletin, a message for one member, or traffic
     /// for net control.
     pub fn net_send(&mut self) {
-        let text = std::mem::take(&mut self.net_text);
-        if text.trim().is_empty() {
-            return;
-        }
         let ncs = self.net().is_some_and(|n| n.ncs);
         let to = self.net_to.trim().to_ascii_uppercase();
         let direct = ncs && !to.is_empty() && to != "ALL";
@@ -322,6 +323,27 @@ impl App {
             (false, true) => "all".into(),
             (false, false) => self.net().and_then(|n| n.ncs_call.clone()).unwrap_or_default(),
         };
+        if ncs && !self.nets.form.file.trim().is_empty() {
+            let call = self.cfg.call.clone();
+            match self.nets.ncs_file(&call, if direct { &to } else { "" }) {
+                Ok((text, cmds)) => {
+                    self.net_push(NetLine {
+                        time: utc_now(),
+                        from: call,
+                        to: shown_to,
+                        text,
+                        note: false,
+                    });
+                    self.cmds(cmds);
+                }
+                Err(e) => self.note(format!("! {e}")),
+            }
+            return;
+        }
+        let text = std::mem::take(&mut self.net_text);
+        if text.trim().is_empty() {
+            return;
+        }
         self.net_push(NetLine {
             time: utc_now(),
             from: self.cfg.call.clone(),
@@ -606,6 +628,14 @@ impl App {
                 self.lit_until.tone[m.code() as usize] = (now + TONE_FLASH_S, ours);
             }
         }
+        for b in s
+            .bursts
+            .iter()
+            .filter(|b| b.level.is_some() && b.what.starts_with("NET"))
+        {
+            self.net_level = b.level;
+            self.net_tx = b.tx;
+        }
         for b in s.bursts.iter().filter(|b| b.tx) {
             // A mid-link CW ID goes out ahead of a burst.
             if b.what == "CW ID" {
@@ -653,13 +683,19 @@ impl App {
                 }
                 let log = self.log_view && !self.setup && !self.net_view;
                 if ui.selectable_label(log, "Log").clicked() {
-                    self.log_view = !log;
+                    self.log_view = true;
                     self.setup = false;
                     self.net_view = false;
                 }
                 let net = self.net_view && !self.setup;
                 if ui.selectable_label(net, "Net").clicked() {
-                    self.net_view = !net;
+                    self.net_view = true;
+                    self.setup = false;
+                }
+                let modem = !self.log_view && !self.net_view && !self.setup;
+                if ui.selectable_label(modem, "Modem").clicked() {
+                    self.log_view = false;
+                    self.net_view = false;
                     self.setup = false;
                 }
             });

@@ -96,6 +96,7 @@ After the `BCAST` block in `host.rs`. Commands on the command port:
 | `NET LINE text` | the check-in line (the rest of the command) |
 | `NET TRAFFIC n R\|W\|P\|E [SHORT]` | traffic listed: count, precedence, short time |
 | `NET OFFER` | the next frame on the net port is an object to offer |
+| `NET BEACON` | net control: a beacon now |
 | `NET CLOSE` | net control: close the net; member: leave |
 
 Answers: `NET PORT n` (the net's KISS port, 1–15, like `BCAST PORT n`),

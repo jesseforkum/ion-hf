@@ -109,6 +109,22 @@ pub struct NetApp {
     pub md_log: crate::markdown::Cached,
 }
 
+/// A file to send: its path, name and bytes, within [`MAX_FILE`].
+fn read_file(path: &str) -> Result<(PathBuf, String, Vec<u8>), String> {
+    let path = PathBuf::from(path.trim());
+    let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if data.len() > MAX_FILE {
+        return Err(format!(
+            "{}: {} over {}",
+            path.display(),
+            crate::theme::bytes(data.len() as u64),
+            crate::theme::bytes(MAX_FILE as u64)
+        ));
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+    Ok((path, name, data))
+}
+
 /// A record as one line for the screen.
 pub fn shown(data: &[u8]) -> String {
     match Record::decode(data) {
@@ -291,17 +307,7 @@ impl NetApp {
                 )
             }
             Draft::File => {
-                let path = PathBuf::from(f.file.trim());
-                let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if data.len() > MAX_FILE {
-                    return Err(format!(
-                        "{}: {} over {}",
-                        path.display(),
-                        crate::theme::bytes(data.len() as u64),
-                        crate::theme::bytes(MAX_FILE as u64)
-                    ));
-                }
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+                let (path, name, data) = read_file(&f.file)?;
                 (
                     Record::File(net_doc::File {
                         precedence: f.precedence,
@@ -331,6 +337,45 @@ impl NetApp {
         self.form.text.clear();
         self.form.file.clear();
         Ok(self.send_item(item, rec.encode()))
+    }
+
+    /// Net control: the form's file, for all as an object, so a station
+    /// that holds it skips it, or to one member. Returns its line for the
+    /// screen.
+    pub fn ncs_file(&mut self, me: &str, to: &str) -> Result<(String, Vec<IonCmd>), String> {
+        let (path, name, data) = read_file(&self.form.file)?;
+        let all = to.is_empty();
+        let precedence = self.form.precedence;
+        let bytes = Record::File(net_doc::File {
+            precedence,
+            to: if all { To::Net } else { To::Ncs },
+            name: name.clone(),
+            data: data.clone(),
+        })
+        .encode();
+        if let Some(log) = self.log.as_mut() {
+            log.item(Item {
+                at: net_log::now(),
+                from: me.to_string(),
+                to: if all { "all".into() } else { to.to_string() },
+                precedence,
+                for_net: all,
+                kind: Kind::File,
+                subject: name.clone(),
+                name,
+                size: data.len() as u32,
+                saved: path.display().to_string(),
+                state: State::Queued,
+                ..Item::default()
+            });
+        }
+        self.form.file.clear();
+        let cmd = if all {
+            IonCmd::NetOffer(bytes.clone())
+        } else {
+            IonCmd::NetSendTo(to.to_string(), bytes.clone())
+        };
+        Ok((shown(&bytes), vec![cmd]))
     }
 
     /// Member: a routine message for net control.
@@ -372,8 +417,9 @@ impl NetApp {
     pub fn bulletin(&mut self, me: &str, to: &str, text: &str) -> Vec<IonCmd> {
         let to = to.trim().to_ascii_uppercase();
         let all = to.is_empty() || to == "ALL";
+        let precedence = self.form.precedence;
         let rec = Record::Message(net_doc::Message {
-            precedence: Precedence::Routine,
+            precedence,
             to: if all { To::Net } else { To::Ncs },
             text: text.to_string(),
         })
@@ -387,6 +433,7 @@ impl NetApp {
                     at: now,
                     from: me.to_string(),
                     to: to.clone(),
+                    precedence,
                     kind: Kind::Message,
                     subject: net_doc::subject(text),
                     text: text.to_string(),
@@ -691,6 +738,11 @@ impl NetApp {
             Record::Summary(s) => {
                 if let Some(log) = self.log.as_mut() {
                     log.merge(&s);
+                }
+            }
+            Record::File(_) => {
+                if let Some(ncs) = self.log.as_ref().map(|l| l.rec.ncs.clone()) {
+                    self.message(&ncs, None, data, net_log::now());
                 }
             }
             _ => {}
@@ -1003,6 +1055,50 @@ mod tests {
         assert!(r.summary);
         assert_eq!(r.checkins[0].call, "AG5B");
         assert!(!a.is_joined());
+    }
+
+    #[test]
+    fn net_control_offers_a_file_to_all_and_sends_one_to_a_member() {
+        let d = TempDir::new("netapp-ncsfile");
+        let mut a = NetApp::new(d.0.clone());
+        a.open(&cfg("N0JLF"));
+        let f = d.0.join("map.txt");
+        std::fs::write(&f, b"route").unwrap();
+        a.form.precedence = Precedence::Priority;
+        a.form.file = f.display().to_string();
+        let (line, cmds) = a.ncs_file("N0JLF", "").unwrap();
+        assert!(line.contains("map.txt"), "{line}");
+        assert!(a.form.file.is_empty());
+        let IonCmd::NetOffer(data) = &cmds[0] else { panic!() };
+
+        a.form.file = f.display().to_string();
+        let (_, direct) = a.ncs_file("N0JLF", "KJ5ET").unwrap();
+        assert!(matches!(&direct[0], IonCmd::NetSendTo(to, _) if to == "KJ5ET"));
+
+        let m = TempDir::new("netapp-ncsfile-member");
+        let mut b = NetApp::new(m.0.clone());
+        b.join(&cfg("AG5B")).unwrap();
+        b.event(
+            &NetEvent::Joined {
+                ncs: "N0JLF".into(),
+                net: "TNARES".into(),
+                slot: 2,
+            },
+            "AG5B",
+        );
+        b.event(
+            &NetEvent::Object {
+                id: ObjectId::of(data),
+                data: data.clone(),
+                cached: false,
+            },
+            "AG5B",
+        );
+        let item = &b.log.as_ref().unwrap().rec.traffic[0];
+        assert_eq!(item.name, "map.txt");
+        assert_eq!(item.from, "N0JLF");
+        assert!(item.precedence == Precedence::Priority);
+        assert_eq!(std::fs::read(&item.saved).unwrap(), b"route");
     }
 
     #[test]

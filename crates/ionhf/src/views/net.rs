@@ -151,7 +151,7 @@ fn pages(app: &mut App, ui: &mut egui::Ui) {
         tab(ui, Page::CheckIn, "Check-in", member);
         tab(ui, Page::Inbox, "Inbox", member);
         ui.add_space(14.0);
-        tab(ui, Page::Log, "Log", true);
+        tab(ui, Page::Log, "History", true);
     });
 }
 
@@ -210,11 +210,19 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                     }
                     abort(app, ui, b);
                 });
-                let mut open = n.open;
-                let check = ui.add_enabled(!n.closed, egui::Checkbox::new(&mut open, "Check-ins"));
-                if check.changed() {
-                    app.cmd(IonCmd::NetCheckins(open));
-                }
+                ui.horizontal(|ui| {
+                    let mut open = n.open;
+                    let check = ui.add_enabled(!n.closed, egui::Checkbox::new(&mut open, "Check-ins"));
+                    if check.changed() {
+                        app.cmd(IonCmd::NetCheckins(open));
+                    }
+                    let beacon = ui
+                        .add_enabled(n.open && !n.closed, egui::Button::new("Beacon"))
+                        .on_hover_text("Send one now; transmits");
+                    if beacon.clicked() {
+                        app.cmd(IonCmd::NetBeacon);
+                    }
+                });
             }
         }
         ui.add_space(14.0);
@@ -272,6 +280,7 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         ];
         if n.ncs {
             rows.push(("Stations", n.roster.len().to_string()));
+            rows.push(("Beacon", n.beacon_in.map_or_else(d, theme::clock)));
         } else {
             rows.push(("Slot", n.slot.map_or_else(d, |s| s.to_string())));
             rows.push(("Via", n.relay.clone().unwrap_or_else(d)));
@@ -908,7 +917,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui) {
     } else {
         !app.net().is_some_and(|n| n.closed)
     };
-    let input_h = if ncs { 74.0 } else { 40.0 };
+    let input_h = if ncs { 112.0 } else { 40.0 };
     egui::ScrollArea::vertical()
         .id_salt("net_log")
         .stick_to_bottom(true)
@@ -928,6 +937,21 @@ fn messages(app: &mut App, ui: &mut egui::Ui) {
                     .font(egui::TextStyle::Monospace)
                     .desired_width(110.0)
                     .hint_text("all"),
+            );
+            for p in PRECEDENCES {
+                let word = net_doc::precedence_word(p);
+                let letter = RichText::new(&word[..1]).color(prec_tone(p));
+                ui.selectable_value(&mut app.nets.form.precedence, p, letter)
+                    .on_hover_text(word);
+            }
+        });
+        ui.horizontal(|ui| {
+            caption(ui, "File");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.nets.form.file)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("path"),
             );
         });
     }

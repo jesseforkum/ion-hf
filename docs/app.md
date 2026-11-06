@@ -100,7 +100,7 @@ arrives at the close.
 | Screen | What it shows |
 |---|---|
 | Modem | The lamp panel and the link's counts (Bursts, Frames, Resent, HARQ increments / recoveries, Lost codewords, Polls, Ctrl bursts, Air time), the open broadcast groups and who is heard in them; the level readout with S/N, Rate, Data and the send progress; the decode plot; the band meter (how clean each third of the passband is here); the waterfall; the Log. **Disconnect** and **Abort** sit beside the state while linked. |
-| Net | Pages: **Profile** (net control's profile, kept between nets: frequency, backup, start, end, next net, mode, purpose, alternate, regulars, and the Markdown body beside a live preview of the announcement), **Roster** (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the announcement; **To** one member), **Traffic** (the traffic stations list, by precedence; what came in, by precedence, with **Handled**, **Pass** for traffic meant for the net, **Folder** for files), **Check-in** (the call from Setup, the line, traffic None, Message or File, precedence, **To** NCS or the net via NCS, **Short**; **Queue** before joining, **Send** once in; the outbox), **Inbox** (files received, the stations, the announcement), **Log** (past nets, **Export**, **Folder**). On the left **Start** to open the net as net control (**Close**: the summary first, then the close, **Now** to stop waiting; **Check-ins** on or off) or **Join** (the first net heard when the name is empty; **Leave**), with **Relay** and **Attended** announced at check-in. **Abort** beside them, and in the header, drops the net at once and keys nothing. On the right the messages and bulletins as they come and a box to send: net control to all, or **To** one member; a member to net control. The Log below. A link and a net exclude each other; Esc is Abort. |
+| Net | Pages: **Profile** (net control's profile, kept between nets: frequency, backup, start, end, next net, mode, purpose, alternate, regulars, and the Markdown body beside a live preview of the announcement), **Roster** (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the announcement; **To** one member), **Traffic** (the traffic stations list, by precedence; what came in, by precedence, with **Handled**, **Pass** for traffic meant for the net, **Folder** for files), **Check-in** (the call from Setup, the line, traffic None, Message or File, precedence, **To** NCS or the net via NCS, **Short**; **Queue** before joining, **Send** once in; the outbox), **Inbox** (files received, the stations, the announcement), **History** (past nets, **Export**, **Folder**). On the left **Start** to open the net as net control (**Close**: the summary first, then the close, **Now** to stop waiting; **Check-ins** on or off; **Beacon** to send one now, not at the end of the 5 minutes) or **Join** (the first net heard when the name is empty; **Leave**), with **Relay** and **Attended** announced at check-in. **Abort** beside them, and in the header, drops the net at once and keys nothing. On the right the messages and bulletins as they come and a box to send: net control to all, or **To** one member, at a precedence, with a **File** (for all it goes as an object, so a station that holds it skips it); a member to net control. The Log below. A link and a net exclude each other; Esc is Abort. |
 | Log | The Log in place of the passband, the panel still above. |
 | Setup | Station (call, grid), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
 
@@ -165,7 +165,7 @@ Every note, burst, host event and error, newest at the bottom: **All**,
 newest line until scrolled back; **LIVE** goes back to it. **Copy** puts
 the lines shown on the clipboard. Esc in the search box leaves the box;
 elsewhere it aborts the link as before. Drag the panel's
-top edge to resize it, or **Log** in the header gives it the window.
+top edge to resize it, or **Log** in the header gives it the window; **Modem** brings the waterfall back.
 
 ## Winlink host interface
 
@@ -244,6 +244,7 @@ groups hold their frames until the net is over.
 | `NET LINE text` | `OK` | the check-in line (the rest of the command, at most 38 bytes) |
 | `NET TRAFFIC n R\|W\|P\|E [SHORT]` | `OK` / `WRONG` | traffic listed: count, precedence, short time |
 | `NET OFFER` | `OK` / `WRONG` | net control: the next frame on the net's port is an object to offer |
+| `NET BEACON` | `OK` / `WRONG` | net control: a beacon now |
 | `NET CLOSE` | `OK` / `WRONG` | net control: close the net once the turn under way is over (its Close goes out three times); member: leave |
 
 Events, as they happen:

@@ -112,6 +112,7 @@ enum NetCmd {
     Line(String),
     Traffic(Traffic),
     Offer,
+    Beacon,
     Close,
 }
 
@@ -134,6 +135,7 @@ fn parse_net(text: &str) -> Option<NetCmd> {
             short: !rest.is_empty(),
         })),
         ["NET", "OFFER"] => Some(NetCmd::Offer),
+        ["NET", "BEACON"] => Some(NetCmd::Beacon),
         ["NET", "CLOSE"] => Some(NetCmd::Close),
         _ => None,
     }
@@ -743,6 +745,10 @@ impl Host {
             }
             NetCmd::Offer if self.net_port.is_some() && self.net_ncs => {
                 self.offer_next = true;
+                true
+            }
+            NetCmd::Beacon if self.net_port.is_some() && self.net_ncs => {
+                let _ = self.ion.send(IonCmd::NetBeacon);
                 true
             }
             NetCmd::Close if self.net_port.is_some() => {

@@ -718,6 +718,16 @@ impl NetStation {
         self.open
     }
 
+    /// NCS: the next beacon as soon as the turn under way allows.
+    pub fn beacon_now(&mut self) {
+        self.next_beacon_at = 0.0;
+    }
+
+    /// NCS: seconds to the next beacon; none with check-ins closed.
+    pub fn beacon_in(&self, now: f64) -> Option<f64> {
+        (self.cfg.ncs && self.open).then(|| (self.next_beacon_at - now).max(0.0))
+    }
+
     /// NCS: end the net, once the turn under way is over (its answer in,
     /// or given up on): then [`NetEvent::Closed`] and the Close bursts.
     pub fn close(&mut self) {
@@ -1026,6 +1036,18 @@ mod tests {
         let ids: Vec<ObjectId> = (0..MAX_OFFERS as u8).map(|k| ncs.offer(&[k])).collect();
         assert_eq!(at(&ncs, ids[0]), Some(2));
         assert_eq!(at(&ncs, ids[MAX_OFFERS - 1]), Some(1));
+    }
+
+    #[test]
+    fn a_beacon_on_demand_does_not_wait_for_the_interval() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        ncs.next_beacon_at = 300.0;
+        assert_eq!(ncs.beacon_in(100.0), Some(200.0));
+        ncs.beacon_now();
+        assert_eq!(ncs.beacon_in(100.0), Some(0.0));
+        ncs.set_open(false);
+        assert_eq!(ncs.beacon_in(100.0), None);
     }
 
     #[test]

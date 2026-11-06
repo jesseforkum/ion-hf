@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use ion::link::bcast::{BcastConfig, BcastEvent, BcastStation};
 use ion::link::net::{
-    Caps, MAX_LINE, MAX_OFFERS, NetConfig, NetEvent, NetNode, ObjectId, Precedence, RosterEntry, Traffic,
+    Caps, MAX_LINE, MAX_OFFERS, NetConfig, NetEvent, NetNode, NetStats, ObjectId, Precedence, RosterEntry, Traffic,
 };
 use ion::link::node::{DEFAULT_LEAD_S, NodeAir};
 use ion::link::{Air, Gear, Node, Role, State};
@@ -109,6 +109,8 @@ pub enum IonCmd {
     NetAck(u16),
     /// Net control: check-ins open or closed.
     NetCheckins(bool),
+    /// Net control: a beacon now, not at the end of the interval.
+    NetBeacon,
     /// Net control: close the net (transmits). Member: leave it (keys
     /// nothing but our CW ID).
     NetClose,
@@ -189,6 +191,9 @@ pub struct NetStatus {
     pub offers: [Option<ObjectId>; MAX_OFFERS],
     /// [`IonCmd::NetItem`]s handled so far (ever, not per net).
     pub items: u32,
+    /// Net control: seconds to the next beacon (check-ins open).
+    pub beacon_in: Option<f64>,
+    pub stats: NetStats,
 }
 
 #[derive(Clone, Debug)]
@@ -666,6 +671,8 @@ impl Worker {
             traffic: self.net_traffic,
             offers: s.offers(),
             items: self.net_items,
+            beacon_in: s.beacon_in(self.now()),
+            stats: s.stats.clone(),
         })
     }
 
@@ -706,6 +713,11 @@ impl Worker {
             IonCmd::NetCheckins(open) => {
                 if let Some(n) = self.net.as_mut().filter(|n| n.station().is_ncs()) {
                     n.station_mut().set_open(open);
+                }
+            }
+            IonCmd::NetBeacon => {
+                if let Some(n) = self.net.as_mut().filter(|n| n.station().is_ncs()) {
+                    n.station_mut().beacon_now();
                 }
             }
             IonCmd::NetClose => match self.net.as_ref().map(|n| n.station().is_ncs()) {
@@ -921,6 +933,9 @@ impl Worker {
     fn status(&mut self) -> IonStatus {
         let mut bursts = self.node.take_journal();
         bursts.append(&mut self.bcast_sent);
+        if let Some(n) = self.net.as_mut() {
+            bursts.append(&mut n.take_journal());
+        }
         let (slot_rx, band) = self.node.band();
         let s = self.node.station();
         let st = s.stats();
