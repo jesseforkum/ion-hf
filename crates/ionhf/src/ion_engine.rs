@@ -183,8 +183,7 @@ pub struct NetStatus {
     /// Net control closed it (its Close bursts may still be going out).
     pub closed: bool,
     pub rounds: u32,
-    /// Our check-in line and traffic.
-    pub line: String,
+    /// The traffic we listed at check-in.
     pub traffic: Traffic,
     /// The objects on offer by index, which `RosterEntry::holds` counts
     /// in (a member: as last heard).
@@ -667,7 +666,6 @@ impl Worker {
             pending: s.pending(),
             closed: s.closed(),
             rounds: s.stats.rounds,
-            line: self.net_line.clone(),
             traffic: self.net_traffic,
             offers: s.offers(),
             items: self.net_items,

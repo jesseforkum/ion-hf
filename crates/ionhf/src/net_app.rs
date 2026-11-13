@@ -19,40 +19,25 @@ pub const CLOSE_WAIT_S: f64 = 180.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
-    Profile,
-    Roster,
-    Traffic,
-    CheckIn,
-    Inbox,
-    Log,
+    Member,
+    Ncs,
+    History,
 }
 
 impl Page {
     pub fn parse(s: &str) -> Option<Page> {
         Some(match s.to_ascii_lowercase().as_str() {
-            "profile" => Page::Profile,
-            "roster" => Page::Roster,
-            "traffic" => Page::Traffic,
-            "checkin" | "check-in" => Page::CheckIn,
-            "inbox" => Page::Inbox,
-            "log" => Page::Log,
+            "member" => Page::Member,
+            "ncs" => Page::Ncs,
+            "history" | "log" => Page::History,
             _ => return None,
         })
     }
 }
 
-/// What a member's form sends.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Draft {
-    #[default]
-    None,
-    Message,
-    File,
-}
-
+/// A member's traffic: a message, a file, or both.
 #[derive(Clone, Debug, Default)]
 pub struct Form {
-    pub kind: Draft,
     pub precedence: Precedence,
     pub to: To,
     pub short: bool,
@@ -90,6 +75,8 @@ pub struct NetApp {
     pub edited: bool,
     /// Net control edited the profile: offer the announcement again.
     pub reoffer: bool,
+    /// Net control: the profile and page shown while the net runs.
+    pub editing: bool,
     pub closing: Option<Closing>,
     queue: Vec<Out>,
     /// Member: our items handed to the net, not yet delivered: (index in
@@ -133,7 +120,7 @@ pub fn shown(data: &[u8]) -> String {
             p => format!("[{}] {}", net_doc::precedence_word(p), m.text),
         },
         Record::File(f) => format!("File {}, {}", f.name, crate::theme::bytes(f.data.len() as u64)),
-        Record::Announcement(a) => format!("Announcement {}", a.net),
+        Record::Announcement(a) => format!("Page {}", a.net),
         Record::Summary(s) => format!("Summary {}", s.net),
         Record::Text(t) => t,
     }
@@ -163,6 +150,7 @@ impl NetApp {
             offered: None,
             edited: false,
             reoffer: false,
+            editing: false,
             closing: None,
             queue: Vec::new(),
             sent: Vec::new(),
@@ -206,8 +194,9 @@ impl NetApp {
         ));
         self.closing = None;
         self.reoffer = false;
+        self.editing = false;
         self.sent.clear();
-        self.page = Page::Roster;
+        self.page = Page::Ncs;
         let bytes = Record::Announcement(ann.clone()).encode();
         self.offered = Some(ObjectId::of(&bytes));
         self.announcement = Some(ann);
@@ -220,11 +209,7 @@ impl NetApp {
 
     /// The form has something to send.
     pub fn form_ready(&self) -> bool {
-        match self.form.kind {
-            Draft::None => false,
-            Draft::Message => !self.form.text.trim().is_empty(),
-            Draft::File => !self.form.file.trim().is_empty(),
-        }
+        !self.form.text.trim().is_empty() || !self.form.file.trim().is_empty()
     }
 
     /// Member: joins `cfg.net`, the check-in line and traffic going with
@@ -237,7 +222,7 @@ impl NetApp {
         self.closing = None;
         self.sent.clear();
         self.joined = false;
-        self.page = Page::CheckIn;
+        self.page = Page::Member;
         let t = self.listing();
         self.listed = Some(t);
         Ok(vec![
@@ -282,61 +267,65 @@ impl NetApp {
         self.joined
     }
 
-    /// Member: sends what the form holds (queued until joined) and clears it.
+    /// Member: sends what the form holds (queued until joined) and clears
+    /// it: the message, then the file. A file that cannot go sends nothing.
     pub fn send_form(&mut self, me: &str) -> Result<Vec<IonCmd>, String> {
         let f = &self.form;
-        let (rec, item) = match f.kind {
-            Draft::None => return Ok(Vec::new()),
-            Draft::Message => {
-                let text = f.text.trim_end().to_string();
-                if text.trim().is_empty() {
-                    return Ok(Vec::new());
-                }
-                (
-                    Record::Message(net_doc::Message {
-                        precedence: f.precedence,
-                        to: f.to,
-                        text: text.clone(),
-                    }),
-                    Item {
-                        kind: Kind::Message,
-                        subject: net_doc::subject(&text),
-                        text,
-                        ..Item::default()
-                    },
-                )
-            }
-            Draft::File => {
-                let (path, name, data) = read_file(&f.file)?;
-                (
-                    Record::File(net_doc::File {
-                        precedence: f.precedence,
-                        to: f.to,
-                        name: name.clone(),
-                        data: data.clone(),
-                    }),
-                    Item {
-                        kind: Kind::File,
-                        subject: name.clone(),
-                        name,
-                        size: data.len() as u32,
-                        saved: path.display().to_string(),
-                        ..Item::default()
-                    },
-                )
-            }
+        let file = match f.file.trim() {
+            "" => None,
+            p => Some(read_file(p)?),
         };
-        let item = Item {
-            at: net_log::now(),
-            from: me.to_string(),
-            precedence: f.precedence,
-            for_net: f.to == To::Net,
-            state: State::Queued,
-            ..item
-        };
+        let mut out: Vec<(Record, Item)> = Vec::new();
+        let text = f.text.trim_end().to_string();
+        if !text.trim().is_empty() {
+            out.push((
+                Record::Message(net_doc::Message {
+                    precedence: f.precedence,
+                    to: f.to,
+                    text: text.clone(),
+                }),
+                Item {
+                    kind: Kind::Message,
+                    subject: net_doc::subject(&text),
+                    text,
+                    ..Item::default()
+                },
+            ));
+        }
+        if let Some((path, name, data)) = file {
+            out.push((
+                Record::File(net_doc::File {
+                    precedence: f.precedence,
+                    to: f.to,
+                    name: name.clone(),
+                    data: data.clone(),
+                }),
+                Item {
+                    kind: Kind::File,
+                    subject: name.clone(),
+                    name,
+                    size: data.len() as u32,
+                    saved: path.display().to_string(),
+                    ..Item::default()
+                },
+            ));
+        }
+        let (precedence, for_net) = (f.precedence, f.to == To::Net);
         self.form.text.clear();
         self.form.file.clear();
-        Ok(self.send_item(item, rec.encode()))
+        let mut cmds = Vec::new();
+        for (rec, item) in out {
+            let item = Item {
+                at: net_log::now(),
+                from: me.to_string(),
+                precedence,
+                for_net,
+                state: State::Queued,
+                ..item
+            };
+            cmds.extend(self.send_item(item, rec.encode()));
+        }
+        Ok(cmds)
     }
 
     /// Net control: the form's file, for all as an object, so a station
@@ -921,7 +910,6 @@ mod tests {
         let c = cfg("AG5B");
         let mut a = NetApp::new(d.0.clone());
         a.form = Form {
-            kind: Draft::Message,
             precedence: Precedence::Priority,
             to: To::Ncs,
             short: true,
@@ -1102,14 +1090,35 @@ mod tests {
     }
 
     #[test]
+    fn a_message_and_a_file_go_as_two_items() {
+        let d = TempDir::new("netapp-both");
+        let mut a = NetApp::new(d.0.clone());
+        let f = d.0.join("route.txt");
+        std::fs::write(&f, b"SR-25 closed").unwrap();
+        assert!(!a.form_ready());
+        a.form.text = "Road report".into();
+        a.form.file = f.display().to_string();
+        a.form.precedence = Precedence::Priority;
+        assert!(a.form_ready());
+        a.send_form("AG5B").unwrap();
+        assert_eq!(a.queued(), 2);
+        assert!(!a.form_ready());
+        let t = a.listing();
+        assert_eq!((t.items, t.precedence), (2, Precedence::Priority));
+    }
+
+    #[test]
     fn files_over_the_cap_are_refused() {
         let d = TempDir::new("netapp-file");
         let big = d.0.join("big.bin");
         std::fs::write(&big, vec![0u8; MAX_FILE + 1]).unwrap();
         let mut a = NetApp::new(d.0.clone());
-        a.form.kind = Draft::File;
+        a.form.text = "Map follows".into();
         a.form.file = big.display().to_string();
         assert!(a.send_form("AG5B").unwrap_err().contains("over"));
+        assert_eq!(a.queued(), 0, "nothing goes with a file that cannot");
+        assert_eq!(a.form.text, "Map follows", "the form keeps it");
+        a.form.text.clear();
         let ok = d.0.join("ok.txt");
         std::fs::write(&ok, b"hello").unwrap();
         a.form.file = ok.display().to_string();

@@ -30,6 +30,13 @@ pub enum Block {
     Code(String),
     Table(Vec<Vec<Vec<Span>>>),
     Rule,
+    /// `::: steps`: one step a line.
+    Steps(Vec<Vec<Span>>),
+    /// `::: agenda`: `01:15 Weather briefing | KJ5ET` lines, as time,
+    /// item and who.
+    Agenda(Vec<(String, Vec<Span>, String)>),
+    /// `::: note`.
+    Note(Vec<Span>),
 }
 
 #[derive(Default)]
@@ -219,13 +226,86 @@ impl Builder {
     }
 }
 
-pub fn parse(md: &str) -> Vec<Block> {
+fn parse_plain(md: &str) -> Vec<Block> {
     let mut b = Builder::default();
     for e in Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
         b.event(e);
     }
     b.flush();
     b.blocks
+}
+
+/// One line's (or paragraph's) spans, without its block.
+fn inline(text: &str) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for b in parse_plain(text) {
+        let spans = match b {
+            Block::Heading(_, s) | Block::Para(s) | Block::Item(_, _, s) | Block::Quote(s) => s,
+            _ => continue,
+        };
+        if !out.is_empty() {
+            out.push(Span {
+                text: " ".into(),
+                ..Span::default()
+            });
+        }
+        out.extend(spans);
+    }
+    out
+}
+
+fn fenced(kind: &str, body: &[&str]) -> Option<Block> {
+    let lines = body.iter().map(|l| l.trim()).filter(|l| !l.is_empty());
+    Some(match kind {
+        "steps" => Block::Steps(
+            lines
+                .map(|l| {
+                    let l = l.trim_start_matches(['-', '*', '+']);
+                    let l = match l.split_once(". ") {
+                        Some((n, rest)) if n.chars().all(|c| c.is_ascii_digit()) => rest,
+                        _ => l,
+                    };
+                    inline(l.trim())
+                })
+                .collect(),
+        ),
+        "agenda" => Block::Agenda(
+            lines
+                .map(|l| {
+                    let (time, rest) = match l.split_once(' ') {
+                        Some((t, r)) if t.contains(':') && t.chars().any(|c| c.is_ascii_digit()) => (t, r),
+                        _ => ("", l),
+                    };
+                    let (what, who) = rest.rsplit_once('|').unwrap_or((rest, ""));
+                    (time.to_string(), inline(what.trim()), who.trim().to_string())
+                })
+                .collect(),
+        ),
+        "note" => Block::Note(inline(&body.join("\n"))),
+        _ => return None,
+    })
+}
+
+/// Markdown, with `::: steps`, `::: agenda` and `::: note` blocks (each
+/// closed by `:::`) drawn by the app; an older reader shows their lines
+/// as text.
+pub fn parse(md: &str) -> Vec<Block> {
+    let mut out = Vec::new();
+    let mut plain: Vec<&str> = Vec::new();
+    let mut lines = md.lines();
+    while let Some(line) = lines.next() {
+        let kind = line.trim().strip_prefix(":::").map(|k| k.trim().to_ascii_lowercase());
+        let Some(kind) = kind.filter(|k| matches!(k.as_str(), "steps" | "agenda" | "note")) else {
+            plain.push(line);
+            continue;
+        };
+        let body: Vec<&str> = lines.by_ref().take_while(|l| l.trim() != ":::").collect();
+        out.extend(parse_plain(&plain.join("\n")));
+        plain.clear();
+        out.extend(fenced(&kind, &body));
+    }
+    out.extend(parse_plain(&plain.join("\n")));
+    out
 }
 
 /// Markdown parsed once and kept until its text changes.
@@ -367,7 +447,88 @@ pub fn show(ui: &mut egui::Ui, blocks: &[Block]) {
             Block::Rule => {
                 ui.separator();
             }
+            Block::Steps(steps) => {
+                ui.add_space(4.0);
+                steps_row(ui, steps);
+                ui.add_space(4.0);
+            }
+            Block::Agenda(rows) => {
+                egui::Grid::new(("md_agenda", i))
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing([18.0, 5.0])
+                    .show(ui, |ui| {
+                        for (time, what, who) in rows {
+                            ui.label(egui::RichText::new(time).monospace().color(theme::MUTED));
+                            let mut j = job(what, BODY, theme::TEXT);
+                            j.wrap.max_width = CELL_W;
+                            let g = ui.fonts_mut(|f| f.layout_job(j));
+                            ui.add(egui::Label::new(g).selectable(true));
+                            ui.label(egui::RichText::new(who).monospace());
+                            ui.end_row();
+                        }
+                    });
+            }
+            Block::Note(spans) => {
+                egui::Frame::new()
+                    .fill(theme::RAISED)
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin {
+                        left: 14,
+                        right: 10,
+                        top: 8,
+                        bottom: 8,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let top = ui.cursor().min;
+                        para(ui, job(spans, BODY + 1.0, theme::TEXT));
+                        let bottom = ui.min_rect().max.y;
+                        ui.painter()
+                            .vline(top.x - 9.0, top.y..=bottom, Stroke::new(3.0, theme::NET));
+                    });
+            }
         }
+    }
+}
+
+/// Numbered circles joined by a line, each step's words below.
+fn steps_row(ui: &mut egui::Ui, steps: &[Vec<Span>]) {
+    let n = steps.len().max(1);
+    let w = ui.available_width();
+    let col = w / n as f32;
+    let r = 14.0;
+    let labels: Vec<_> = steps
+        .iter()
+        .map(|s| {
+            let mut j = job(s, BODY - 1.0, theme::TEXT);
+            j.wrap.max_width = (col - 8.0).max(40.0);
+            j.halign = egui::Align::Center;
+            ui.fonts_mut(|f| f.layout_job(j))
+        })
+        .collect();
+    let text_h = labels.iter().map(|g| g.size().y).fold(0.0, f32::max);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 2.0 * r + 6.0 + text_h), egui::Sense::hover());
+    let p = ui.painter();
+    let cy = rect.top() + r;
+    let cx = |k: usize| rect.left() + (k as f32 + 0.5) * col;
+    for k in 1..steps.len() {
+        p.line_segment(
+            [egui::pos2(cx(k - 1) + r + 4.0, cy), egui::pos2(cx(k) - r - 4.0, cy)],
+            Stroke::new(2.0, theme::LINE),
+        );
+    }
+    for (k, g) in labels.into_iter().enumerate() {
+        let c = egui::pos2(cx(k), cy);
+        p.circle(c, r, theme::INSET, Stroke::new(1.5, theme::NET));
+        p.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            (k + 1).to_string(),
+            FontId::monospace(BODY),
+            theme::TEXT,
+        );
+        p.galley(egui::pos2(cx(k), cy + r + 6.0), g, theme::TEXT);
     }
 }
 
@@ -383,9 +544,15 @@ mod tests {
         let mut out = String::new();
         for b in blocks {
             match b {
-                Block::Heading(_, s) | Block::Para(s) | Block::Item(_, _, s) | Block::Quote(s) => out += &text(s),
+                Block::Heading(_, s) | Block::Para(s) | Block::Item(_, _, s) | Block::Quote(s) | Block::Note(s) => {
+                    out += &text(s)
+                }
                 Block::Code(c) => out += c,
                 Block::Table(rows) => rows.iter().flatten().for_each(|c| out += &text(c)),
+                Block::Steps(s) => s.iter().for_each(|s| out += &text(s)),
+                Block::Agenda(rows) => rows
+                    .iter()
+                    .for_each(|(t, w, who)| out += &format!("{t}{}{who}", text(w))),
                 Block::Rule => {}
             }
             out.push('\n');
@@ -475,6 +642,40 @@ mod tests {
         // The spans have no link in them to follow: an address is a muted span.
         let Block::Para(p) = &b[0] else { panic!() };
         assert!(p.iter().any(|s| s.muted && s.text == " (https://example.com/plan)"));
+    }
+
+    #[test]
+    fn page_blocks_steps_agenda_and_note() {
+        let b = parse(
+            "# Tonight\n\n::: steps\nCheck in\n2. **Priority** traffic\n- Bulletins\nClose\n:::\n\
+             ::: agenda\n01:00 Check-ins\n01:15 Weather briefing | KJ5ET\n:::\n\
+             ::: note\nDirected net: wait for\nnet control to call you.\n:::\n\nAfter.",
+        );
+        assert!(matches!(&b[0], Block::Heading(1, _)), "{b:?}");
+        let Block::Steps(s) = &b[1] else { panic!("{b:?}") };
+        let words: Vec<String> = s.iter().map(|s| text(s)).collect();
+        assert_eq!(words, ["Check in", "Priority traffic", "Bulletins", "Close"]);
+        assert!(s[1][0].strong);
+        let Block::Agenda(rows) = &b[2] else { panic!("{b:?}") };
+        assert_eq!(
+            (rows[0].0.as_str(), text(&rows[0].1).as_str(), rows[0].2.as_str()),
+            ("01:00", "Check-ins", "")
+        );
+        assert_eq!(
+            (rows[1].0.as_str(), text(&rows[1].1).as_str(), rows[1].2.as_str()),
+            ("01:15", "Weather briefing", "KJ5ET")
+        );
+        let Block::Note(n) = &b[3] else { panic!("{b:?}") };
+        assert_eq!(text(n), "Directed net: wait for net control to call you.");
+        assert!(matches!(&b[4], Block::Para(p) if text(p) == "After."));
+    }
+
+    #[test]
+    fn unknown_or_unclosed_fences() {
+        let b = parse("::: video\nx\n:::\n");
+        assert!(all_text(&b).contains("::: video"), "{b:?}");
+        let b = parse("::: steps\nOne\nTwo");
+        assert!(matches!(&b[..], [Block::Steps(s)] if s.len() == 2), "{b:?}");
     }
 
     /// The roles of the widgets one pass of `f` made.
