@@ -1,0 +1,8 @@
+### MPP at 36 dB, 8 bursts of 4 s: SNR read (median) / codeword loss
+| none | +29 / 0.00 | +28 / 0.00 | +28 / 0.00 | +28 / 0.00 | +27 / 0.00 | +27 / 0.00 | +27 / 0.12 | +27 / 0.00 |
+### MPP at 40 dB, 8 bursts of 4 s: SNR read (median) / codeword loss
+| none | +28 / 0.00 | +28 / 0.00 | +29 / 0.00 | +29 / 0.00 | +27 / 0.00 | +28 / 0.00 | +28 / 0.11 | +28 / 0.12 |
+### MPD at 36 dB, 8 bursts of 4 s: SNR read (median) / codeword loss
+| none | +23 / 0.00 | +23 / 0.12 | +20 / 0.00 | +22 / 0.12 | +21 / 0.01 | +21 / 0.38 | +22 / 1.00 | +17 / 1.00 |
+### MPD at 40 dB, 8 bursts of 4 s: SNR read (median) / codeword loss
+| none | +23 / 0.00 | +23 / 0.12 | +20 / 0.00 | +22 / 0.12 | +21 / 0.01 | +21 / 0.38 | +22 / 1.00 | +17 / 1.00 |

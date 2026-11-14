@@ -158,6 +158,13 @@ pub struct Config {
     /// first) and name how many in the cue, rather than stretching the
     /// burst (`harq_stretch`, still used for bursts without a cue).
     pub harq_partial: bool,
+    /// Keep nothing from a long burst that decoded nothing and read below
+    /// what its constellation's LLRs are worth keeping at
+    /// (`receiver::wiped_below_db`): the sender then sends it fresh rather
+    /// than continuing it.
+    pub harq_drop_wiped: bool,
+    /// Added to `wiped_below_db`, dB.
+    pub harq_wiped_margin_db: f32,
     /// Offer (calling) or accept (called) the stream gear
     /// ([`crate::link::frame::caps::STREAM`]): used only when both ends
     /// have it on. Off: the station never advertises it.
@@ -268,6 +275,8 @@ impl Config {
             cue: true,
             cue_below_db: CUE_BELOW_DB,
             harq_partial: true,
+            harq_drop_wiped: true,
+            harq_wiped_margin_db: 0.0,
             stream: true,
             pin_level: None,
             lifeline: true,

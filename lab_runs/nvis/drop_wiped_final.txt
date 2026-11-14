@@ -1,0 +1,3 @@
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+drop wiped None: geometric mean 168 s
+drop wiped Some(0.0): geometric mean 121 s

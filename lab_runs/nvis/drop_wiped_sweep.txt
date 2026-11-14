@@ -1,0 +1,44 @@
+### 20000 B on WGN at 25 dB, plain QAM 14 dB weaker
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+|---|---|---|---|---|---|---|
+| None | 0 | true | 124 | 327 | 0 | 4/13 |
+| Some(0.0) | 0 | true | 124 | 327 | 0 | 4/13 |
+| Some(3.0) | 0 | true | 124 | 327 | 0 | 4/13 |
+| Some(6.0) | 0 | true | 116 | 0 | 4 | 4/13 |
+drop wiped None: geometric mean 124 s
+drop wiped Some(0.0): geometric mean 124 s
+drop wiped Some(3.0): geometric mean 124 s
+drop wiped Some(6.0): geometric mean 116 s
+### 20000 B on WGN at 25 dB, plain QAM 16 dB weaker
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+|---|---|---|---|---|---|---|
+| None | 0 | true | 151 | 389 | 0 | 4/15 |
+| Some(0.0) | 0 | true | 151 | 389 | 0 | 4/15 |
+| Some(3.0) | 0 | true | 118 | 0 | 4 | 4/13 |
+| Some(6.0) | 0 | true | 118 | 0 | 4 | 4/13 |
+drop wiped None: geometric mean 151 s
+drop wiped Some(0.0): geometric mean 151 s
+drop wiped Some(3.0): geometric mean 118 s
+drop wiped Some(6.0): geometric mean 118 s
+### 20000 B on WGN at 25 dB, plain QAM 18 dB weaker
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+|---|---|---|---|---|---|---|
+| None | 0 | true | 168 | 416 | 0 | 4/15 |
+| Some(0.0) | 0 | true | 168 | 416 | 0 | 4/15 |
+| Some(3.0) | 0 | true | 121 | 0 | 4 | 4/13 |
+| Some(6.0) | 0 | true | 121 | 0 | 4 | 4/13 |
+drop wiped None: geometric mean 168 s
+drop wiped Some(0.0): geometric mean 168 s
+drop wiped Some(3.0): geometric mean 121 s
+drop wiped Some(6.0): geometric mean 121 s
+### 20000 B on WGN at 25 dB, plain QAM 20 dB weaker
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+|---|---|---|---|---|---|---|
+| None | 0 | true | 129 | 64 | 0 | 4/14 |
+| Some(0.0) | 0 | true | 129 | 64 | 2 | 4/14 |
+| Some(3.0) | 0 | true | 127 | 0 | 4 | 4/14 |
+| Some(6.0) | 0 | true | 127 | 0 | 4 | 4/14 |
+drop wiped None: geometric mean 129 s
+drop wiped Some(0.0): geometric mean 129 s
+drop wiped Some(3.0): geometric mean 127 s
+drop wiped Some(6.0): geometric mean 127 s

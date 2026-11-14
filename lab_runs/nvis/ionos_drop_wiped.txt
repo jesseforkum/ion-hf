@@ -1,0 +1,57 @@
+## arm off
+MPG +15 dB seed 0: 83470 B, 16694 B/min
+MPP +15 dB seed 0: 101660 B, 20332 B/min
+MPP +15 dB seed 1: 103190 B, 20638 B/min
+MPG +20 dB seed 1: 144670 B, 28934 B/min
+MPG +20 dB seed 0: 125120 B, 25024 B/min
+MPP +20 dB seed 0: 142460 B, 28492 B/min
+MPP +20 dB seed 1: 147050 B, 29410 B/min
+MPG +25 dB seed 0: 141440 B, 28288 B/min
+MPG +25 dB seed 1: 142630 B, 28526 B/min
+MPP +25 dB seed 0: 161330 B, 32266 B/min
+MPP +25 dB seed 1: 160310 B, 32062 B/min
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | MPG | MPP |
+|---:|---:|---:|
+| 25 | 28407 (3788) | 32164 (4289) |
+| 20 | 26979 (3597) | 28951 (3860) |
+| 15 | 18258 (2434) | 20485 (2731) |
+ok
+## arm 3
+MPG +15 dB seed 0: 83470 B, 16694 B/min
+MPP +15 dB seed 1: 103190 B, 20638 B/min
+MPP +15 dB seed 0: 101660 B, 20332 B/min
+MPG +20 dB seed 1: 144670 B, 28934 B/min
+MPG +20 dB seed 0: 125120 B, 25024 B/min
+MPP +20 dB seed 0: 142460 B, 28492 B/min
+MPP +20 dB seed 1: 147050 B, 29410 B/min
+MPG +25 dB seed 0: 141440 B, 28288 B/min
+MPG +25 dB seed 1: 142630 B, 28526 B/min
+MPP +25 dB seed 0: 161330 B, 32266 B/min
+MPP +25 dB seed 1: 160310 B, 32062 B/min
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | MPG | MPP |
+|---:|---:|---:|
+| 25 | 28407 (3788) | 32164 (4289) |
+| 20 | 26979 (3597) | 28951 (3860) |
+| 15 | 18258 (2434) | 20485 (2731) |
+ok
+## arm 6
+MPG +15 dB seed 0: 83470 B, 16694 B/min
+MPP +15 dB seed 0: 101660 B, 20332 B/min
+MPP +15 dB seed 1: 103190 B, 20638 B/min
+MPG +20 dB seed 1: 144670 B, 28934 B/min
+MPG +20 dB seed 0: 125120 B, 25024 B/min
+MPP +20 dB seed 0: 142460 B, 28492 B/min
+MPP +20 dB seed 1: 147050 B, 29410 B/min
+MPG +25 dB seed 0: 141440 B, 28288 B/min
+MPG +25 dB seed 1: 142630 B, 28526 B/min
+MPP +25 dB seed 0: 161330 B, 32266 B/min
+MPP +25 dB seed 1: 160310 B, 32062 B/min
+Ion on IONOS SIM, 2 paths, S:N in 3 kHz against a sine at each burst's peak; 5 min per run, bytes/min (bit/s):
+| S:N dB | MPG | MPP |
+|---:|---:|---:|
+| 25 | 28407 (3788) | 32164 (4289) |
+| 20 | 26979 (3597) | 28951 (3860) |
+| 15 | 18360 (2448) | 20485 (2731) |
+ok

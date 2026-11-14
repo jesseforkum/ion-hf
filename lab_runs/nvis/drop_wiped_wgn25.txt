@@ -1,0 +1,13 @@
+### 20000 B on WGN at 25 dB, plain QAM 22 dB weaker
+| drop wiped | seed | done | s | increments | dropped | QAM bursts / data bursts |
+|---|---|---|---|---|---|---|
+| false | 0 | true | 106 | 0 | 0 | 3/11 |
+| false | 1 | true | 106 | 0 | 0 | 3/11 |
+| false | 2 | true | 121 | 0 | 0 | 4/13 |
+| false | 3 | true | 121 | 0 | 0 | 4/13 |
+| true | 0 | true | 106 | 0 | 2 | 3/11 |
+| true | 1 | true | 106 | 0 | 2 | 3/11 |
+| true | 2 | true | 121 | 0 | 3 | 4/13 |
+| true | 3 | true | 121 | 0 | 3 | 4/13 |
+drop wiped false: geometric mean 113 s
+drop wiped true: geometric mean 113 s

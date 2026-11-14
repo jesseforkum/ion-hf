@@ -1,0 +1,15 @@
+### increments after a wipeout, clean bits at 6 dB Es/N0 per bit
+| first | to | wiped LLRs | bursts to decode (20 codewords) | increment bits / a fresh codeword's | fresh at `to` |
+|---|---|---|---|---|
+| L16 | L9 | 0.01 | median 7, max 7 | 1.93 | 20/20 in 1 |
+| L16 | L9 | 1 | median 7, max 7 | 1.93 | 20/20 in 1 |
+| L16 | L9 | 4 | median 7, max 7 | 1.93 | 20/20 in 1 |
+| L15 | L10 | 0.01 | median 6, max 6 | 2.33 | 20/20 in 1 |
+| L15 | L10 | 1 | median 6, max 6 | 2.33 | 20/20 in 1 |
+| L15 | L10 | 4 | median 6, max 6 | 2.33 | 20/20 in 1 |
+| L13 | L10 | 0.01 | median 5, max 5 | 2.25 | 20/20 in 1 |
+| L13 | L10 | 1 | median 5, max 5 | 2.25 | 20/20 in 1 |
+| L13 | L10 | 4 | median 5, max 5 | 2.25 | 20/20 in 1 |
+| L14 | L11 | 0.01 | median 6, max 6 | 2.78 | 20/20 in 1 |
+| L14 | L11 | 1 | median 6, max 6 | 2.78 | 20/20 in 1 |
+| L14 | L11 | 4 | median 6, max 6 | 2.78 | 20/20 in 1 |
