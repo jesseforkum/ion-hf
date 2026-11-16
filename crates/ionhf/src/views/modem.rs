@@ -206,6 +206,31 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
     }
 }
 
+/// The thirds, clickable: a click pins the slice there, a second click
+/// leaves it to the meter; Narrow keeps the link to the slice levels.
+fn slice_row(app: &mut App, ui: &mut egui::Ui, band: [f32; 3]) {
+    let (pick, hand, narrow, peer) = app.link.as_ref().map_or((None, false, false, false), |s| {
+        (s.slice_pick, s.narrow_hand, s.narrow, s.peer_narrow)
+    });
+    ui.horizontal(|ui| {
+        let w = ui.available_width();
+        let mut clicked = None;
+        ui.allocate_ui_with_layout(vec2(w - 92.0, 52.0), Layout::top_down(egui::Align::Min), |ui| {
+            clicked = theme::band_meter(ui, band, app.band_use(), pick);
+        });
+        if let Some(k) = clicked {
+            app.set_slice(if pick == Some(k) { None } else { Some(k) });
+        }
+        let label = RichText::new("Narrow").color(if narrow || peer { theme::TEXT } else { theme::MUTED });
+        if ui
+            .add_sized(vec2(84.0, 30.0), egui::Button::selectable(hand, label))
+            .clicked()
+        {
+            app.set_narrow(!hand);
+        }
+    });
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let full = ui.available_size();
     // Everything grows a little on a big window.
@@ -257,7 +282,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             let band = app.link.as_ref().map(|s| s.band);
             if let Some(b) = band {
-                theme::band_meter(ui, b, app.band_use());
+                slice_row(app, ui, b);
             }
             let fall = (rest - if band.is_some() { 58.0 } else { 0.0 }).max(100.0);
             app.waterfall_panel(ui, fall);

@@ -49,6 +49,10 @@ pub(super) const CHEAP_ACK_OFF_BURSTS: u8 = 8;
 impl Station {
     pub(super) fn receiver_rx(&mut self, inc: &Incoming, tiny: Option<Tiny>, frames: &[Option<Frame>], now: f64) {
         self.note_rx_channel(inc);
+        if inc.code >= LADDER.len() {
+            self.qrm_watch(inc, None, tiny == Some(Tiny::Poll), now);
+            self.rx_slot = self.wanted_slot(inc.slot);
+        }
         if inc.code < LADDER.len() {
             let c = inc.chan;
             self.stats.heard.push((
@@ -126,6 +130,11 @@ impl Station {
                 self.last_moved = now;
             }
             let stored = !self.harq.is_empty();
+            // Frames lost after HARQ: what the QRM watch counts.
+            let n = frames.len().clamp(1, 64);
+            let loss = 1.0 - (bitmap & (u64::MAX >> (64 - n))).count_ones() as f32 / n as f32;
+            self.qrm_watch(inc, Some(loss), false, now);
+            self.rx_slot = self.wanted_slot(inc.slot);
             self.last_ack = (user_hi(inc.user) & 3, bitmap, frames.len(), stored);
             let mut ack = self.ack_burst(inc.wave);
             if ack.code == TINY {
@@ -190,7 +199,7 @@ impl Station {
                     Some(r) => self.level_for(r - self.air_db(self.rx_level) - self.cfg.start_margin_db.unwrap_or(0.0)),
                     None => self.rx_level,
                 };
-                self.level = self.usable_below(start.min(self.target).min(self.cfg.max_level), now);
+                self.level = self.usable_below(start.min(self.target).min(self.level_cap()), now);
                 self.peer_wants_turn = false;
                 self.heard_peer_db = None;
                 // The first burst after a turn is never longer than
@@ -283,7 +292,7 @@ impl Station {
 
     /// Receiving side: notes a burst's channel measurement.
     pub(super) fn note_rx_channel(&mut self, inc: &Incoming) {
-        self.rx_slot = inc.slot;
+        self.rx_slot = self.wanted_slot(inc.slot);
         self.last_rx_snr = inc.snr_db;
         self.last_rx_eff = if inc.chan.eff_snr_db.is_finite() {
             inc.chan.eff_snr_db
@@ -306,8 +315,8 @@ impl Station {
 
     /// The SNR our ACKs report: effective or mean.
     pub(super) fn report_snr(&self) -> f32 {
-        if self.cfg.eff_snr {
-            self.last_rx_eff
+        if self.cfg.eff_snr || self.narrowed() && self.narrow_agreed() {
+            self.reported_channel().1
         } else {
             self.last_rx_snr
         }
@@ -351,7 +360,15 @@ impl Station {
         let want_disc = self.want_disc;
         let all = n <= harq::MAX_SLOTS && bitmap == u64::MAX >> (64 - n.max(1));
         let all_tiny = self.cfg.tiny_ack_all && n > TINY_ACK_FRAMES && all && !stored;
-        if n <= TINY_ACK_FRAMES || all_tiny {
+        // A change of narrowing goes in a full ACK: a tiny one cannot say.
+        let narrow = self.narrowed() && self.narrow_agreed();
+        let (class, eff) = self.reported_channel();
+        if narrow != self.narrow_sent.get() {
+            self.narrow_repeat.set(super::qrm::NARROW_REPEAT);
+        }
+        self.narrow_sent.set(narrow);
+        let repeat = self.narrow_repeat.get();
+        if (n <= TINY_ACK_FRAMES || all_tiny) && repeat == 0 {
             return self.tiny(
                 Tiny::Ack {
                     burst,
@@ -360,26 +377,28 @@ impl Station {
                     want_turn,
                     want_disc,
                     stored,
-                    class: self.chan.class(),
+                    class,
                     slot: self.rx_slot,
                 },
                 wave,
             );
         }
+        self.narrow_repeat.set(repeat.saturating_sub(1));
         let mut f = Frame::new(Kind::Ack, self.session as u32);
         f.payload = AckInfo {
             burst,
             bitmap,
-            snr_db: self.last_rx_snr,
+            snr_db: if narrow { eff } else { self.last_rx_snr },
             delivered: self.delivered & 0xFF_FFFF,
             report: Some({
                 let (delay_ms, doppler_hz) = self.chan.spreads();
                 ChanReport {
-                    class: self.chan.class(),
-                    eff_snr_db: self.last_rx_eff,
+                    class,
+                    eff_snr_db: eff,
                     delay_ms,
                     doppler_hz,
                     slot: self.rx_slot,
+                    narrow,
                 }
             }),
         }
@@ -403,7 +422,7 @@ impl Station {
             snr_db: self.report_snr(),
             compress: self.compressing(),
             class: self.chan.class(),
-            slot: inc.slot,
+            slot: self.wanted_slot(inc.slot),
             caps: self.caps,
         };
         self.tiny(t, inc.wave)

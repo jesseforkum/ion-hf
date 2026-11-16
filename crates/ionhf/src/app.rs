@@ -385,7 +385,7 @@ impl App {
                 if s.state == State::Connected {
                     self.hist.heard_peer(&s.peer.clone(), self.hist.last_here);
                 }
-                self.link = Some(s);
+                self.link = Some(*s);
             }
             // With no host program attached, what a link brings has nowhere
             // to go: say how much.
@@ -548,6 +548,16 @@ impl App {
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
         ctx.set_zoom_factor(1.0 / native);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(px[0], px[1]) / native));
+    }
+
+    /// Pins the slice to a third (`None`: the meter's pick).
+    pub fn set_slice(&mut self, k: Option<u8>) {
+        self.cmd(IonCmd::SetSlice(k));
+    }
+
+    /// Keeps the link to the slice levels, both ways.
+    pub fn set_narrow(&mut self, on: bool) {
+        self.cmd(IonCmd::SetNarrow(on));
     }
 
     /// What the link has on the air: on a slice level, the third the

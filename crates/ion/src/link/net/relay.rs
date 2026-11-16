@@ -211,6 +211,7 @@ impl NetStation {
             extra: 0,
             frames: frames.iter().map(|f| f.encode(size)).collect(),
             spans: Vec::new(),
+            slot: None,
         })
     }
 

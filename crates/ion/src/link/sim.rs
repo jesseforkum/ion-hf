@@ -270,6 +270,9 @@ impl Medium for ModelMedium {
                 c
             },
             slot: 0,
+            thirds: [f32::NAN; 3],
+            qrm_db: [f32::NAN; 3],
+            third: None,
             grid: None,
         })
     }
@@ -290,6 +293,9 @@ impl ModelMedium {
             snr_db: snr + 0.5 * self.noise.gaussian(),
             chan: crate::chan::ChannelMeas::of_snr(snr - MODEL_FADING_DB),
             slot: 0,
+            thirds: [f32::NAN; 3],
+            qrm_db: [f32::NAN; 3],
+            third: None,
             grid: None,
         };
         if burst.code == stream::TONES {
@@ -329,6 +335,8 @@ pub struct AirEvent {
     pub delivered: bool,
     /// Sent behind a cue ([`Outgoing::cue`]).
     pub cue: bool,
+    /// Slice-wave bursts: the third they went in (`crate::slots`).
+    pub slot: Option<u8>,
 }
 
 /// Where the air time of a run went, for the data bursts of one ladder
@@ -568,6 +576,13 @@ impl Sim {
                     frames: b.frames.len(),
                     delivered: inc.is_some(),
                     cue: b.cue,
+                    slot: (b.wave == Wave::Ofdm(Guard::Slice)).then(|| {
+                        b.slot.unwrap_or(if b.code < LADDER.len() {
+                            super::audio::slot_of(b.extra) as u8
+                        } else {
+                            0
+                        })
+                    }),
                 });
                 self.in_flight.push((end, s, inc));
             }

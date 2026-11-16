@@ -19,6 +19,7 @@ mod config;
 mod expect;
 mod gear;
 mod lifeline;
+mod qrm;
 mod receiver;
 mod sender;
 mod stream;
@@ -204,6 +205,9 @@ pub struct Outgoing {
     /// Experiment (`ION_TDCLIP=1`): the whole-burst clipper eased by
     /// `audio::TD_EASE_DB`, for a peer reporting fast fading.
     pub td_ease: bool,
+    /// The third a slice-wave burst goes in (`crate::slots`); `None`: a
+    /// data burst's from its `extra`, anything else the centre.
+    pub slot: Option<u8>,
 }
 
 impl Outgoing {
@@ -249,6 +253,16 @@ pub struct Incoming {
     /// The receiving side's pick of the third of the passband for slice
     /// bursts (`crate::slots`; 0 the centre), as of this burst.
     pub slot: u8,
+    /// The slot meter's score of each third as of this burst
+    /// ([`crate::slots::SlotMeter::scores`]: lower is cleaner); NaN where
+    /// no meter watched.
+    pub thirds: [f32; 3],
+    /// Slice bursts: the QRM over the noise in each third, dB
+    /// ([`crate::slots::SlotMeter::qrm_db`]); NaN for the burst's own third
+    /// and where not measured.
+    pub qrm_db: [f32; 3],
+    /// Slice bursts: the third they were heard in.
+    pub third: Option<u8>,
     /// OFDM data bursts: what the receiver saw, to decode the burst again
     /// with what the decoder learnt (`Config::turbo`).
     pub grid: Option<Arc<crate::phy::BurstGrid>>,
@@ -339,6 +353,10 @@ pub struct Stats {
     pub polls: u32,
     /// Stream periods sent or taken in, and blocks delivered.
     pub stream_periods: u32,
+    /// Receiving side: times the QRM watch narrowed the link, and slice
+    /// polls sent searching the thirds (sending side).
+    pub narrowings: u32,
+    pub search_polls: u32,
     pub stream_blocks: u32,
     /// Receiving side: each period's option, frames decoded and tried,
     /// SNR, and the answer to it (0 DONE, 1 SLOWER, 2 FASTER, 3 none).
@@ -524,6 +542,8 @@ pub struct Station {
     at_peer: Vec<(u32, usize)>,
     /// The waveform all of `at_peer` was sent in.
     peer_wave: Wave,
+    /// The third the last long data burst went in.
+    sent_slot: u8,
     /// The part of `at_peer` the last data burst left out
     /// (`Config::harq_partial`): it stays stored, ahead of the burst's
     /// failures.
@@ -550,6 +570,18 @@ pub struct Station {
     /// The peer's last reported Doppler spread, Hz (NaN: none).
     peer_doppler_hz: f32,
     rx_slot: u8,
+    /// The peer has narrowed the link to the slice levels for QRM.
+    peer_narrow: bool,
+    /// Sending side: when the peer last reported S/N to spare
+    /// ([`qrm::SEARCH_AIM_DB`]).
+    good_aim_at: f64,
+    /// Receiving side: the QRM watch, and whether our last full ACK said
+    /// narrowed.
+    qrm: qrm::QrmWatch,
+    narrow_sent: std::cell::Cell<bool>,
+    /// ACKs still to go full after a change of narrowing (a full ACK can
+    /// be lost, and the tiny ones cannot say).
+    narrow_repeat: std::cell::Cell<u8>,
     // Receiving side.
     /// What we measure of the channel over the link (for the report).
     chan: ChanTrack,
@@ -653,6 +685,7 @@ impl Station {
             last_burst: Vec::new(),
             at_peer: Vec::new(),
             peer_wave: FLOOR_WAVE,
+            sent_slot: 0,
             at_peer_rest: Vec::new(),
             peer_wants_turn: false,
             turn_asked_at: 0.0,
@@ -666,6 +699,11 @@ impl Station {
             peer_slot: 0,
             peer_doppler_hz: f32::NAN,
             rx_slot: 0,
+            peer_narrow: false,
+            good_aim_at: f64::NEG_INFINITY,
+            qrm: qrm::QrmWatch::default(),
+            narrow_sent: std::cell::Cell::new(false),
+            narrow_repeat: std::cell::Cell::new(0),
             chan: ChanTrack::default(),
             last_rx_eff: 0.0,
             delivered: 0,
@@ -706,6 +744,9 @@ impl Station {
         }
         if self.cfg.lifeline {
             c |= caps::LIFELINE;
+        }
+        if self.cfg.qrm_narrow || self.cfg.narrow {
+            c |= caps::NARROW;
         }
         c
     }
@@ -1031,7 +1072,13 @@ impl Station {
                 Awaiting::Ack => {
                     self.stats.polls += 1;
                     let wave = self.retry_wave(self.cur_wave(), now);
-                    self.tiny(Tiny::Poll, wave)
+                    match self.search_poll(now) {
+                        Some(b) => {
+                            self.stats.search_polls += 1;
+                            b
+                        }
+                        None => self.tiny(Tiny::Poll, wave),
+                    }
                 }
                 _ => {
                     let mut b = self.retry.clone()?;
@@ -1180,6 +1227,30 @@ impl Station {
     /// peer's lasts `peer_id_s`.
     pub fn set_ids(&mut self, every_s: f64, peer_id_s: f64) {
         self.ids = Some((every_s, peer_id_s));
+    }
+
+    /// The third we ask for slice bursts in ([`Config::slot_pick`]), from
+    /// the next ACK on.
+    pub fn set_slot_pick(&mut self, pick: Option<u8>) {
+        self.cfg.slot_pick = pick.map(|k| k.min(2));
+        if let Some(k) = self.cfg.slot_pick {
+            self.rx_slot = k;
+        }
+    }
+
+    /// Keep the link to the slice levels, both ways ([`Config::narrow`]),
+    /// from the next burst and ACK on.
+    pub fn set_narrow(&mut self, on: bool) {
+        if self.cfg.narrow && !on {
+            self.widen(false);
+        }
+        self.cfg.narrow = on;
+    }
+
+    /// Narrowed for QRM (by us, by hand or by the peer), and the third we
+    /// ask slice bursts in.
+    pub fn narrow_state(&self) -> (bool, bool, u8) {
+        (self.narrowed(), self.peer_narrow, self.rx_slot)
     }
 
     /// When the answering station keyed the ConnAck the caller heard: both
@@ -1339,6 +1410,7 @@ impl Station {
             frames: Vec::new(),
             spans: Vec::new(),
             cue: false,
+            slot: None,
         }
     }
 
@@ -1352,6 +1424,7 @@ impl Station {
             frames: vec![f.encode(CONTROL_BYTES)],
             spans: Vec::new(),
             cue: false,
+            slot: None,
         }
     }
 
@@ -1363,7 +1436,12 @@ impl Station {
         self.note_tx(b)
     }
 
-    fn note_tx(&mut self, b: Outgoing) -> Outgoing {
+    fn note_tx(&mut self, mut b: Outgoing) -> Outgoing {
+        // Control in the slice wave goes where the peer's data goes: the
+        // third it names is the one it can hear.
+        if b.wave == Wave::Ofdm(Guard::Slice) && b.slot.is_none() {
+            b.slot = Some(self.slots().0);
+        }
         if b.code >= LADDER.len() && b.code != crate::link::stream::STREAM {
             self.stats.control_bursts += 1;
         }

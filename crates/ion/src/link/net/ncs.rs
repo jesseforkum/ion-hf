@@ -618,6 +618,7 @@ impl NetStation {
             extra: 0,
             frames,
             spans: Vec::new(),
+            slot: None,
         }
     }
 

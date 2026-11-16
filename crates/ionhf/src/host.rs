@@ -59,7 +59,7 @@ fn end_words(end: Option<End>, state: State) -> String {
 /// From the Ion worker to the host interface.
 #[derive(Debug)]
 pub enum HostIn {
-    Status(IonStatus),
+    Status(Box<IonStatus>),
     Received(Vec<u8>),
     /// A frame of the group on this KISS port.
     GroupFrame(u8, Vec<u8>),
@@ -544,6 +544,26 @@ impl Host {
                 self.bcast_client = true;
                 let open = n.parse::<u8>().is_ok_and(|p| self.ports.contains_key(&p));
                 self.say(if open { "OK" } else { "WRONG" });
+            }
+            ["SLICE", w] => {
+                let k = match *w {
+                    "AUTO" => Some(None),
+                    "MID" => Some(Some(0)),
+                    "LOW" => Some(Some(1)),
+                    "HIGH" => Some(Some(2)),
+                    _ => None,
+                };
+                match k {
+                    Some(k) => {
+                        let _ = self.ion.send(IonCmd::SetSlice(k));
+                        self.say("OK");
+                    }
+                    None => self.say("WRONG"),
+                }
+            }
+            ["NARROW", w @ ("ON" | "OFF")] => {
+                let _ = self.ion.send(IonCmd::SetNarrow(*w == "ON"));
+                self.say("OK");
             }
             ["MODES"] => {
                 self.say(ION_MODE);

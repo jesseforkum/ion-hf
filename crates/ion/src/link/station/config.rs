@@ -135,6 +135,29 @@ pub struct Config {
     /// ACKs (`crate::slots`); off: always the centre. The receiving side
     /// names its pick either way, and listens in all three.
     pub slice_slots: bool,
+    /// The third we ask for slice bursts in (`crate::slots`: 0 the
+    /// centre, 1 below, 2 above), whatever the slot meter says. `None`:
+    /// the meter's pick.
+    pub slot_pick: Option<u8>,
+    /// Keep the link to the slice levels both ways: ours, and the peer's
+    /// through our ACKs ([`crate::link::report::ChanReport::narrow`]).
+    pub narrow: bool,
+    /// Narrow the link by itself when QRM over part of the passband stops
+    /// it (`station::qrm`).
+    pub qrm_narrow: bool,
+    /// Narrowed for QRM: the other thirds clean this long and it widens,
+    /// s (`station::qrm`).
+    pub qrm_clear_s: f64,
+    /// Narrowed: the longest data burst, s (`None`: as unnarrowed). The
+    /// receiving side decides to widen only when it hears one, so shorter
+    /// bursts widen sooner once the QRM goes, but move less while it stays
+    /// (docs/link.md, "Narrowing for QRM").
+    pub narrow_burst_s: Option<f64>,
+    /// The peer, narrowed, moves our slice bursts to another third: what
+    /// it stored went through the QRM that took the old one, and the
+    /// increments would have to rebuild those frames alone, so they go
+    /// fresh (docs/link.md, "Narrowing for QRM").
+    pub harq_fresh_on_move: bool,
     /// How the sending side picks each data burst's level.
     pub gear: Gear,
     /// HARQ increments may stretch a burst to `max_burst_long_s` rather
@@ -269,6 +292,12 @@ impl Config {
             power_aware: false,
             start_margin_db: Some(3.0),
             slice_slots: true,
+            slot_pick: None,
+            narrow: false,
+            qrm_narrow: true,
+            qrm_clear_s: super::qrm::CLEAR_S,
+            narrow_burst_s: None,
+            harq_fresh_on_move: true,
             gear: Gear::Goodput,
             harq_stretch: true,
             merge_pieces: true,

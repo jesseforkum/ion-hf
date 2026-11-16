@@ -108,16 +108,17 @@ fn small_transfers_and_high_snr_stay_on_arq() {
     assert_eq!(periods(&sim), 0);
 }
 
-/// The ConnReq's caps with the gear and the lifeline off are what alpha.5
-/// sent (CUE only), and with each on one bit more.
+/// The ConnReq's caps with the gear, the lifeline and narrowing for QRM
+/// off are what alpha.5 sent (CUE only), and with each on one bit more.
 #[test]
 fn the_conn_req_without_the_stream_is_alpha5s() {
     let air: Arc<dyn Air> = Arc::new(ModelAir::default());
-    let req = |stream: bool, lifeline: bool| -> Outgoing {
+    let req = |stream: bool, lifeline: bool, qrm_narrow: bool| -> Outgoing {
         let mut s = Station::new(
             Config {
                 stream,
                 lifeline,
+                qrm_narrow,
                 ..Config::new("N0JLF")
             },
             air.clone(),
@@ -126,8 +127,14 @@ fn the_conn_req_without_the_stream_is_alpha5s() {
         s.poll_tx(0.0).unwrap()
     };
     let flags_of = |b: &Outgoing| Frame::decode(&b.frames[0]).unwrap();
-    let (off, on, life) = (req(false, false), req(true, false), req(false, true));
+    let (off, on, life) = (
+        req(false, false, false),
+        req(true, false, false),
+        req(false, true, false),
+    );
     let (f_off, f_on, f_life) = (flags_of(&off), flags_of(&on), flags_of(&life));
+    let f_narrow = flags_of(&req(false, false, true));
+    assert_eq!(f_narrow.flags, f_off.flags | caps::NARROW << flags::CAPS_SHIFT);
     assert_eq!(f_off.kind, Kind::ConnReq);
     assert_eq!(f_off.flags, caps::CUE << flags::CAPS_SHIFT);
     assert_eq!(f_on.flags, f_off.flags | caps::STREAM << flags::CAPS_SHIFT);

@@ -163,6 +163,15 @@ far end has not yet acknowledged (Pat waits for 0 before closing).
 gives the S/N of the last burst heard. `ABORT` also drops what broadcast
 frames are queued.
 
+Two commands of Ion's own set the slice, at once, link up or not
+([link.md](link.md), Narrowing for QRM): `SLICE LOW`, `MID` or `HIGH`
+pins the third we ask the peer's slice bursts in (`SLICE AUTO`: the slot
+meter's pick), and `NARROW ON` keeps the link to the slice levels both
+ways (`NARROW OFF`: only when the QRM watch narrows it). The modem
+screen's band meter does the same: a click on a third pins it, a second
+click unpins it, and Narrow is the button beside it, lit whenever the
+link is narrowed, by either end.
+
 `DATA2G ON` (answered `OK`; off with `DATA2G OFF` or when the command
 client leaves) is how a client made for Data2G's host (Ragtime) says it
 knows that host's extensions. Ion offers one of them: `DISCONNECTED`

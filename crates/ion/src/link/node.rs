@@ -391,6 +391,9 @@ impl Node {
                 snr_db: 10.0 * h.score.max(1e-3).log10(),
                 chan: crate::chan::ChannelMeas::of_snr(0.0),
                 slot: 0,
+                thirds: [f32::NAN; 3],
+                qrm_db: [f32::NAN; 3],
+                third: None,
                 grid: None,
             };
             self.station.on_rx(&inc, now);

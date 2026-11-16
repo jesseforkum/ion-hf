@@ -56,6 +56,7 @@ fn burst(level: usize, secs: f64, seed: u32) -> Outgoing {
         extra: 0,
         frames,
         spans: Vec::new(),
+        slot: None,
     }
 }
 

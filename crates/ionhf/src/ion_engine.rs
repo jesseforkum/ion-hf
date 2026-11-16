@@ -77,6 +77,11 @@ pub enum IonCmd {
     GroupPersist(u8),
     /// Decode plots of the bursts heard (off by default).
     Plot(bool),
+    /// The third we ask slice bursts in (`ion::slots`: 0 the centre, 1
+    /// below, 2 above; `None`: the slot meter's), at once.
+    SetSlice(Option<u8>),
+    /// Keep the link to the slice levels both ways, at once.
+    SetNarrow(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +126,13 @@ pub struct IonStatus {
     pub band: [f32; 3],
     /// The link holds below the floor (`ion` docs/link.md, Lifeline).
     pub holding: bool,
+    /// The slice pinned by hand (`None`: the meter's pick), and whether
+    /// the link is narrowed: by us (for QRM or by hand), by the peer.
+    pub slice_pick: Option<u8>,
+    /// Narrow held by hand (ours).
+    pub narrow_hand: bool,
+    pub narrow: bool,
+    pub peer_narrow: bool,
     /// Why the link ended, once it has.
     pub end: Option<ion::link::station::End>,
     /// Broadcast groups open, and the stations heard in them lately (call,
@@ -143,7 +155,7 @@ pub struct StreamView {
 
 #[derive(Clone, Debug)]
 pub enum IonEvent {
-    Status(IonStatus),
+    Status(Box<IonStatus>),
     Received(Vec<u8>),
     Note(String),
     /// A burst heard, as its receiver saw it ([`IonCmd::Plot`]).
@@ -216,6 +228,8 @@ struct Worker {
     keyed_from: Option<f64>,
     /// Decode plots wanted (kept across new nodes).
     plot: bool,
+    slice_pick: Option<u8>,
+    narrow: bool,
     /// The stream was on at the last look (for the log).
     streaming: bool,
     /// Broadcast bursts sent since the last status, for the log.
@@ -250,6 +264,8 @@ impl Worker {
             bcast_on_air: false,
             keyed_from: None,
             plot: false,
+            slice_pick: None,
+            narrow: false,
             streaming: false,
             bcast_sent: Vec::new(),
         }
@@ -331,6 +347,8 @@ impl Worker {
         );
         self.node = on_air_node(&self.call, self.gear, self.stream, self.ofdm_db);
         self.node.set_plot(self.plot);
+        self.node.station_mut().set_slot_pick(self.slice_pick);
+        self.node.station_mut().set_narrow(self.narrow);
         self.connected_at = None;
         self.closing = false;
         // A link cut short still gets its ID, before anything new; one
@@ -438,6 +456,14 @@ impl Worker {
                 self.plot = on;
                 self.node.set_plot(on);
             }
+            IonCmd::SetSlice(k) => {
+                self.slice_pick = k;
+                self.node.station_mut().set_slot_pick(k);
+            }
+            IonCmd::SetNarrow(on) => {
+                self.narrow = on;
+                self.node.station_mut().set_narrow(on);
+            }
             IonCmd::SetOfdmDb(db) => {
                 self.ofdm_db = db;
                 self.node.set_ofdm_gain_db(db);
@@ -487,10 +513,15 @@ impl Worker {
     fn status(&mut self) -> IonStatus {
         let mut bursts = self.node.take_journal();
         bursts.append(&mut self.bcast_sent);
-        let (slot_rx, band) = self.node.band();
+        let (_, band) = self.node.band();
         let s = self.node.station();
         let st = s.stats();
+        let (narrow, peer_narrow, slot_rx) = s.narrow_state();
         IonStatus {
+            slice_pick: self.slice_pick,
+            narrow_hand: self.narrow,
+            narrow,
+            peer_narrow,
             slot_tx: s.slots().0,
             slot_rx,
             band,
@@ -682,11 +713,11 @@ impl Worker {
                 last_status = Instant::now();
                 let s = self.status();
                 if let Some(h) = &self.host
-                    && h.send(crate::host::HostIn::Status(s.clone())).is_err()
+                    && h.send(crate::host::HostIn::Status(Box::new(s.clone()))).is_err()
                 {
                     self.host = None;
                 }
-                self.event(IonEvent::Status(s));
+                self.event(IonEvent::Status(Box::new(s)));
             }
         }
     }

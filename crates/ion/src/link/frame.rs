@@ -87,6 +87,10 @@ pub mod caps {
     /// The lifeline: a link whose data stops moving holds in R1/7 rather
     /// than timing out (`docs/link.md`, Lifeline).
     pub const LIFELINE: u8 = 4;
+    /// Narrowing for QRM: a receiver's report may say "slice levels only"
+    /// and then carries the S/N and class from before the QRM
+    /// (`link::station::qrm`).
+    pub const NARROW: u8 = 8;
     /// Every bit the fields hold.
     pub const MASK: u8 = 0xF;
 }
@@ -463,6 +467,7 @@ mod tests {
                 delay_ms: 6.75,
                 doppler_hz: 0.5,
                 slot: 2,
+                narrow: true,
             }),
             ..a
         };

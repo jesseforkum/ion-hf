@@ -165,6 +165,7 @@ pub fn sequence_with(call: &str, ofdm_db: f32) -> (Vec<f32>, Vec<Sent>) {
             extra: seq,
             frames: Vec::new(),
             spans: Vec::new(),
+            slot: None,
         };
         push(&mut a, b, 0, &mut sent, &mut seq);
     }
@@ -195,6 +196,7 @@ pub fn sequence_with(call: &str, ofdm_db: f32) -> (Vec<f32>, Vec<Sent>) {
                 extra: 0,
                 frames,
                 spans: Vec::new(),
+                slot: None,
             };
             push(&mut a, b, n, &mut sent, &mut seq);
         }

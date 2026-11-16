@@ -123,6 +123,10 @@ pub struct ChanReport {
     /// The slot the receiver wants slice bursts in (`crate::slots`; bits
     /// 2–3 of the class byte).
     pub slot: u8,
+    /// The receiver asks for the slice levels only (QRM over the rest of
+    /// the passband; bit 4 of the class byte, which older stations leave
+    /// clear and ignore).
+    pub narrow: bool,
 }
 
 impl ChanReport {
@@ -137,7 +141,7 @@ impl ChanReport {
             }
         };
         [
-            self.class.bits() | (self.slot.min(2) & 3) << 2,
+            self.class.bits() | (self.slot.min(2) & 3) << 2 | (self.narrow as u8) << 4,
             super::frame::snr_q(self.eff_snr_db, 8) as u8,
             q(self.delay_ms),
             q(self.doppler_hz),
@@ -156,6 +160,7 @@ impl ChanReport {
                 3 => 0,
                 s => s,
             },
+            narrow: b[0] >> 4 & 1 == 1,
         })
     }
 }

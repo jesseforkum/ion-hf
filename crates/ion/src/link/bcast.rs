@@ -414,6 +414,7 @@ impl BcastStation {
             extra: 0,
             frames: codewords,
             spans: Vec::new(),
+            slot: None,
         };
         self.stats.bursts += 1;
         self.stats.airtime_s += self.air.duration(b.wave, b.code, b.coded_bits());

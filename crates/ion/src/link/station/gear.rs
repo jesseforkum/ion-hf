@@ -39,6 +39,9 @@ impl Station {
     pub(super) fn on_ack(&mut self, burst: u8, bitmap: u64, stored: bool, snr_db: f32, now: f64) {
         let aim = self.aim_snr(snr_db - self.air_db(self.level));
         self.aim_db = Some(aim);
+        if aim >= super::qrm::SEARCH_AIM_DB {
+            self.good_aim_at = now;
+        }
         self.target = self.level_for(aim);
         if self.last_burst.is_empty() {
             return; // an Idle check-in
@@ -51,7 +54,7 @@ impl Station {
         let any_fresh = self.last_burst.iter().any(|s| s.held == s.bits);
         if !any_fresh && burst == self.burst_id {
             self.settle_burst(bitmap, stored);
-            self.level = self.usable_below(at.min(self.target).min(self.cfg.max_level), now);
+            self.level = self.usable_below(at.min(self.target).min(self.level_cap()), now);
             if self.level != at {
                 self.burst_s = self.cfg.max_burst_s;
             }
@@ -106,7 +109,7 @@ impl Station {
                     self.stats.failed_ofdm += 1;
                 }
             }
-            self.level = self.usable_below(at.min(self.target).min(self.cfg.max_level), now);
+            self.level = self.usable_below(at.min(self.target).min(self.level_cap()), now);
             self.adapt_burst(at, loss, snr_db);
             self.last_burst.clear();
             return;
@@ -166,7 +169,7 @@ impl Station {
         // target, in a waveform it allows (rather than down the ladder and
         // up again through levels it rules out too).
         let next = if self.family_ok(at) { next } else { self.target };
-        self.level = self.usable_below(next.min(self.target).min(self.cfg.max_level), now);
+        self.level = self.usable_below(next.min(self.target).min(self.level_cap()), now);
         self.adapt_burst(at, loss, snr_db);
         self.last_burst.clear();
     }
@@ -176,8 +179,8 @@ impl Station {
     /// the threshold, where it loses 10% of frames, 0.12 a dB below: the
     /// codes' waterfall is that steep), blended with its observed success
     /// while that is recent.
-    fn pick_by_goodput(&self, aim: f32, now: f64) -> usize {
-        let top = self.cfg.max_level.min(LADDER.len() - 1);
+    pub(super) fn pick_by_goodput(&self, aim: f32, now: f64) -> usize {
+        let top = self.level_cap().min(LADDER.len() - 1);
         let score = |l: usize| {
             let room = aim + self.air_db(l) - self.threshold(l) - self.margin();
             let prior = 1.0 / (1.0 + (-(room + 0.5) / 0.25).exp());
@@ -357,7 +360,7 @@ impl Station {
         } else {
             (&self.cfg.thresholds_db, self.cfg.margin_db)
         };
-        (0..=self.cfg.max_level.min(th.len() - 1))
+        (0..=self.level_cap().min(th.len() - 1))
             .rev()
             .find(|&l| self.family_ok(l) && snr_db + self.air_db(l) >= th[l] + margin)
             .unwrap_or(FLOOR)
@@ -417,10 +420,12 @@ impl Station {
     /// `burst_adapt` what the run of clean bursts has earned, up to
     /// [`Self::clean_burst_s`].
     pub(super) fn burst_len_s(&self, level: usize) -> f64 {
-        if !self.cfg.burst_adapt {
-            return self.cfg.max_burst_s;
-        }
-        self.burst_s.min(self.clean_burst_s(level))
+        let s = if self.cfg.burst_adapt {
+            self.burst_s.min(self.clean_burst_s(level))
+        } else {
+            self.cfg.max_burst_s
+        };
+        self.narrow_cap_s(s)
     }
 
     /// The burst length at which a level's fixed cost per round trip
@@ -451,7 +456,7 @@ impl Station {
             .last_report_db
             .is_some_and(|p| (snr_db - p).abs() <= self.cfg.burst_steady_db);
         self.last_report_db = Some(snr_db);
-        let top = self.cfg.max_level.min(self.cfg.thresholds_db.len() - 1);
+        let top = self.level_cap().min(self.cfg.thresholds_db.len() - 1);
         let next_entry = (at + 1..=top)
             .map(|k| self.cfg.thresholds_db[k] + self.cfg.margin_db)
             .fold(f32::INFINITY, f32::min);

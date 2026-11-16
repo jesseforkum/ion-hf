@@ -98,9 +98,11 @@ pub enum BandUse {
 /// here (100 less its score), by frequency. What the link uses is in the
 /// accent colour: one third for a slice, the three joined into one band
 /// for the full band.
-pub fn band_meter(ui: &mut egui::Ui, scores: [f32; 3], using: BandUse) {
+/// Each third's cleanliness and what the link uses; `pinned`: the third
+/// picked by hand, ringed. Returns the third clicked.
+pub fn band_meter(ui: &mut egui::Ui, scores: [f32; 3], using: BandUse, pinned: Option<u8>) -> Option<u8> {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 52.0), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 52.0), egui::Sense::click());
     let p = ui.painter_at(rect);
     let full = using == BandUse::Full;
     let (left, col) = (rect.min.x + 4.0, (w - 8.0) / 3.0);
@@ -123,12 +125,20 @@ pub fn band_meter(ui: &mut egui::Ui, scores: [f32; 3], using: BandUse) {
             round,
             if on { US } else { MUTED.gamma_multiply(0.5) },
         );
+        if pinned == Some(k) {
+            p.rect_stroke(
+                egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, bot)),
+                round,
+                Stroke::new(2.0, TEXT),
+                egui::StrokeKind::Outside,
+            );
+        }
         p.text(
             egui::pos2((x0 + x1) / 2.0, bot + 4.0),
             egui::Align2::CENTER_TOP,
             format!("{name} {:.0}", clean * 100.0),
             egui::FontId::proportional(12.0),
-            if on || picked { TEXT } else { MUTED },
+            if on || picked || pinned == Some(k) { TEXT } else { MUTED },
         );
     }
     if full {
@@ -139,6 +149,9 @@ pub fn band_meter(ui: &mut egui::Ui, scores: [f32; 3], using: BandUse) {
             egui::StrokeKind::Outside,
         );
     }
+    let at = resp.interact_pointer_pos().filter(|_| resp.clicked())?;
+    let i = (((at.x - left) / col).floor() as i32).clamp(0, 2) as usize;
+    Some([1u8, 0, 2][i])
 }
 
 /// "L6 QPSK 1/3".
