@@ -23,9 +23,9 @@
 //! (level 6 pinned, B asking for the clean third above); `meter` (level 6
 //! pinned, the meter's pick); `narrow` (B narrowed by hand); `oldtx` (A
 //! without narrowing, as an older station); `oldrx` (B without it);
-//! `stale` (`gear` without `Config::harq_fresh_on_move`); `quick` (`gear`
-//! with `Config::qrm_quick`); `trial` (with `Config::qrm_trial`); `all` (the
-//! two); default
+//! `stale` (`gear` without `Config::harq_fresh_on_move`); `plain` (`gear`
+//! without `Config::qrm_quick` and `Config::qrm_trial`); `quick` (with the
+//! first alone); `trial` (the second alone); default
 //! `gear,slice,meter`), `ION_SEEDS` (from seed number `ION_SEED0`),
 //! `ION_THREADS` (default 2),
 //! `ION_TRACE=1` (each run's levels), `ION_QRM_JITTER` (seconds: each
@@ -128,11 +128,9 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         if r.variant == "stale" {
             c.harq_fresh_on_move = false;
         }
-        if matches!(r.variant, "quick" | "all") {
-            c.qrm_quick = true;
-        }
-        if matches!(r.variant, "trial" | "all") {
-            c.qrm_trial = true;
+        if matches!(r.variant, "plain" | "quick" | "trial") {
+            c.qrm_quick = r.variant == "quick";
+            c.qrm_trial = r.variant == "trial";
         }
         if let Some(s) = env("ION_CLEAR_S") {
             c.qrm_clear_s = s;
@@ -398,7 +396,7 @@ fn qrm_table() {
             "oldrx" => "oldrx",
             "quick" => "quick",
             "trial" => "trial",
-            "all" => "all",
+            "plain" => "plain",
             _ => panic!("variant {v}"),
         })
         .collect();

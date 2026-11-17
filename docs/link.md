@@ -882,8 +882,10 @@ Where the time goes (one run traced, WGN, S/N +16 dB, QRM +10 dB):
   search poll narrowed it at 118 s; on MPP nothing did, and the run moved
   22 bytes.
 
-Two changes to the watch for the move, the widening and the start, both
-off by default and measured in the simulator only:
+Two rules in the watch for the move, the widening and the start, both on
+by default and measured in the simulator only. *auto* in the tables above
+is the watch without them; the rows there for QRM that moves, stops or is
+there from the start are superseded by the table below:
 
 - **`qrm_quick`.** Narrowed, a slice burst in our third comes in half
   lost. If one of the other thirds had QRM 6 dB or more over the noise at
@@ -900,22 +902,27 @@ off by default and measured in the simulator only:
   ordinary narrowing; otherwise it widens and the next trial waits 5
   minutes, doubling up to 20.
 
-S/N +16 dB, 8 seeds, bit/s (*auto*: as above; *quick*: with `qrm_quick`;
-*both*: with `qrm_trial` too; Δ against auto, seed by seed; the 8 seeds
-of the first matrix throughout, so *old* and *auto* differ from the rows
-above that count 24):
+S/N +16 dB, 8 seeds (24 where marked †), bit/s (*auto*: the watch
+without the two; *both*: as now; Δ: both less auto, seed by seed):
 
-| QRM | dB | Channel | old | auto | quick | both | Δ |
-|---|---:|---|---:|---:|---:|---:|---:|
-| moving | +10 | WGN | 10 | 179 | 239 | | +60 ± 10 |
-| moving | +10 | MPP | 20 | 183 | 229 | | +46 ± 19 |
-| moving | 0 | WGN | 341 | 279 | | 279 | 0 |
-| stops | +10 | WGN | 2713 | 2579 | 2721 | | +142 ± 9 |
-| stops | +10 | MPP | 2010 | 1890 | 1995 | | +105 ± 14 |
-| noise, from the start | +10 | WGN | 8 | 88 | | 244 | +155 ± 33 |
-| noise, from the start | +10 | MPP | 4 | 38 | | 230 | +192 ± 20 |
-| modes, from the start | +10 | WGN | 2 | 70 | | 220 | +150 ± 25 |
-| modes, from the start | +10 | MPP | 0 | 69 | | 216 | +147 ± 26 |
+| QRM | dB | Channel | old | auto | both | Δ |
+|---|---:|---|---:|---:|---:|---:|
+| moving | 0 † | WGN | 279 | 248 | 252 | +4 ± 2 |
+| moving | 0 | MPP | 164 | 180 | 204 | +24 ± 13 |
+| moving | +10 | WGN | 10 | 179 | 239 | +60 ± 10 |
+| moving | +10 | MPP | 20 | 183 | 229 | +46 ± 19 |
+| stops | +10 † | WGN | 2788 | 2565 | 2706 | +141 ± 6 |
+| stops | +10 † | MPP | 2043 | 1898 | 1965 | +67 ± 33 |
+| noise, from the start | +10 | WGN | 8 | 88 | 244 | +155 ± 33 |
+| noise, from the start | +10 | MPP | 4 | 38 | 230 | +192 ± 20 |
+| Data2G, from the start | +10 | WGN | 0 | 69 | 229 | +160 ± 3 |
+| Data2G, from the start | +10 | MPP | 1 | 73 | 222 | +149 ± 29 |
+| modes, from the start | +10 | WGN | 2 | 70 | 220 | +150 ± 25 |
+| modes, from the start | +10 | MPP | 0 | 69 | 216 | +147 ± 26 |
+
+Each rule alone moved the same bytes as both where it acts (the first 8
+seeds): `qrm_trial` in 48 runs of 48 from the start, `qrm_quick` in 47 of
+48 with QRM that moves or stops.
 
 QRM from 60 to 80 s at low S/N, 4 seeds:
 
@@ -927,24 +934,28 @@ QRM from 60 to 80 s at low S/N, 4 seeds:
 | WGN | +3 | +10 | 98 | 98 | 113 | +16 ± 26 |
 
 - **Quick.** A move at +10 dB gains on 14 runs of 16 and loses on one.
-  QRM that stops comes level with old on the mean (−4 ± 81; 5 runs ahead
-  of old and 11 behind; 16 of 16 ahead of auto), with no run of 16 in the
-  lifeline (old: 12). Under steady QRM
-  (WGN and MPP at 0 and +10 dB, 4 seeds), under QRM over the low third
-  alone (MPP and MPD, 8 seeds) and under moving QRM at 0 dB every run
-  moved the same bytes as auto.
+  After QRM that stops, 46 runs of 48 are ahead of auto and one behind,
+  and about half of what auto loses to old comes back: −80 ± 43 against
+  old (10 runs ahead, 38 behind; auto −184 ± 40), with no run in the
+  lifeline (old: 37 of 48). Under QRM over the low third alone (MPP and
+  MPD, 8 seeds) every run moved the same bytes as auto.
 - A first rule without "had QRM at the last burst heard well" moved the
   slice though the QRM had not moved: under QRM over the low third alone
   on MPD, 7 runs of 8 changed (7 bit/s for 11). It moved the same bytes as auto over 20
   minutes of steady QRM (4 runs) and on MPD at 0 and +10 dB (16 runs);
   those two were not run again with the rule as it is, which only adds a
   condition.
-- **Trial.** From the start at +10 dB every run narrowed and 2 of 32
-  entered the lifeline (auto: 27). On MPP at S/N +6 dB and QRM +10 dB auto
+- **Trial.** From the start at +10 dB every run of 48 narrowed and 2
+  entered the lifeline (auto: 40, old: 47). On MPP at S/N +6 dB and QRM +10 dB auto
   alone narrowed in no run of four and does worse
   than old (not significant on 4 seeds; in the run traced a search poll
   was heard in the clean third and the receiving side, with 4.6 dB there,
   could not narrow); the trial narrows all four.
+- **Steady QRM.** Both together moved the same bytes as auto in every
+  run with QRM that starts 60 to 80 s in and stays: noise at −6 to +20 dB
+  on the four channels and at S/N +10 and +25 dB (272 runs), and the
+  Data2G and modes recordings (80 runs). In one of them (MPP, S/N +10 dB,
+  QRM 0 dB) a trial narrowed 2 s before the end.
 - **Elsewhere** both together moved the same bytes as auto in every run
   (4 seeds, WGN and MPP, S/N +16 dB): QRM at +10 dB at the sending end,
   at both ends, and with data both ways (8 runs each, both directions
@@ -960,12 +971,19 @@ QRM from 60 to 80 s at low S/N, 4 seeds:
   dB moved 204 bit/s for 274. The other four seeds were run after the
   number was set; how many of them came to a trial decision was not
   recorded. A margin of 1.4 dB on 8 decisions is thin.
+- Over the whole grid without QRM (the four channels at S/N −6 to +25
+  dB, 8 seeds, the silences fed) both together moved the same bytes as
+  auto in 256 runs of 256. Auto itself narrowed in one (MPG at +10 dB,
+  for 44 s) and moved 49300 bytes there for old's 47090; on the other 7
+  seeds of that cell old and auto moved the same bytes.
 - Asking for a clean third on the meter instead (the cleanest at 4 points
   or less) stopped the false trials on MPD but not three at 0 dB, and
   halved the gain under the modes recording (131 and 118 bit/s): there
   the cleanest third scored 7.5 to 14 at most decisions. Not kept.
-- Still as before: moving QRM at 0 dB on WGN (−62 ± 27 against old on
-  these 8 seeds), WGN at S/N +25 dB and 0 dB, and MPD.
+- Still behind old, as auto is: on WGN at 0 dB, moving QRM (−27 ± 15
+  over 24 seeds, 4 runs ahead and 11 behind), the modes recording
+  (−60 ± 20) and steady noise at S/N +25 dB (−105 ± 32); and steady noise
+  at 0 dB on MPD (−11 ± 3, 8 seeds).
 
 ## Turn-over, idle and disconnect
 
@@ -1281,7 +1299,7 @@ HF leaves compression off on links; nets compress direct messages
 | `start_margin_db` | 3 dB | |
 | `slice_slots` | on | |
 | `qrm_narrow`, `qrm_clear_s`, `harq_fresh_on_move` | on, 30 s, on | Narrowing for QRM |
-| `qrm_quick`, `qrm_trial` | off, off | Narrowing for QRM |
+| `qrm_quick`, `qrm_trial` | on, on | Narrowing for QRM |
 | `compress` | off | |
 | `gear` | `Goodput` | `Ladder`: the alpha.4 rule |
 | `harq_stretch`, `merge_pieces` | on, on | |
