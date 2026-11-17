@@ -153,6 +153,14 @@ pub struct Config {
     /// bursts widen sooner once the QRM goes, but move less while it stays
     /// (docs/link.md, "Narrowing for QRM").
     pub narrow_burst_s: Option<f64>,
+    /// Narrowed: move at once when a slice burst is half lost and another
+    /// third, dirty until then, measured clean through it; and count the
+    /// other thirds clear from the start of the burst that measured them
+    /// so.
+    pub qrm_quick: bool,
+    /// Narrow on trial when the link is in trouble under QRM and never
+    /// showed S/N to spare (`qrm::TRIAL_S`, `qrm::TRIAL_CONTRAST`).
+    pub qrm_trial: bool,
     /// The peer, narrowed, moves our slice bursts to another third: what
     /// it stored went through the QRM that took the old one, and the
     /// increments would have to rebuild those frames alone, so they go
@@ -297,6 +305,8 @@ impl Config {
             qrm_narrow: true,
             qrm_clear_s: super::qrm::CLEAR_S,
             narrow_burst_s: None,
+            qrm_quick: false,
+            qrm_trial: false,
             harq_fresh_on_move: true,
             gear: Gear::Goodput,
             harq_stretch: true,

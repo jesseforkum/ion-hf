@@ -22,19 +22,27 @@
 //! `ION_VARIANTS` (`gear`; `old` (without narrowing for QRM); `slice`
 //! (level 6 pinned, B asking for the clean third above); `meter` (level 6
 //! pinned, the meter's pick); `narrow` (B narrowed by hand); `oldtx` (A
-//! without narrowing, as an older station);
-//! `stale` (`gear` without `Config::harq_fresh_on_move`); default
-//! `gear,slice,meter`), `ION_SEEDS`, `ION_THREADS` (default 2),
+//! without narrowing, as an older station); `oldrx` (B without it);
+//! `stale` (`gear` without `Config::harq_fresh_on_move`); `quick` (`gear`
+//! with `Config::qrm_quick`); `trial` (with `Config::qrm_trial`); `all` (the
+//! two); default
+//! `gear,slice,meter`), `ION_SEEDS` (from seed number `ION_SEED0`),
+//! `ION_THREADS` (default 2),
 //! `ION_TRACE=1` (each run's levels), `ION_QRM_JITTER` (seconds: each
 //! seed's QRM starts up to this much after `ION_QRM_START`, so that it
 //! lands anywhere in a burst and its ACK), `ION_LABEL` (a name on each
-//! run's `RUN` line).
+//! run's `RUN` line), `ION_QRM_AT` (`b`, the default; `a`, the sending
+//! end; `both`), `ION_TWO_WAY=1` (B sends as much to A), `ION_HEAR_ALL=1`
+//! (an end without QRM hears the silences too; the medium skips them
+//! otherwise).
 //!
 //! Each run also prints a `RUN` line: the longest time nothing was
 //! delivered, the sender's lifeline holds, both ends' states, and for each
 //! change of the QRM how long until the data bursts moved (`det`), from
 //! then until a frame was delivered (`stall`), and whether the burst the
-//! change caught delivered anything.
+//! change caught delivered anything; `back`, the bytes B sent A; `narB`
+//! and `narA`, when each end narrowed (`+`) and widened (`-`); `nsec` and
+//! `nbytes`, how long B was narrowed and what it took in meanwhile.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -120,6 +128,12 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         if r.variant == "stale" {
             c.harq_fresh_on_move = false;
         }
+        if matches!(r.variant, "quick" | "all") {
+            c.qrm_quick = true;
+        }
+        if matches!(r.variant, "trial" | "all") {
+            c.qrm_trial = true;
+        }
         if let Some(s) = env("ION_CLEAR_S") {
             c.qrm_clear_s = s;
         }
@@ -130,12 +144,20 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         if !rx && r.variant == "oldtx" {
             c.qrm_narrow = false;
         }
+        if rx && r.variant == "oldrx" {
+            c.qrm_narrow = false;
+        }
         c
     };
     let a = Station::new(cfg("N0JLF", false), air.clone());
     let mut b = Station::new(cfg("N0CALL", true), air.clone());
     b.listen();
     let mut medium = AudioMedium::ionos(r.mode, 2, Reference::Peak, r.snr_db, r.seed);
+    let sides: &[usize] = match std::env::var("ION_QRM_AT").as_deref() {
+        Ok("a") => &[0],
+        Ok("both") => &[1, 0],
+        _ => &[1],
+    };
     let start = qrm_start(r.seed).unwrap_or(0.0);
     // When the QRM changes: comes on, moves, goes off.
     let mut changes = Vec::new();
@@ -152,8 +174,11 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         let mut i = 0;
         while t < start + secs {
             for &(lo, hi) in phases[i % 3] {
-                let q = Qrm::new(lo, hi, QrmKind::Steady, r.seed ^ 0x0BAD ^ i as u64).keyed(1e6, hop, 1e6 - t);
-                medium = medium.with_qrm(1, q, r.qrm_db + 10.0 * ((hi - lo) / 1550.0).log10());
+                for &k in sides {
+                    let seed = r.seed ^ 0x0BAD ^ i as u64 ^ (1 - k as u64) << 20;
+                    let q = Qrm::new(lo, hi, QrmKind::Steady, seed).keyed(1e6, hop, 1e6 - t);
+                    medium = medium.with_qrm(k, q, r.qrm_db + 10.0 * ((hi - lo) / 1550.0).log10());
+                }
             }
             changes.push(t);
             t += hop;
@@ -162,47 +187,77 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
     } else if let Ok(path) = std::env::var("ION_QRM_WAV") {
         // A recording of real signals, looped, from `ION_QRM_START`.
         let x = ion::sounding::read_wav(&std::fs::read(&path).expect("ION_QRM_WAV")).expect("WAV");
-        let q = Qrm::recording(x).keyed(1e6, 1e6 - start, 1e6 - start);
         changes.push(start);
-        medium = medium.with_qrm(1, q, r.qrm_db);
+        for &k in sides {
+            let q = Qrm::recording(x.clone()).keyed(1e6, 1e6 - start, 1e6 - start);
+            medium = medium.with_qrm(k, q, r.qrm_db);
+        }
     } else if let Some((lo, hi, extra_db)) = band() {
         let kind = match std::env::var("ION_QRM_KIND").as_deref() {
             Ok("voice") => QrmKind::Voice,
             _ => QrmKind::Steady,
         };
-        let mut q = Qrm::new(lo, hi, kind, r.seed ^ 0x0BAD);
-        // Keyed (`period:on`), from `ION_QRM_START` if given.
-        if let Ok(k) = std::env::var("ION_QRM_KEY")
-            && let Some((p, on)) = k.split_once(':')
-        {
-            let (p, on): (f64, f64) = (p.parse().unwrap(), on.parse().unwrap());
-            q = q.keyed(p, on, (p - start % p) % p).from(start);
-        }
-        if let Some(t0) = qrm_start(r.seed).filter(|_| std::env::var("ION_QRM_KEY").is_err()) {
-            // On at t0, and off again at `ION_QRM_STOP`.
-            let on = env::<f64>("ION_QRM_STOP").map_or(1e6 - t0, |t1| t1 - t0);
-            q = q.keyed(1e6, on, 1e6 - t0);
-            if extra_db > -100.0 {
-                changes.push(t0);
-                changes.extend(env::<f64>("ION_QRM_STOP"));
+        for &side in sides {
+            let mut q = Qrm::new(lo, hi, kind, r.seed ^ 0x0BAD ^ (1 - side as u64) << 20);
+            // Keyed (`period:on`), from `ION_QRM_START` if given.
+            if let Ok(k) = std::env::var("ION_QRM_KEY")
+                && let Some((p, on)) = k.split_once(':')
+            {
+                let (p, on): (f64, f64) = (p.parse().unwrap(), on.parse().unwrap());
+                q = q.keyed(p, on, (p - start % p) % p).from(start);
             }
+            if let Some(t0) = qrm_start(r.seed).filter(|_| std::env::var("ION_QRM_KEY").is_err()) {
+                // On at t0, and off again at `ION_QRM_STOP`.
+                let on = env::<f64>("ION_QRM_STOP").map_or(1e6 - t0, |t1| t1 - t0);
+                q = q.keyed(1e6, on, 1e6 - t0);
+                if extra_db > -100.0 && side == sides[0] {
+                    changes.push(t0);
+                    changes.extend(env::<f64>("ION_QRM_STOP"));
+                }
+            }
+            medium = medium.with_qrm(side, q, r.qrm_db + extra_db);
         }
-        medium = medium.with_qrm(1, q, r.qrm_db + extra_db);
+    }
+    // The ends without QRM hear the silences too, as on the air.
+    if std::env::var("ION_HEAR_ALL").is_ok_and(|v| v == "1") {
+        for k in (0..2).filter(|k| !sides.contains(k)) {
+            medium = medium.with_qrm(k, Qrm::new(300.0, 1850.0, QrmKind::Steady, r.seed ^ 0x51), -200.0);
+        }
     }
     let mut sim = Sim::new(a, b, Box::new(medium), air);
     sim.stations[0].connect("N0CALL", 0.0);
     sim.stations[0].send(&payload((secs * 1_500.0) as usize + 10_000, r.seed as u32));
+    if std::env::var("ION_TWO_WAY").is_ok_and(|v| v == "1") {
+        sim.stations[1].send(&payload((secs * 1_500.0) as usize + 10_000, r.seed as u32 ^ 0x55));
+    }
     // With a start time, only what moves once the QRM is on counts.
     let t0 = start.min(secs);
     sim.run_until(t0, |_| false);
     let before = sim.stations[1].stats().bytes_received;
+    let back_before = sim.stations[0].stats().bytes_received;
+    let mut nar: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    let mut was = [false; 2];
+    let (mut nsec, mut nbytes) = (0f64, 0u64);
     // B's bytes every half second.
     let mut line = vec![(t0, before)];
     let mut t = t0;
     while t < t0 + secs {
-        t = (t + 0.5).min(t0 + secs);
+        let dt = (t + 0.5).min(t0 + secs) - t;
+        t += dt;
         sim.run_until(t, |_| false);
-        line.push((t, sim.stations[1].stats().bytes_received));
+        let got = sim.stations[1].stats().bytes_received;
+        if was[1] {
+            nsec += dt;
+            nbytes += got - line.last().map_or(before, |s| s.1);
+        }
+        line.push((t, got));
+        for k in 0..2 {
+            let on = sim.stations[k].narrow_state().0;
+            if on != was[k] {
+                nar[k].push(format!("{}{t:.0}", if on { '+' } else { '-' }));
+                was[k] = on;
+            }
+        }
     }
     if std::env::var("ION_EVENTS").is_ok_and(|v| v == "1") {
         for e in &sim.log {
@@ -282,7 +337,7 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         })
         .collect();
     let run = format!(
-        "narrowed={} polls={} maxgap={gap:.1} holds={} hold_s={:.0} dropped={} state={:?}/{:?} hops={}",
+        "narrowed={} polls={} maxgap={gap:.1} holds={} hold_s={:.0} dropped={} state={:?}/{:?} hops={} back={} narB={} narA={} nsec={nsec:.0} nbytes={nbytes}",
         sim.stations[1].stats().narrowings,
         st.search_polls,
         st.holds,
@@ -290,7 +345,18 @@ fn session(r: Run, secs: f64) -> (u64, String, String) {
         sim.stations[1].stats().harq_dropped,
         sim.stations[0].state(),
         sim.stations[1].state(),
-        if hops.is_empty() { "-".into() } else { hops.join(";") }
+        if hops.is_empty() { "-".into() } else { hops.join(";") },
+        sim.stations[0].stats().bytes_received - back_before,
+        if nar[1].is_empty() {
+            "-".into()
+        } else {
+            nar[1].join(",")
+        },
+        if nar[0].is_empty() {
+            "-".into()
+        } else {
+            nar[0].join(",")
+        }
     );
     (sim.stations[1].stats().bytes_received - before, trace, run)
 }
@@ -329,11 +395,16 @@ fn qrm_table() {
             "old" => "old",
             "stale" => "stale",
             "oldtx" => "oldtx",
+            "oldrx" => "oldrx",
+            "quick" => "quick",
+            "trial" => "trial",
+            "all" => "all",
             _ => panic!("variant {v}"),
         })
         .collect();
     let minutes: f64 = env("ION_MINUTES").unwrap_or(5.0);
     let seeds: u64 = env("ION_SEEDS").unwrap_or(1);
+    let seed0: u64 = env("ION_SEED0").unwrap_or(0);
     let threads: usize = env("ION_THREADS").unwrap_or(2);
     let trace = std::env::var("ION_TRACE").is_ok_and(|v| v == "1");
     let mut jobs = Vec::new();
@@ -341,7 +412,7 @@ fn qrm_table() {
         for &snr_db in &snrs {
             for &qrm_db in &qrms {
                 for &variant in &variants {
-                    for k in 0..seeds {
+                    for k in seed0..seed0 + seeds {
                         jobs.push(Run {
                             mode,
                             snr_db,

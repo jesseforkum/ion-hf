@@ -610,6 +610,8 @@ watch (`station/qrm.rs`) narrows the link:
   forgets the S/N reports measured through the QRM, and keeps off the
   stream gear. Both ends must offer it (`caps::NARROW`); with an older
   peer the watch only moves the slot and the reports stay as measured.
+  Control in the slice wave (ACKs, polls) goes in the third the peer asks
+  its data in, the one it can hear, narrowed or not (`note_tx`).
 - **Back.** Once a full-band burst would have had −1.5 dB or more in the
   worst of the other thirds for 30 s it widens, and the full-band levels
   start afresh too (what they lost was the QRM's doing); the sender picks
@@ -737,8 +739,9 @@ QRM +10 dB from 60 s, 8 minutes counted (5 for *stays*), bit/s, mean of
 - A shorter `qrm_clear_s` (before the sender's re-pick above, stops /
   QSO, WGN): 10 s 2678 / 249, 20 s and 30 s 2544 / 303. At 10 s it widens
   in every pause of a QSO and narrows again when it resumes.
-- An older sender (no `caps::NARROW`) to a new receiver: 6 bit/s at
-  +10 dB, as old to old.
+- An older peer (no `caps::NARROW`) at either end: the same bytes as old
+  to old in 16 of 16 runs (steady +10 dB, WGN and MPP, 4 seeds, each end
+  in turn), and in 4 of 4 with an older sender under moving QRM.
 
 Moving QRM and real signals, S/N +16 dB, 8 seeds (24 where marked †),
 bit/s (*moving*: over the low and middle thirds, middle and high, low and
@@ -812,11 +815,157 @@ minutes counted, connect included):
   feeding them, as on the air (112 of 120, −0.6 ± 1.4).
 - Against `main` before this work, old moved the same bytes in 187 of 192
   of those runs; the five that differ are at S/N 0 and 3 dB (four ahead
-  here, −0.9 ± 0.5 bit/s for `main` over all). Not traced.
+  here, −0.9 ± 0.5 bit/s for `main` over all). The difference is where
+  slice-wave control goes: `main` leaves it in the centre third, here it
+  goes in the peer's (above); with that undone the five match `main`. An
+  older station hears either: it listens for slice bursts in all three.
 - A receiver without the burst-long noise floor (each cell's noise from
   the preamble and the residuals around it) decoded more of the bursts
   the QRM caught (15 of 61 against 2) and moved no more: −14 ± 11 bit/s
   over the clean runs, +10 ± 8 under steady QRM. Not kept.
+
+Where the QRM is and which way the data goes (A calls and sends, B
+receives; S/N +16 dB, QRM +10 dB from 60 to 80 s, 5 minutes counted, 4
+seeds, bit/s):
+
+| QRM at | Data | Channel | old | auto |
+|---|---|---|---:|---:|
+| both ends | A to B | WGN | 3 | 226 |
+| both ends | A to B | MPP | 3 | 215 |
+| B | both ways: A to B | WGN | 14 | 118 |
+| B | both ways: B to A | WGN | 890 | 1032 |
+| B | both ways: A to B | MPP | 3 | 86 |
+| B | both ways: B to A | MPP | 358 | 638 |
+| A | A to B | WGN | 2917 | 2917 |
+| A | A to B | MPP | 2157 | 2136 |
+
+- At both ends old spent every run in the lifeline, auto none. Only B
+  narrows: A hears ACKs alone.
+- With data both ways (both ends hearing the silences, `ION_HEAR_ALL`)
+  the clean direction gains too, and A never narrowed. Not traced.
+- QRM at the sender's end alone changes nothing (WGN: the same bytes in 4
+  of 4; MPP: −20 ± 25, no run narrowed). B has to hear the silences
+  between bursts for that, as on the air (`ION_HEAR_ALL`): the medium
+  feeds them only to an end with QRM, and a meter that hears bursts alone
+  scores the signal's own fading (thirds at 22, 22 and 12 in the run
+  traced), on which B narrowed for 98 s in one MPP run of four and moved
+  1251 bit/s for 2162.
+- Twenty minutes of steady QRM at +10 dB: 311 bit/s on WGN, 308 on MPP (4
+  seeds). Every run tried the full band 5 minutes after it narrowed and
+  again 10 minutes on, and narrowed again within 25 s in 14 tries of 16
+  (about 65 s in the other two).
+- Twenty minutes on WGN at S/N +25 dB and 0 dB, the cell that loses most
+  over 5: old 605, auto 556 (−49 ± 29, three seeds of four behind). Each
+  run narrowed once, widened at the try 5 minutes later and stayed wide.
+  The watch cannot tell at the time: in the run traced nothing had got
+  through for 21 s when it narrowed, and the full band's gear found a
+  level that works through the QRM only later. A check of the bytes
+  delivered since the trouble began against what a slice moves changed
+  nothing in 72 runs of 72 for that reason. Not kept.
+
+Where the time goes (one run traced, WGN, S/N +16 dB, QRM +10 dB):
+
+- **Onset, 68 s.** The gear works down through MFSK levels 4, 3 and 2
+  while the trouble adds up to two events.
+- **A move, about 50 s.** The burst the QRM lands on runs its length (13
+  s); its ACK still names the old third, so a second burst is lost there
+  (9 s); the sender waits for an ACK (10 s), polls in the dead third and
+  waits again (10 s); an MFSK poll gets through and the ACK names the new
+  third. On the third move of that run the MFSK poll was lost too and a
+  search poll found the link.
+- **Widening, 67 s after the QRM stops.** The burst in flight (17 s); 30 s
+  of clear thirds, counted from the end of the first clear burst and in
+  whole bursts of 18 s (41 s); a full ACK on MFSK R0 (8 s).
+- **From the start.** A link that never had a clean burst has no S/N to
+  spare, and the QRM spoils the class, which keeps the gear off slices
+  (`family_ok`): it went through levels 4, 3, 2, 1, 7, 8 and 0. On WGN a
+  search poll narrowed it at 118 s; on MPP nothing did, and the run moved
+  22 bytes.
+
+Two changes to the watch for the move, the widening and the start, both
+off by default and measured in the simulator only:
+
+- **`qrm_quick`.** Narrowed, a slice burst in our third comes in half
+  lost. If one of the other thirds had QRM 6 dB or more over the noise at
+  the last slice burst heard well, and now has none (0 dB or less) while
+  the remaining third has 6 dB more, the QRM has moved onto ours and the
+  watch asks for that third at once, without waiting for the meter. And
+  the 30 s of clear thirds count from the start of the burst that measured
+  them clear, not its end.
+- **`qrm_trial`.** A link in trouble that has shown no S/N to spare (QRM
+  there before the call, or a link at a few dB) narrows on trial once a
+  third scores 14 points or more over the cleanest (`TRIAL_CONTRAST`). Its
+  reports ask for the slower slice level until a slice burst is heard. One
+  heard well in 60 s at an effective S/N of 6 dB or more makes it an
+  ordinary narrowing; otherwise it widens and the next trial waits 5
+  minutes, doubling up to 20.
+
+S/N +16 dB, 8 seeds, bit/s (*auto*: as above; *quick*: with `qrm_quick`;
+*both*: with `qrm_trial` too; Δ against auto, seed by seed; the 8 seeds
+of the first matrix throughout, so *old* and *auto* differ from the rows
+above that count 24):
+
+| QRM | dB | Channel | old | auto | quick | both | Δ |
+|---|---:|---|---:|---:|---:|---:|---:|
+| moving | +10 | WGN | 10 | 179 | 239 | | +60 ± 10 |
+| moving | +10 | MPP | 20 | 183 | 229 | | +46 ± 19 |
+| moving | 0 | WGN | 341 | 279 | | 279 | 0 |
+| stops | +10 | WGN | 2713 | 2579 | 2721 | | +142 ± 9 |
+| stops | +10 | MPP | 2010 | 1890 | 1995 | | +105 ± 14 |
+| noise, from the start | +10 | WGN | 8 | 88 | | 244 | +155 ± 33 |
+| noise, from the start | +10 | MPP | 4 | 38 | | 230 | +192 ± 20 |
+| modes, from the start | +10 | WGN | 2 | 70 | | 220 | +150 ± 25 |
+| modes, from the start | +10 | MPP | 0 | 69 | | 216 | +147 ± 26 |
+
+QRM from 60 to 80 s at low S/N, 4 seeds:
+
+| Channel | S/N dB | QRM dB | old | auto | both | Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| MPP | +6 | 0 | 201 | 214 | 233 | +19 ± 11 |
+| MPP | +6 | +10 | 48 | 25 | 127 | +101 ± 22 |
+| WGN | +3 | 0 | 211 | 211 | 211 | 0 |
+| WGN | +3 | +10 | 98 | 98 | 113 | +16 ± 26 |
+
+- **Quick.** A move at +10 dB gains on 14 runs of 16 and loses on one.
+  QRM that stops comes level with old on the mean (−4 ± 81; 5 runs ahead
+  of old and 11 behind; 16 of 16 ahead of auto), with no run of 16 in the
+  lifeline (old: 12). Under steady QRM
+  (WGN and MPP at 0 and +10 dB, 4 seeds), under QRM over the low third
+  alone (MPP and MPD, 8 seeds) and under moving QRM at 0 dB every run
+  moved the same bytes as auto.
+- A first rule without "had QRM at the last burst heard well" moved the
+  slice though the QRM had not moved: under QRM over the low third alone
+  on MPD, 7 runs of 8 changed (7 bit/s for 11). It moved the same bytes as auto over 20
+  minutes of steady QRM (4 runs) and on MPD at 0 and +10 dB (16 runs);
+  those two were not run again with the rule as it is, which only adds a
+  condition.
+- **Trial.** From the start at +10 dB every run narrowed and 2 of 32
+  entered the lifeline (auto: 27). On MPP at S/N +6 dB and QRM +10 dB auto
+  alone narrowed in no run of four and does worse
+  than old (not significant on 4 seeds; in the run traced a search poll
+  was heard in the clean third and the receiving side, with 4.6 dB there,
+  could not narrow); the trial narrows all four.
+- **Elsewhere** both together moved the same bytes as auto in every run
+  (4 seeds, WGN and MPP, S/N +16 dB): QRM at +10 dB at the sending end,
+  at both ends, and with data both ways (8 runs each, both directions
+  counted), and noise at 0 dB from the start (8 runs). The gain from the
+  start is for strong QRM.
+- **Without QRM** (MPG, MPP and MPD at 0, 3 and 6 dB, 8 seeds, the
+  silences fed): no run of 72 narrowed, and each moved the same bytes as
+  with the watch alone (the first matrix's runs). At −3 and −6 dB (4 seeds) none of 24 narrowed
+  either. The 14 points are fitted to that: at the 8 trial
+  decisions of the first four seeds fading alone showed a contrast of 9.4
+  to 12.6, noise QRM at +10 dB 15.9 or more and the modes recording 55 or
+  more. Without the condition 6 runs of 36 narrowed on trial, and MPD at 3
+  dB moved 204 bit/s for 274. The other four seeds were run after the
+  number was set; how many of them came to a trial decision was not
+  recorded. A margin of 1.4 dB on 8 decisions is thin.
+- Asking for a clean third on the meter instead (the cleanest at 4 points
+  or less) stopped the false trials on MPD but not three at 0 dB, and
+  halved the gain under the modes recording (131 and 118 bit/s): there
+  the cleanest third scored 7.5 to 14 at most decisions. Not kept.
+- Still as before: moving QRM at 0 dB on WGN (−62 ± 27 against old on
+  these 8 seeds), WGN at S/N +25 dB and 0 dB, and MPD.
 
 ## Turn-over, idle and disconnect
 
@@ -1132,6 +1281,7 @@ HF leaves compression off on links; nets compress direct messages
 | `start_margin_db` | 3 dB | |
 | `slice_slots` | on | |
 | `qrm_narrow`, `qrm_clear_s`, `harq_fresh_on_move` | on, 30 s, on | Narrowing for QRM |
+| `qrm_quick`, `qrm_trial` | off, off | Narrowing for QRM |
 | `compress` | off | |
 | `gear` | `Goodput` | `Ladder`: the alpha.4 rule |
 | `harq_stretch`, `merge_pieces` | on, on | |
