@@ -261,7 +261,9 @@ fn slot_update(s: &mut Slot, bit: u32, limit: u8) {
     let p = slot_p(*s);
     let target = if bit != 0 { 65535 } else { 0 };
     let r = recip_table()[n as usize];
-    let p = (p + (((target - p) * r) >> 16)).clamp(32, 65503);
+    // Wraps (from a fresh end-of-message slot, say), as release builds
+    // always have: the wrapped value is part of the CM1 format.
+    let p = (p + ((target - p).wrapping_mul(r) >> 16)).clamp(32, 65503);
     let n = if n < limit { n + 1 } else { n };
     *s = p as u32 | (n as u32) << 16;
 }

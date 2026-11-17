@@ -45,6 +45,18 @@ pub(super) struct Member {
     pub(super) compress: bool,
     /// How much later than predicted its replies start, s (learned).
     pub(super) reply_cal: Option<f64>,
+    pub(super) traffic: Traffic,
+    pub(super) line: String,
+    /// Parts of a new line as they come in.
+    pub(super) line_parts: [Option<Vec<u8>>; 2],
+    /// Which offers it holds (bit i: offer i), from its reports, and what
+    /// its last report said. A report names offers by index only: one
+    /// whose object changed while the member held the old one is not
+    /// believed (`stale`) until a report shows it cleared, which a member
+    /// that heard the new list and lacks the new object sends.
+    pub(super) holds: u8,
+    pub(super) reported: u8,
+    pub(super) stale: u8,
 }
 
 impl Member {
@@ -72,6 +84,12 @@ impl Member {
             direct: None,
             compress: false,
             reply_cal: None,
+            traffic: Traffic::default(),
+            line: String::new(),
+            line_parts: [None, None],
+            holds: 0,
+            reported: 0,
+            stale: 0,
         }
     }
 
@@ -121,8 +139,61 @@ impl NetStation {
                     .filter(|c| c.via == Some(slot))
                     .map(|c| c.call.clone())
                     .collect(),
+                line: m.line.clone(),
+                traffic: m.traffic,
+                holds: m.holds,
             })
             .collect()
+    }
+
+    /// NCS: `slot` lists `traffic`.
+    fn note_traffic(&mut self, slot: u8, traffic: Traffic) {
+        let Some(m) = self.members.get_mut(&slot) else { return };
+        if m.traffic != traffic {
+            m.traffic = traffic;
+            let call = m.call.clone();
+            self.events.push(NetEvent::Traffic { call, traffic });
+        }
+    }
+
+    /// NCS: one part of a member's check-in line (`p[2]` ties the parts of
+    /// one version of it).
+    fn line_part(&mut self, p: &[u8]) {
+        let (slot, part, parts) = (p[1] & 63, (p[1] >> 6 & 1) as usize, (p[1] >> 7) as usize + 1);
+        let Some(m) = self.members.get_mut(&slot) else { return };
+        if parts == 1 {
+            m.line_parts = [None, None];
+        }
+        if m.line_parts[1 - part].as_ref().is_some_and(|x| x[0] != p[2]) {
+            m.line_parts[1 - part] = None;
+        }
+        m.line_parts[part] = Some(p[2..].to_vec());
+        if m.line_parts[..parts].iter().any(Option::is_none) {
+            return;
+        }
+        let bytes: Vec<u8> = m
+            .line_parts
+            .iter_mut()
+            .flat_map(|x| x.take().map(|x| x[1..].to_vec()).unwrap_or_default())
+            .collect();
+        let line = String::from_utf8_lossy(&bytes).to_string();
+        if line != m.line {
+            m.line = line.clone();
+            let call = m.call.clone();
+            self.events.push(NetEvent::Line { call, line });
+        }
+    }
+
+    /// Where `slot` comes in a round: Emergency first, then Priority, then
+    /// short time, then the rest. A relay goes as early as its most urgent
+    /// leaf.
+    fn poll_rank(&self, slot: u8) -> u8 {
+        self.members
+            .iter()
+            .filter(|&(&s, m)| s == slot || m.via == Some(slot))
+            .map(|(_, m)| m.traffic.rank())
+            .min()
+            .unwrap_or(3)
     }
 
     fn active(&self) -> impl Iterator<Item = &Member> {
@@ -224,14 +295,32 @@ impl NetStation {
     }
 
     pub(super) fn ncs_next(&mut self, now: f64) -> Option<Outgoing> {
+        if self.close_asked && !self.closed {
+            // Not on top of an answer: a member sending would miss every
+            // Close. Its turn ends with this answer (or none).
+            if matches!(self.wait, Some(Wait::Reply { .. })) {
+                if now < self.deadline? {
+                    return None;
+                }
+                self.wait = None;
+                self.deadline = None;
+            }
+            if self.wait.is_some() || now < self.window_end {
+                return None;
+            }
+            self.closed = true;
+            self.close_left = CLOSES;
+            self.events.push(NetEvent::Closed);
+        }
         if self.closed {
             if self.close_left == 0 {
                 return None;
             }
             self.close_left -= 1;
-            // Spaced out, so a reply already on its way cannot hide them all.
+            // Spaced out, so a burst we did not hear coming cannot hide
+            // them all.
             self.tx_at = now + self.cfg.max_burst_s;
-            return Some(self.tiny(K_CLOSE, 0, LADDER[self.cfg.beacon_level].wave));
+            return Some(self.tiny(K_CLOSE, self.close_left as u16, LADDER[self.cfg.beacon_level].wave));
         }
         if let Some(Wait::Reply {
             slot,
@@ -274,6 +363,7 @@ impl NetStation {
         // Beacon (opens a check-in window).
         if self.open && now >= self.next_beacon_at {
             self.next_beacon_at = now + self.cfg.beacon_every_s;
+            self.offers_due |= self.offers.iter().any(Option::is_some);
             return Some(self.beacon(now));
         }
         if !self.to_ack.is_empty() || !self.tree_news.is_empty() {
@@ -307,13 +397,20 @@ impl NetStation {
             self.round_had_traffic = false;
             let rn = self.round_no;
             let lim = self.cfg.miss_limit;
-            self.round = self
+            let mut round: Vec<u8> = self
                 .members
                 .iter()
                 .filter(|(_, m)| m.via.is_none() && (m.missed < lim || rn.is_multiple_of(4)))
                 .map(|(&s, _)| s)
                 .collect();
+            round.sort_by_key(|&s| self.poll_rank(s));
+            self.round = round.into();
             self.next_round_at = now + self.cfg.idle_round_gap_s;
+        }
+        // The offer list, before the pieces it is about.
+        if let Some(b) = self.offer_burst() {
+            self.wait = Some(Wait::Nothing);
+            return Some(b);
         }
         // The bulletin (or what some member still lacks of it), once per round.
         if self.bul_sent_round != Some(self.round_no)
@@ -689,6 +786,7 @@ impl NetStation {
                         let heard_us = snr_from_q(p[6]);
                         let caps = p.get(7).map(|&b| Caps::from_byte(b));
                         let version = p.get(9).copied();
+                        let traffic = p.get(10).map(|&b| Traffic::from_byte(b));
                         let s = self.admit(&call, None, now);
                         if let Some(m) = s.and_then(|s| self.members.get_mut(&s)) {
                             m.snr_up = Some(smooth(m.snr_up, inc.snr_db));
@@ -698,8 +796,11 @@ impl NetStation {
                             m.version = version.or(m.version);
                             m.compress = p.get(7).is_some_and(|&b| b & CAPS_COMPRESS != 0);
                         }
+                        if let (Some(s), Some(t)) = (s, traffic) {
+                            self.note_traffic(s, t);
+                        }
                     }
-                    Some(C_REPORT) if f.payload.len() >= 12 => {
+                    Some(C_REPORT) if f.payload.len() >= REPORT_LEN => {
                         let s = f.payload[1];
                         let p = &f.payload;
                         let forwarded = polled.is_some()
@@ -717,11 +818,16 @@ impl NetStation {
                             m.snr_down = Some(snr_from_q(p[2]));
                             m.bul = Some((u16::from_le_bytes([p[6], p[7]]), p[8]));
                             m.dir_delivered = m.dir_delivered.max(u24(&p[9..12]));
-                            for h in p[12..].as_chunks::<2>().0 {
+                            m.stale &= p[13];
+                            m.reported = p[13];
+                            m.holds = p[13] & !m.stale;
+                            for h in p[REPORT_LEN..].as_chunks::<2>().0 {
                                 m.hears.insert(h[0], snr_from_q(h[1]));
                             }
                         }
+                        self.note_traffic(s, Traffic::from_byte(p[12]));
                     }
+                    Some(C_LINE) if f.payload.len() >= 3 => self.line_part(&f.payload),
                     Some(C_OVERHEARD) => {
                         // Stations a member heard asking in that NCS did
                         // not: they join as its leaves, if it will relay.
@@ -730,7 +836,7 @@ impl NetStation {
                             .get(&slot)
                             .filter(|r| r.via.is_none() && r.willing())
                             .map(|_| slot);
-                        for e in f.payload[1..].as_chunks::<8>().0 {
+                        for e in f.payload[1..].as_chunks::<9>().0 {
                             let call = unpack_call(&e[..5]);
                             if self.members.values().any(|m| m.call == call) {
                                 continue;
@@ -742,6 +848,7 @@ impl NetStation {
                                 m.caps = Some(Caps::from_byte(e[6]));
                                 m.version = Some(e[7]);
                             }
+                            self.note_traffic(c, Traffic::from_byte(e[8]));
                             if let Some(r) = self.members.get_mut(&slot) {
                                 r.hears.insert(c, snr_from_q(e[5]));
                             }
@@ -836,7 +943,7 @@ impl NetStation {
             .map_or(LADDER[FLOOR].wave, |m| self.tiny_wave(m.snr_down));
         let extra = slot as u16 & 63 | (burst as u16) << 6 | bitmap << 8;
         self.deadline = None;
-        if more && turn_bursts + 1 < MAX_TURN_BURSTS {
+        if more && turn_bursts + 1 < MAX_TURN_BURSTS && !self.close_asked {
             self.wait = Some(Wait::Reply {
                 slot,
                 relay_for,
@@ -881,5 +988,31 @@ impl NetStation {
             via: via_call,
         });
         Some(slot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::sim::ModelAir;
+
+    /// Part 0 of an old line and part 1 of a new one are never joined.
+    #[test]
+    fn line_parts_of_two_versions_are_not_joined() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        let s = ncs.admit("K1ABC", None, 0.0).unwrap();
+        ncs.take_events();
+        let old = line_payloads(s, "Trousdale County ARES, EOC net");
+        let new = line_payloads(s, "Wilson County ARES, at the shelter");
+        ncs.line_part(&old[0]);
+        ncs.line_part(&new[1]);
+        assert!(ncs.take_events().is_empty());
+        ncs.line_part(&new[0]);
+        let want = NetEvent::Line {
+            call: "K1ABC".into(),
+            line: "Wilson County ARES, at the shelter".into(),
+        };
+        assert_eq!(ncs.take_events(), vec![want]);
     }
 }

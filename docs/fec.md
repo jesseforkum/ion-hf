@@ -298,7 +298,8 @@ and both modes ([mfsk.md](mfsk.md)).
 
 ### A priori bits and the layout
 
-With the roster's priors (200 of a check-in's 256 bits known,
+With the roster's priors (192 of a check-in's 256 bits known since
+protocol 3's traffic byte, 200 when the tables below were measured;
 `link::apriori`) the bit layout decides how much a priori decoding gains.
 `tests/nb_prior.rs` shows why:
 

@@ -105,6 +105,9 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
 /// the peer's last as the receiver; with no link, our last broadcast
 /// burst's while groups are open.
 fn on_air(app: &App) -> (Option<usize>, bool) {
+    if app.net().is_some() {
+        return (app.net_level, app.net_tx);
+    }
     let Some(s) = app.link.as_ref().filter(|_| app.linked()) else {
         let groups = app.link.as_ref().is_some_and(|s| !s.groups.is_empty());
         return (app.bcast_level.filter(|_| groups), true);
@@ -118,6 +121,20 @@ fn on_air(app: &App) -> (Option<usize>, bool) {
 
 fn counts(app: &App, ui: &mut egui::Ui, width: f32) {
     let Some(s) = &app.link else { return };
+    if let Some(n) = s.net.as_deref() {
+        let st = &n.stats;
+        let counts = [
+            ("Bursts", st.bursts.to_string()),
+            ("Polls", st.polls.to_string()),
+            ("Rounds", st.rounds.to_string()),
+            ("Pieces", (st.bul_pieces + st.obj_pieces).to_string()),
+            ("Repairs", (st.bul_repairs + st.obj_repairs).to_string()),
+            ("Air", theme::clock(st.airtime_s)),
+        ]
+        .map(|(k, v)| (k, RichText::new(v).monospace()));
+        pairs(ui, &counts, width);
+        return;
+    }
     let counts = [
         ("Bursts", s.data_bursts.to_string()),
         ("Frames", s.frames_sent.to_string()),
@@ -171,7 +188,9 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
     let rate = link.filter(|s| s.connected_s > 5.0).map_or("—".into(), |s| {
         panel::bps_text((s.bytes_acked + s.bytes_received) as f64 * 8.0 / s.connected_s)
     });
-    let data = link.map_or("—".into(), |s| theme::bytes(s.bytes_acked + s.bytes_received));
+    let data = link
+        .filter(|s| s.net.is_none())
+        .map_or("—".into(), |s| theme::bytes(s.bytes_acked + s.bytes_received));
     let snr = app.hist.last_here.map_or("—".into(), |v| format!("{v:+.1} dB"));
     pairs(
         ui,

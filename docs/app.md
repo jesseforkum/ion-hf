@@ -10,7 +10,7 @@ top. It drives the radio over TCI
 
 ```text
 ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
-      [--setup] [--log] [--shots DIR] [--quit S] [--gear goodput|ladder]
+      [--setup] [--log] [--net PAGE] [--shots DIR] [--quit S] [--gear goodput|ladder]
       [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
       [--shot-every S]
 ```
@@ -20,7 +20,8 @@ ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
   setting).
 - `--tci`: use TCI at this address instead of the configured radio.
 - `--connect`: call a station at start.
-- `--setup`: start on Setup; `--log`: on the Log.
+- `--setup`: start on Setup; `--log`: on the Log; `--net PAGE`: on that
+  page of the Net (`member`, `ncs`, `history` with the newest net shown).
 - `--shots DIR`, `--quit S`: save the window to `DIR` every 15 s and close
   after `S` seconds (screenshots, scripted checks).
 - `--gear`: the link's choice of level for this run, over the `gear`
@@ -77,11 +78,28 @@ across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;
 the oldest goes). **Save** writes the lines the Log shows (its filter and
 search) to `logs/saved-<UTC time>.txt`; **Folder** opens `logs/`.
 
+**Net log.** Each net run or joined from the Net screen is one file,
+`nets/<UTC opening>-<net>.toml` (`20261103-010000Z-TNARES.toml`),
+rewritten through a temporary file as the net goes, so a crash keeps it:
+the net, net control, frequency, operator, open and close times (UTC),
+check-ins (call, slot, line, traffic, route, time), each item of traffic
+(from, to, precedence, time, subject, text, and Queued, Delivered,
+Received or Handled), bulletins and missed polls. Files received go in a
+folder of the same name beside it. **Export** (Net, Log) writes
+`<name>.txt` (a report), `<name>.csv` (one row per check-in, item,
+bulletin and missed poll: `time_utc,event,from,to,precedence,state,route,traffic,text`)
+and `<name>-ics309.txt` (the ICS 309 Communications Log: incident name,
+operational period, radio operator, then time, from, to and subject for
+the opening, each check-in, item and bulletin, and the close; prepared by
+and when) beside it. A member's copy takes net control's summary when it
+arrives at the close.
+
 ## Window
 
 | Screen | What it shows |
 |---|---|
 | Modem | The lamp panel and the link's counts (Bursts, Frames, Resent, HARQ increments / recoveries, Lost codewords, Polls, Ctrl bursts, Air time), the open broadcast groups and who is heard in them; the level readout with S/N, Rate, Data and the send progress; the decode plot; the band meter (how clean each third of the passband is here); the waterfall; the Log. **Disconnect** and **Abort** sit beside the state while linked. |
+| Net | One screen a role, and **History**. Above both, the net's controls and, in a net, a timeline from its start to its end, filled to now, with a tick and call where each station checked in and where priority or emergency traffic came (hover for the time). **Member**: **Join** (the net named, or the first heard; **Leave**, **Abort**); in the net its state, NCS, slot, relay, stations and the traffic listed. On the left the check-in: the call from Setup, the line, **Short**, **Relay** and **Attended**, then the traffic: a message, a file or both, precedence, **NCS** or **Net** (through net control); **Queue** before joining, **Send** once in; the outbox and files received. In the middle the net's page: its name (the page's first heading, else the net), purpose and mode, frequency, backup, time, NCS, alternate and next net, then the body. On the right the messages and a box to send to net control. **NCS**: before the net the profile (frequency, backup, start, end, next net, alternate, regulars, mode, purpose, and the page in Markdown beside a live preview) and **Start**. Running: its state (**Open** while check-ins are, **Closing** with the time left), round, stations, the next beacon; **Check-ins** on or off, **Beacon** to send one now, **Page** to edit the profile (offered again when an edit is done), **Close** (the summary first, then the close; **Now** to stop waiting) and **Abort**. The roster (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the page; **To** one member); on the right the traffic that came in, open items first by precedence (**Pass** for traffic meant for the net, **Folder** for files, **Handled**), and the bulletins with a box to send to all or **To** one member, at a precedence, with a **File** (for all it goes as an object, so a station that holds it skips it). **History**: past nets, **Export**, **Folder**. A page is Markdown plus three blocks the app draws: `::: steps` (a step a line), `::: agenda` (`01:15 Weather briefing | KJ5ET`) and `::: note`, each closed by `:::`; an older build shows their lines as text. A link and a net exclude each other; Esc is Abort. |
 | Log | The Log in place of the passband, the panel still above. |
 | Setup | Station (call, grid), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
 
@@ -146,7 +164,7 @@ Every note, burst, host event and error, newest at the bottom: **All**,
 newest line until scrolled back; **LIVE** goes back to it. **Copy** puts
 the lines shown on the clipboard. Esc in the search box leaves the box;
 elsewhere it aborts the link as before. Drag the panel's
-top edge to resize it, or **Log** in the header gives it the window.
+top edge to resize it, or **Log** in the header gives it the window; **Modem** brings the waterfall back.
 
 ## Winlink host interface
 
@@ -161,7 +179,10 @@ far end has not yet acknowledged (Pat waits for 0 before closing).
 `ABORT` closes at once.
 `PTT ON/OFF` is for information only: Ion keys the radio itself. `SN`
 gives the S/N of the last burst heard. `ABORT` also drops what broadcast
-frames are queued.
+frames are queued, and ends a net (keying nothing) only for a client
+attached to it with `NET OPEN` or `NET JOIN`. Event lines carry text
+from the air (check-in lines, net names) with control characters made
+spaces, so none starts a line of its own.
 
 Two commands of Ion's own set the slice, at once, link up or not
 ([link.md](link.md), Narrowing for QRM): `SLICE LOW`, `MID` or `HIGH`
@@ -218,6 +239,68 @@ them, on the KISS port 200 below the command port (8100):
   decoded), `BCAST n LOST k` and `BCAST n DROPPED k`.
 - When the command client goes, its groups close.
 
+Ion Net ([ion-net.md](ion-net.md), [net.md](net.md)): a net runs in
+place of the link, so `NET OPEN` and `NET JOIN` are `WRONG` while a link
+is called or up, and `CONNECT` is `WRONG` while a net is up. Broadcast
+groups hold their frames until the net is over.
+
+| Command | Reply | |
+|---|---|---|
+| `NET OPEN name` | `NET PORT n` | run the net `name` as net control; `n` is its KISS port (1–15, beside the groups') |
+| `NET JOIN [name]` | `NET PORT n` | join `name`, or the first net heard |
+| `NET CHECKINS ON` / `OFF` | `OK` / `WRONG` | net control: open or close check-ins |
+| `NET LINE text` | `OK` | the check-in line (the rest of the command, at most 38 bytes) |
+| `NET TRAFFIC n R\|W\|P\|E [SHORT]` | `OK` / `WRONG` | traffic listed: count, precedence, short time |
+| `NET OFFER` | `OK` / `WRONG` | net control: the next frame on the net's port is an object to offer |
+| `NET BEACON` | `OK` / `WRONG` | net control: a beacon now |
+| `NET CLOSE` | `OK` / `WRONG` | net control: close the net once the turn under way is over (its Close goes out three times); member: leave |
+
+Events, as they happen:
+
+| Line | |
+|---|---|
+| `NET JOINED ncs net slot` | we are in the net, as `slot` |
+| `NET IN call slot [VIA call]` | a station checked in (through another, `VIA`) |
+| `NET LINE call text` | net control: a member's check-in line, new or changed (no text: none) |
+| `NET TRAFFIC call n R\|W\|P\|E [SHORT]` | net control: the traffic a member lists, new or changed |
+| `NET HEARD call up_db down_db` | net control: how it hears a member and how the member hears it, when either moves a dB; `-` not known yet |
+| `NET MISSED call` | net control: a member did not answer its poll |
+| `NET RELAY call VIA call` | net control: traffic or a check-in came through another member |
+| `NET ROUTE call VIA call` / `NET ROUTE call DIRECT` | net control: a station's route changed |
+| `NET OBJECT id [CACHED]` | member: an object net control offers, its frame next; `id` is 20 hex digits (the first 8 bytes of its SHA-256, then its length); `CACHED`: it was held already and cost no airtime |
+| `NET CLOSED` | the net closed, we left it, or it was refused (no call, a link up) |
+| `NET CLOSED LOST` | member: nothing heard of net control (or our relay) for 12.5 minutes; the net is over for us |
+
+- Frames on the net's port (KISS data, command 0) carry a header both
+  ways: `[to length][to][from length][from][data]`, calls in ASCII. From
+  the host `from` is empty (Ion puts in its own call) and an empty `to`
+  is the whole net: a bulletin from net control, traffic for net control
+  from a member. Net control may address one member; a member only net
+  control. To the host both are filled in; an empty `to` was a bulletin,
+  and `#` and the id an object.
+  Messages overheard between other stations are not passed on.
+- `NET OPEN` or `NET JOIN` while a net is up (the client's, or one
+  started on the Net screen) answers that net's port.
+- When the command client goes, the net keeps running; the next client
+  attaches with `NET OPEN` or `NET JOIN`.
+- ACKMODE frames (0x0C, a 2-byte tag, then the frame) work on the net's
+  port too; the tag comes back once the net has taken the frame (it goes
+  on the air over the polls that follow, so not once it has gone, as for
+  a group).
+- `NET LINE` and `NET TRAFFIC` hold from one net to the next: set them
+  before `NET JOIN` and they go with the check-in. Net control offers up
+  to 8 objects at once (the oldest goes); each goes on the air only while
+  a member lacks it. Ion HF keeps received objects in `nets/objects/` in
+  its settings folder, one file per id, so one offered again costs
+  nothing.
+- Net control sends its CW ID once the Close bursts are over, a member
+  after net control's (members in slot order), and both at least every
+  570 s: a member right after a burst of its own, net control after one
+  nobody answers. Past 590 s either takes the next gap, so a quiet net,
+  where every burst of net control's is answered, still hears it (net
+  control then loses one answer). A relay keeps its ID's slot while it
+  passes the Close to its leaves.
+
 ## On the air
 
 A host program's `CONNECT` and broadcast frames key the radio, and so
@@ -234,6 +317,10 @@ instead of polling into it (`cw_id_breaks_do_not_cost_polls` in
 `crates/ion/tests/node.rs`). A link holding in the lifeline probes right
 after each ID time, so the ID still goes on time
 (`cw_ids_stay_on_time_through_a_hold` in `crates/ion/tests/lifeline.rs`).
+An ID still owed when a link or net starts (say a member's, waiting its
+turn after a Close) goes at once, before anything of the new session
+keys, and an ID owed from before a call change goes out under the old
+call.
 
 **Radio notes.**
 

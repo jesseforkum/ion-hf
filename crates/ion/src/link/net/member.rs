@@ -19,7 +19,9 @@ pub(super) enum Sent {
         seq: u32,
         off: usize,
     },
-    Report([u8; 7]),
+    Report([u8; 9]),
+    /// A part of our check-in line (its payload).
+    Line(usize, Vec<u8>),
     Overheard(Vec<String>),
     Relay {
         src: u8,
@@ -29,6 +31,8 @@ pub(super) enum Sent {
     },
     /// A leaf's report, forwarded.
     KidReport(u8),
+    /// A part of a leaf's line, forwarded.
+    KidLine(u8, usize),
     Other,
 }
 
@@ -39,12 +43,13 @@ pub(super) struct Applicant {
     snr: f32,
     caps: Caps,
     version: u8,
+    traffic: u8,
 }
 
 impl NetStation {
     pub(super) fn member_next(&mut self, now: f64) -> Option<Outgoing> {
         if self.closed {
-            return None;
+            return self.relay_close(now);
         }
         if self.turn.is_some() {
             return self.turn_step(now);
@@ -64,6 +69,7 @@ impl NetStation {
             self.snr_ncs.unwrap_or(0.0),
             self.cfg.caps,
             self.cfg.version,
+            self.cfg.traffic,
         );
         if self.cfg.compress {
             p[7] |= CAPS_COMPRESS;
@@ -92,7 +98,12 @@ impl NetStation {
         self.next_seek_at = now + self.cfg.seek_every_s * (0.5 + self.rng.uniform() as f64);
         let mut p = vec![C_SEEK];
         p.extend(pack_call(&self.cfg.call));
-        p.extend([self.cfg.caps.to_byte(), PROTOCOL, self.cfg.version]);
+        p.extend([
+            self.cfg.caps.to_byte(),
+            PROTOCOL,
+            self.cfg.version,
+            self.cfg.traffic.to_byte(),
+        ]);
         let f = ctrl_frame(ALL, p);
         Some(self.ctrl_hi(vec![f], LADDER[self.cfg.beacon_level].wave, ASIDE))
     }
@@ -105,11 +116,9 @@ impl NetStation {
             match kind {
                 // A leaf hears its relay, not NCS.
                 K_POLL | K_POLLACK | K_ACK | K_RELAY | K_CLOSE if self.parent.is_none() => {
-                    self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db))
+                    self.heard_ncs(inc.snr_db, now)
                 }
-                K_SUBPOLL | K_SUBACK if Some(slot) == self.my_slot => {
-                    self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db))
-                }
+                K_SUBPOLL | K_SUBACK if Some(slot) == self.my_slot => self.heard_ncs(inc.snr_db, now),
                 K_SUBPOLL | K_SUBACK => {
                     if let Some(&r) = self.parents.get(&slot) {
                         self.note_heard(r, inc.snr_db, now);
@@ -199,10 +208,7 @@ impl NetStation {
                     }
                     self.overheard_ack(slot, bitmap);
                 }
-                K_CLOSE if !self.closed => {
-                    self.closed = true;
-                    self.events.push(NetEvent::Closed);
-                }
+                K_CLOSE => self.heard_close(e, now),
                 _ => {}
             }
             return;
@@ -215,16 +221,16 @@ impl NetStation {
             && frames
                 .iter()
                 .flatten()
-                .any(|f| f.flags >> 6 == T_DOWN || ctrl_is(f, &[C_BEACON, C_ACKS, C_RXLIST, C_TREE]));
+                .any(|f| f.flags >> 6 == T_DOWN || ctrl_is(f, &[C_BEACON, C_ACKS, C_RXLIST, C_TREE, C_OFFER]));
         // A relay talking to its leaves.
         let from_relay = aside
             && frames
                 .iter()
                 .flatten()
-                .any(|f| f.flags >> 6 == T_DOWN || ctrl_is(f, &[C_CHILD]));
+                .any(|f| f.flags >> 6 == T_DOWN || ctrl_is(f, &[C_CHILD, C_OFFER]));
         let asking = frames.iter().flatten().any(|f| ctrl_is(f, &[C_CHECKIN, C_SEEK]));
         if from_ncs && self.parent.is_none() || from_relay && self.parent.is_some() {
-            self.snr_ncs = Some(smooth(self.snr_ncs, inc.snr_db));
+            self.heard_ncs(inc.snr_db, now);
         } else if !from_ncs
             && !asking
             && let Some(t) = self.talker
@@ -381,6 +387,7 @@ impl NetStation {
                     if call == self.cfg.call && self.my_slot != Some(slot) {
                         self.my_slot = Some(slot);
                         self.checkin_at = None;
+                        self.ncs_heard_at = now;
                         let ncs = self.ncs_call.clone().unwrap_or_default();
                         let net = self.net_name.clone();
                         self.events.push(NetEvent::Joined { ncs, net, slot });
@@ -399,6 +406,7 @@ impl NetStation {
                     snr: inc.snr_db,
                     caps: p.get(7).map_or(Caps::default(), |&b| Caps::from_byte(b)),
                     version: p.get(9).copied().unwrap_or(0),
+                    traffic: p.get(10).copied().unwrap_or(0),
                 };
                 self.note_applicant(a);
             }
@@ -409,10 +417,11 @@ impl NetStation {
                     snr: inc.snr_db,
                     caps: p.get(6).map_or(Caps::default(), |&b| Caps::from_byte(b)),
                     version: p.get(8).copied().unwrap_or(0),
+                    traffic: p.get(9).copied().unwrap_or(0),
                 };
                 self.note_applicant(a);
             }
-            Some(C_REPORT) if p.len() >= 12 => {
+            Some(C_REPORT) if p.len() >= REPORT_LEN => {
                 // Our leaf's report: kept to forward.
                 if let Some(k) = self.kids.get_mut(&p[1]) {
                     k.snr_down = Some(snr_from_q(p[2]));
@@ -420,6 +429,33 @@ impl NetStation {
                     k.dir = k.dir.max(u24(&p[9..12]));
                     k.report = Some(p.clone());
                     k.report_fwd = false;
+                }
+            }
+            Some(C_LINE) if p.len() >= 3 => {
+                // Our leaf's line: kept to forward.
+                if let Some(k) = self.kids.get_mut(&(p[1] & 63)) {
+                    let part = (p[1] >> 6 & 1) as usize;
+                    if k.line[part].as_ref() != Some(p) {
+                        k.line[part] = Some(p.clone());
+                        k.line_fwd[part] = false;
+                    }
+                    if p[1] >> 7 == 0 {
+                        k.line[1] = None;
+                        k.line_fwd[1] = true;
+                    }
+                }
+            }
+            Some(C_OFFER) => {
+                // NCS's list, or a leaf's relay's: never another relay's,
+                // which may be out of date.
+                let aside = user_hi(inc.user) & ASIDE != 0;
+                let from = f.flags & 63;
+                let ours = match self.parent {
+                    None => !aside && from == ALL,
+                    Some(r) => aside && from == r,
+                };
+                if ours {
+                    self.offer_frame(p);
                 }
             }
             Some(C_TREE) => {
@@ -436,6 +472,7 @@ impl NetStation {
                     // We are in, through this relay.
                     self.my_slot = Some(c);
                     self.checkin_at = None;
+                    self.ncs_heard_at = now;
                     self.id = user_session(inc.user);
                     let ncs = unpack_call(&p[13..18]);
                     self.ncs_call = Some(ncs.clone());
@@ -471,6 +508,68 @@ impl NetStation {
             }
             _ => {}
         }
+    }
+
+    /// We heard NCS (a leaf: its relay).
+    fn heard_ncs(&mut self, snr: f32, now: f64) {
+        self.snr_ncs = Some(smooth(self.snr_ncs, snr));
+        self.ncs_heard_at = now;
+    }
+
+    /// The net is over for us.
+    fn leave(&mut self, e: NetEvent) {
+        self.closed = true;
+        self.reply = None;
+        self.turn = None;
+        self.checkin_at = None;
+        self.chorus_at = None;
+        self.events.push(e);
+    }
+
+    /// Nothing from NCS (or our relay) for too long.
+    pub(super) fn check_lost(&mut self, now: f64) {
+        if !self.closed
+            && self.my_slot.is_some()
+            && self.cfg.lost_after_s > 0.0
+            && now - self.ncs_heard_at > self.cfg.lost_after_s
+        {
+            self.leave(NetEvent::Lost);
+        }
+    }
+
+    /// A Close (`extra`: see [`CLOSE_RELAYED`]). A relay passes it on to
+    /// its leaves, once for each of NCS's: in the gap after it, which NCS
+    /// leaves for answers on their way, relays in slot order.
+    fn heard_close(&mut self, extra: u16, now: f64) {
+        let first = !self.closed;
+        if first {
+            self.leave(NetEvent::Closed);
+        }
+        if self.kids.is_empty() || !first && extra & CLOSE_RELAYED != 0 {
+            return;
+        }
+        let me = self.my_slot.unwrap_or(ALL);
+        let before = self
+            .parents
+            .values()
+            .filter(|&&r| r < me)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let b = self.tiny(K_CLOSE, 0, LADDER[self.cfg.beacon_level].wave);
+        let each = self.air.duration(b.wave, b.code, b.coded_bits()) + self.cfg.turnaround_s;
+        self.close_left = (extra & 3) as u32 + 1;
+        self.close_at = now + self.cfg.turnaround_s + before as f64 * each;
+    }
+
+    /// A relay's Close to its leaves.
+    fn relay_close(&mut self, now: f64) -> Option<Outgoing> {
+        if self.close_left == 0 || now < self.close_at {
+            return None;
+        }
+        self.close_left -= 1;
+        self.close_at = now + self.cfg.max_burst_s;
+        let extra = self.close_left as u16 | CLOSE_RELAYED;
+        Some(self.tiny(K_CLOSE, extra, LADDER[self.cfg.beacon_level].wave))
     }
 
     fn note_applicant(&mut self, a: Applicant) {
@@ -577,7 +676,7 @@ impl NetStation {
             let mut p = vec![C_REPORT, slot];
             p.extend_from_slice(&report.0[..1]);
             put_u24(&mut p, self.outbox.pending().min(0xFF_FFFF) as u32);
-            p.extend_from_slice(&report.0[1..7]);
+            p.extend_from_slice(&report.0[1..9]);
             // Who we hear, most recent first.
             let mut hs: Vec<(u8, f32, f64)> = self.heard.iter().map(|(&s, &(snr, t))| (s, snr, t)).collect();
             hs.sort_by(|a, b| b.2.total_cmp(&a.2));
@@ -588,12 +687,28 @@ impl NetStation {
             frames.push(ctrl_frame(slot, p));
             sent.push(Sent::Report(report.0));
         }
+        // Our check-in line, until acknowledged.
+        let mut line_left = false;
+        if extras && self.line_left != 0 {
+            let parts = line_payloads(slot, &self.cfg.line);
+            for (i, lp) in parts.into_iter().enumerate() {
+                if self.line_left >> i & 1 == 0 {
+                    continue;
+                }
+                if frames.len() >= room {
+                    line_left = true;
+                    break;
+                }
+                frames.push(ctrl_frame(slot, lp.clone()));
+                sent.push(Sent::Line(i, lp));
+            }
+        }
         if extras && !self.overheard_checkins.is_empty() && frames.len() < room {
             let heard: Vec<Applicant> = self.overheard_checkins.iter().take(2).cloned().collect();
             let mut p = vec![C_OVERHEARD];
             for a in &heard {
                 p.extend(pack_call(&a.call));
-                p.extend([snr_q(a.snr), a.caps.to_byte(), a.version]);
+                p.extend([snr_q(a.snr), a.caps.to_byte(), a.version, a.traffic]);
             }
             frames.push(ctrl_frame(slot, p));
             sent.push(Sent::Overheard(heard.into_iter().map(|a| a.call).collect()));
@@ -620,6 +735,18 @@ impl NetStation {
             }
             frames.push(ctrl_frame(slot, r));
             sent.push(Sent::KidReport(c));
+        }
+        let lines: Vec<(u8, usize, Vec<u8>)> = self
+            .kids
+            .iter()
+            .flat_map(|(&c, k)| (0..2).filter_map(move |i| Some((c, i, k.line[i].clone().filter(|_| !k.line_fwd[i])?))))
+            .collect();
+        for (c, i, lp) in lines {
+            if !extras || frames.len() >= room {
+                break;
+            }
+            frames.push(ctrl_frame(slot, lp));
+            sent.push(Sent::KidLine(c, i));
         }
         // Others' traffic (older than ours: first).
         let space = room.saturating_sub(frames.len());
@@ -653,7 +780,7 @@ impl NetStation {
             return self.tiny(K_IDLE, extra, wave);
         }
         self.last_sent = sent;
-        let more = relay_left || self.outbox.has_new();
+        let more = relay_left || line_left || self.outbox.has_new();
         // A leaf answers its relay, not NCS.
         let aside = if self.parent.is_some() { ASIDE } else { 0 };
         let hi = self.burst_id & 3 | (more as u8) << 2 | aside;
@@ -670,15 +797,17 @@ impl NetStation {
         }
     }
 
-    /// (snr of NCS, bulletin block and shortfall, direct delivered) as sent
-    /// in a report, and the hears list.
-    fn report_body(&self) -> ([u8; 7], BTreeMap<u8, f32>) {
-        let mut r = [0u8; 7];
+    /// (snr of NCS, bulletin block and shortfall, direct delivered,
+    /// traffic, objects held) as sent in a report, and the hears list.
+    fn report_body(&self) -> ([u8; 9], BTreeMap<u8, f32>) {
+        let mut r = [0u8; 9];
         r[0] = snr_q(self.snr_ncs.unwrap_or(0.0));
         let (b, short) = self.bul_status();
         r[1..3].copy_from_slice(&b.to_le_bytes());
         r[3] = short;
         r[4..7].copy_from_slice(&(self.dir_in.delivered & 0xFF_FFFF).to_le_bytes()[..3]);
+        r[7] = self.cfg.traffic.to_byte();
+        r[8] = self.holds();
         // The hears list counts as changed when an SNR moves 3 dB.
         let hears: BTreeMap<u8, f32> = self
             .heard
@@ -714,6 +843,13 @@ impl NetStation {
                     self.acked_report = Some(*r);
                     self.acked_hears = self.report_body().1;
                 }
+                Sent::Line(i, lp) => {
+                    // Unless the line changed since.
+                    let slot = self.my_slot.unwrap_or(ALL);
+                    if line_payloads(slot, &self.cfg.line).get(*i) == Some(lp) {
+                        self.line_left &= !(1 << i);
+                    }
+                }
                 Sent::Overheard(calls) => self.overheard_checkins.retain(|a| !calls.contains(&a.call)),
                 Sent::Relay { src, seq, off, len } => {
                     self.held
@@ -727,6 +863,11 @@ impl NetStation {
                 Sent::KidReport(c) => {
                     if let Some(k) = self.kids.get_mut(c) {
                         k.report_fwd = true;
+                    }
+                }
+                Sent::KidLine(c, i) => {
+                    if let Some(k) = self.kids.get_mut(c) {
+                        k.line_fwd[*i] = true;
                     }
                 }
                 Sent::Other => {}

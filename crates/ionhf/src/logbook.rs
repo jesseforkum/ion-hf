@@ -303,7 +303,9 @@ impl Logbook {
             .auto_shrink([false, false])
             .stick_to_bottom(true);
         if self.jump_live {
-            area = area.vertical_scroll_offset(f32::MAX);
+            // Not f32::MAX: show_rows makes a row number of it, which panics.
+            let bottom = shown.len() as f32 * (row_h + ui.spacing().item_spacing.y);
+            area = area.vertical_scroll_offset(bottom);
         }
         let style = ui.style().clone();
         let out = egui::Frame::new()
