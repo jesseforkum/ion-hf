@@ -678,7 +678,9 @@ mod tests {
         assert!(matches!(&b[..], [Block::Steps(s)] if s.len() == 2), "{b:?}");
     }
 
-    /// The roles of the widgets one pass of `f` made.
+    /// The roles of the widgets one pass of `f` made (egui keeps them in
+    /// debug builds only).
+    #[cfg(debug_assertions)]
     fn roles(f: impl FnMut(&mut egui::Ui)) -> Vec<egui::Role> {
         let ctx = egui::Context::default();
         // Widget infos are kept only for this debug view.
@@ -700,6 +702,7 @@ mod tests {
         out
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn drawing_makes_nothing_clickable() {
         let blocks = parse(
