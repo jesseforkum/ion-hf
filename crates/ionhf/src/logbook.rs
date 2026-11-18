@@ -339,3 +339,36 @@ impl Logbook {
         self.jump_live = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(lines: usize) -> Logbook {
+        let mut b = Logbook {
+            lines: VecDeque::new(),
+            file: None,
+            filter: Filter::All,
+            search: String::new(),
+            live: false,
+            jump_live: false,
+        };
+        for n in 0..lines {
+            b.push(Kind::Link, format!("line {n}"));
+        }
+        b
+    }
+
+    #[test]
+    fn live_jumps_to_the_end() {
+        for lines in [0, 3, 2000] {
+            let mut b = book(lines);
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                b.jump_live = true;
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| b.show(ui));
+            }
+            assert!(b.live, "{lines} lines");
+        }
+    }
+}
