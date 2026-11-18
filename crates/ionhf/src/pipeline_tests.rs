@@ -840,8 +840,7 @@ fn said_after(c: &HostClient, from: usize, head: &str) -> Option<String> {
 fn data2g_client_cleans_mid_burst() {
     let mut rig = Rig::new();
     let h = rig.ion();
-    let port = 18_910;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let (_host, port) = host_on(&rig, &h);
     let mut c = HostClient::connect(port);
     for l in [
         &format!("MYCALL {CALL}"),
@@ -930,8 +929,7 @@ fn data2g_client_cleans_mid_burst() {
 fn vara_client_cleans_mid_burst() {
     let mut rig = Rig::new();
     let h = rig.ion();
-    let port = 18_920;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let (_host, port) = host_on(&rig, &h);
     let mut c = HostClient::connect(port);
     c.send(&format!("MYCALL {CALL}"));
     c.send(&format!("CONNECT {CALL} LOOP"));
@@ -989,8 +987,7 @@ fn said_after_in(s: &[String], from: usize, head: &str) -> bool {
 fn data2g_timeout_closes_an_idle_link() {
     let mut rig = Rig::new();
     let h = rig.ion();
-    let port = 18_930;
-    let _host = crate::host::spawn(port, h.cmds.clone(), rig.ui_tx.clone()).expect("ports free");
+    let (_host, port) = host_on(&rig, &h);
     let mut c = HostClient::connect(port);
     for l in [&format!("MYCALL {CALL}"), "DATA2G ON", "TIMEOUT 20"] {
         c.send(l);
