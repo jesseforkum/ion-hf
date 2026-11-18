@@ -72,6 +72,16 @@ stream of coded periods answered by tones. `false`: the station does not
 offer it and every link is plain ARQ, as with Ion HF 0.1.0-alpha.5 and
 before (which never offer it). It takes effect from the next link.
 
+`cw_id` (Setup, **CW ID**; `true` by default) keys Ion's CW IDs
+(Identification, below). Off, Ion keys none of its own: not during a link,
+a net or broadcast traffic, and not after one. It still waits out other
+stations' IDs, so a station that keeps its own loses nothing. Ion puts
+nothing else on the air that identifies a station: only a call request
+carries callsigns (the caller's and the called station's), and only the
+caller sends it. With `cw_id` off, identifying the station as its licence
+requires is up to the operator. It takes effect at once; an ID on the air
+is finished. A host's `CWID …` does not change it.
+
 **Log file.** Everything the Log shows goes to `logs/ionhf.log` as it
 happens, one line each (`2026-10-29 19:38:53Z RX   CONACK +15 dB`), kept
 across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;
@@ -101,7 +111,7 @@ arrives at the close.
 | Modem | The lamp panel and the link's counts (Bursts, Frames, Resent, HARQ increments / recoveries, Lost codewords, Polls, Ctrl bursts, Air time), the open broadcast groups and who is heard in them; the level readout with S/N, Rate, Data and the send progress; the decode plot; the band meter (how clean each third of the passband is here); the waterfall; the Log. **Disconnect** and **Abort** sit beside the state while linked. |
 | Net | One screen a role, and **History**. Above both, the net's controls and, in a net, a timeline from its start to its end, filled to now, with a tick and call where each station checked in and where priority or emergency traffic came (hover for the time). **Member**: **Join** (the net named, or the first heard; **Leave**, **Abort**); in the net its state, NCS, slot, relay, stations and the traffic listed. On the left the check-in: the call from Setup, the line, **Short**, **Relay** and **Attended**, then the traffic: a message, a file or both, precedence, **NCS** or **Net** (through net control); **Queue** before joining, **Send** once in; the outbox and files received. In the middle the net's page: its name (the page's first heading, else the net), purpose and mode, frequency, backup, time, NCS, alternate and next net, then the body. On the right the messages and a box to send to net control. **NCS**: before the net the profile (frequency, backup, start, end, next net, alternate, regulars, mode, purpose, and the page in Markdown beside a live preview) and **Start**. Running: its state (**Open** while check-ins are, **Closing** with the time left), round, stations, the next beacon; **Check-ins** on or off, **Beacon** to send one now, **Page** to edit the profile (offered again when an edit is done), **Close** (the summary first, then the close; **Now** to stop waiting) and **Abort**. The roster (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the page; **To** one member); on the right the traffic that came in, open items first by precedence (**Pass** for traffic meant for the net, **Folder** for files, **Handled**), and the bulletins with a box to send to all or **To** one member, at a precedence, with a **File** (for all it goes as an object, so a station that holds it skips it). **History**: past nets, **Export**, **Folder**. A page is Markdown plus three blocks the app draws: `::: steps` (a step a line), `::: agenda` (`01:15 Weather briefing | KJ5ET`) and `::: note`, each closed by `:::`; an older build shows their lines as text. A link and a net exclude each other; Esc is Abort. |
 | Log | The Log in place of the passband, the panel still above. |
-| Setup | Station (call, grid), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
+| Setup | Station (call, grid, **CW ID**), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
 
 ### Lamps
 
@@ -239,6 +249,31 @@ everything else is as above. With it:
   whatever it is given to −60..0 dB again, so no value can make it louder
   than the operator set.
 
+**Calls and scanners (BPQ32, linbpq).** `RETRIES` reads back how many
+more times an unanswered call goes out after the first, and `RETRIES n`
+(0 to 20) sets it for this client's later calls, with or without
+`DATA2G ON`. Ion's own is 5: six calls of 8 s, one every 19 s, and
+`DISCONNECTED` 113 s after `CONNECT` (in loopback); each retry more adds
+19 s, so `RETRIES 20` calls for about 6.5 minutes. It is Ion's own again
+once the client has gone. BPQ32 passes a `RETRIES n` line of its port
+config on to the modem as it stands (its `VARA.c`), which is how a
+station there sets how long it calls a station that scans several
+frequencies.
+
+`PTT ON` and `PTT OFF` cover everything Ion keys, the CW ID included
+(BPQ32 keys the radio by them when it does the port's PTT).
+
+`PENDING` goes out while Ion listens and a burst that may be a call is
+coming in: a control burst in the floor waveform with its header read,
+about 2.5 s into the burst and 6 s before its end, which is where the
+burst says who it is for. `CONNECTED` follows if it was a call for this
+station; else `CANCELPENDING` at the burst's end, or when listening stops
+under it (`LISTEN OFF`, a net). Every `PENDING` gets one of the two. A
+scanning client stays on the frequency in between (BPQ32 holds its scan
+on `PENDING` and lets it go on `CANCELPENDING`). Other links' control
+bursts in that waveform raise it as well; noise does not
+(`no_call_shows_on_noise` in `crates/ion/tests/node.rs`).
+
 Where Ion differs from Data2G, and why:
 
 - The limbo never drops: Data2G's receiver can be told to skip bytes
@@ -258,6 +293,14 @@ Where Ion differs from Data2G, and why:
   0 (Ion HF's owner: never louder than configured). A client that asks
   for more than 0 is answered `WRONG` by both and reads back the level
   unchanged.
+- `RETRIES`: Data2G's own is 4, its retries about 13 s apart in a
+  tougher mode than the first try; Ion's is 5, every call the same floor
+  burst.
+- `PENDING`: Data2G raises it on a header in one of its connect modes
+  (`--pending`), Ion on a control burst's header in the floor waveform.
+  Neither header says who the burst is for.
+- `CWID`: Data2G takes `CWID OFF|ON|ONLY` from a `DATA2G ON` client; Ion's
+  CW ID is the operator's setting (`cw_id`), which no client changes.
 - `ABORT` with a limbo unsettled: `OK` (Ion's order, as before), then
   `CLEANTXBUFFER SETTLED ... UNKNOWN`, then `DISCONNECTED ABORT`.
 - A link that compresses (not used by Ion HF) answers `CLEANTXBUFFER
@@ -379,7 +422,8 @@ closes a link once what is queued has gone; Abort (Esc) stops it without
 transmitting.
 
 **Identification.** Ion sends a CW ID at least every 570 s during a link
-and once at its end (§97.119). The station that did not close the link
+and once at its end (§97.119), unless the `cw_id` setting is off
+(Settings, above). The station that did not close the link
 waits for the other's CW ID plus 1.5 s before it transmits. Both ends time
 the mid-link IDs from the same instant, so each waits out the other's ID
 instead of polling into it (`cw_id_breaks_do_not_cost_polls` in

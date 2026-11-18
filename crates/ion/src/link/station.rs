@@ -28,7 +28,7 @@ mod stream;
 use lifeline::Hold;
 
 pub use clean::{Clean, Settled};
-pub use config::{Config, Gear};
+pub use config::{CALL_TRIES, Config, Gear};
 pub use expect::Expected;
 pub use receiver::cheap_ack_waves;
 pub use stream::StreamStatus;
@@ -967,6 +967,11 @@ impl Station {
         self.cfg.idle_close_s = s;
     }
 
+    /// Times a call goes out before it fails unanswered (once at least).
+    pub fn set_call_tries(&mut self, n: u32) {
+        self.cfg.call_tries = n.max(1);
+    }
+
     /// [`Station::disconnect`], ending for `why`.
     fn disconnect_for(&mut self, why: End) {
         self.want_disc = true;
@@ -1087,6 +1092,7 @@ impl Station {
             let give_up = match self.awaiting {
                 Awaiting::Ack | Awaiting::TurnTaken => now - self.last_progress > self.cfg.link_timeout_s,
                 Awaiting::DiscAck => self.tries > self.cfg.disc_retries,
+                Awaiting::ConnAck => self.tries > self.cfg.call_tries,
                 _ => self.tries > self.cfg.retries,
             };
             if give_up && matches!(self.awaiting, Awaiting::StreamGo | Awaiting::StreamReport) {

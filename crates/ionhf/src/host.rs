@@ -45,6 +45,13 @@
 //! client goes the net keeps running (the Net screen shows it) and a new
 //! client attaches to it with `NET OPEN` or `NET JOIN`.
 //!
+//! `RETRIES [n]` gets or sets how many more times this client's calls go
+//! out unanswered after the first (0 to 20, as Data2G's; BPQ32 passes the
+//! line on from its port config). `PENDING` goes out while we listen and a
+//! burst that may be a call is coming in, then `CONNECTED` if it was one
+//! for us, else `CANCELPENDING`: a scanning client stays on the frequency
+//! in between.
+//!
 //! `CLEANTXBUFFER` drops what has never been on air, as VARA's; what is
 //! on air unacknowledged (the limbo) still goes, and a VARA client's
 //! `BUFFER` leaves it out ([`ion::link::Clean`]).
@@ -67,7 +74,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use ion::link::net::{NetEvent, Traffic};
-use ion::link::station::End;
+use ion::link::station::{CALL_TRIES, End};
 use ion::link::{Clean, Settled, State};
 
 use crate::engine::UiEvent;
@@ -77,6 +84,8 @@ use crate::ion_engine::{IonCmd, IonStatus, TX_POWER_MIN_DB, precedence_of, traff
 /// stays up); setting it or more turns the idle close off. Finite, as
 /// clients parse it as a number.
 const NO_IDLE_CLOSE_S: f64 = 1e9;
+/// `RETRIES`' most, as Data2G's.
+const MAX_RETRIES: u32 = 20;
 /// Longest wait for the Ion worker's answer to a `CLEANTXBUFFER`.
 const CLEAN_WAIT: Duration = Duration::from_secs(5);
 
@@ -379,6 +388,10 @@ struct Host {
     bcast_client: bool,
     /// The command client sent `DATA2G ON`.
     data2g: bool,
+    /// Its `RETRIES`: tries of a call after the first (`None`: Ion's own).
+    retries: Option<u32>,
+    /// `PENDING` said, and neither `CONNECTED` nor `CANCELPENDING` since.
+    pending: bool,
     /// The command client's net: its KISS port, and whether we run it.
     net_port: Option<u8>,
     net_ncs: bool,
@@ -429,6 +442,8 @@ impl Host {
             ports: std::collections::BTreeMap::new(),
             bcast_client: false,
             data2g: false,
+            retries: None,
+            pending: false,
             net_port: None,
             net_ncs: false,
             net_up: false,
@@ -507,6 +522,10 @@ impl Host {
         self.line.clear();
         self.waiting = None;
         self.limbo = None;
+        self.pending = false;
+        if self.retries.take().is_some() {
+            let _ = self.ion.send(IonCmd::CallTries(None));
+        }
         let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
         for p in open {
             self.close_port(p);
@@ -792,6 +811,18 @@ impl Host {
             ["CLEANTXBUFFER", n] if self.data2g && n.len() <= 18 && n.bytes().all(|b| b.is_ascii_digit()) => {
                 self.clean(n.parse().ok());
             }
+            ["RETRIES"] => {
+                let n = self.retries.unwrap_or(CALL_TRIES - 1);
+                self.say(&format!("RETRIES {n}"));
+            }
+            ["RETRIES", v] => match v.parse::<u32>() {
+                Ok(n) if n <= MAX_RETRIES && v.bytes().all(|b| b.is_ascii_digit()) => {
+                    self.retries = Some(n);
+                    let _ = self.ion.send(IonCmd::CallTries(Some(n + 1)));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
             ["TIMEOUT"] if self.data2g => {
                 let s = self.timeout.unwrap_or(NO_IDLE_CLOSE_S);
                 self.say(&format!("TIMEOUT {s:.1}"));
@@ -1112,6 +1143,18 @@ impl Host {
                 }
                 _ => {}
             }
+        }
+        // A scanner stays on the frequency from PENDING until CONNECTED
+        // or CANCELPENDING.
+        let call_in = s.call_in && self.connected.is_none() && self.calling.is_none();
+        if self.pending && (self.connected.is_some() || !call_in) {
+            self.pending = false;
+            if self.connected.is_none() {
+                self.say("CANCELPENDING");
+            }
+        } else if !self.pending && call_in {
+            self.pending = true;
+            self.say("PENDING");
         }
         // A VARA client sees a cleaned limbo gone at once.
         let buffer = if self.data2g {
@@ -1665,6 +1708,7 @@ mod tests {
             groups: Vec::new(),
             heard: Vec::new(),
             cw_id: false,
+            call_in: false,
             stream: Box::default(),
             net: None,
             limbo,
@@ -1705,6 +1749,70 @@ mod tests {
         h.client_gone();
         assert_eq!(sent_db(&rx), [-6.0, 0.0]);
         assert_eq!(lines(&mut h, &["DATA2G ON", "TXPOWER"]), ["OK", "TXPOWER 0.0"]);
+    }
+
+    /// Data2G's RETRIES: the tries of a call after the first, 0 to 20, for
+    /// this client's later calls; Ion's own count again once it has gone.
+    #[test]
+    fn retries_gets_sets_and_resets() {
+        let (mut h, rx) = host();
+        let ours = format!("RETRIES {}", CALL_TRIES - 1);
+        assert_eq!(
+            lines(&mut h, &["RETRIES", "RETRIES 2", "RETRIES", "RETRIES 0", "RETRIES 20"]),
+            [&ours, "OK", "RETRIES 2", "OK", "OK"]
+        );
+        for b in ["21", "-1", "+3", "x", "1.5", "1 2", "99999999999"] {
+            assert_eq!(lines(&mut h, &[&format!("RETRIES {b}")]), ["WRONG"], "{b:?}");
+        }
+        assert_eq!(lines(&mut h, &["RETRIES"]), ["RETRIES 20"]);
+        h.client_gone();
+        let tries: Vec<Option<u32>> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                IonCmd::CallTries(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tries, [Some(3), Some(1), Some(21), None]);
+        assert_eq!(lines(&mut h, &["RETRIES"]), [ours]);
+    }
+
+    /// A scanner (BPQ) stays on its frequency from PENDING to CONNECTED or
+    /// CANCELPENDING: exactly one of the two follows every PENDING.
+    #[test]
+    fn every_pending_is_resolved_once() {
+        let (mut h, _rx) = host();
+        lines(&mut h, &["MYCALL W1AW", "LISTEN ON"]);
+        let heard = |h: &mut Host, state, call_in| -> Vec<String> {
+            let mut s = status(state, 0, None, 0);
+            s.call_in = call_in;
+            h.ion_in(HostIn::Status(s));
+            take(h)
+                .into_iter()
+                .filter(|l| l.contains("PENDING") || l.starts_with("CONNECTED"))
+                .collect()
+        };
+        // Somebody else's burst.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert!(heard(&mut h, State::Listening, true).is_empty());
+        assert_eq!(heard(&mut h, State::Listening, false), ["CANCELPENDING"]);
+        assert!(heard(&mut h, State::Listening, false).is_empty());
+        // A call for us: CONNECTED says it, nothing is cancelled.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert_eq!(heard(&mut h, State::Connected, false), ["CONNECTED LOOP W1AW 2300"]);
+        assert!(heard(&mut h, State::Connected, false).is_empty());
+        assert!(heard(&mut h, State::Connected, true).is_empty());
+        // Listening stopped under a burst (LISTEN OFF, a net opened).
+        h.ion_in(HostIn::Status(status(State::Disconnected, 0, None, 0)));
+        h.ion_in(HostIn::Status(status(State::Listening, 0, None, 0)));
+        take(&mut h);
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert_eq!(heard(&mut h, State::Idle, false), ["CANCELPENDING"]);
+        // A client that leaves takes its PENDING with it.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        h.client_gone();
+        take(&mut h);
+        assert!(heard(&mut h, State::Listening, false).is_empty());
     }
 
     /// Data2G's test_timeout_sets_the_idle_close, with Ion's default (no

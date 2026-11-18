@@ -35,6 +35,7 @@ Received files and pictures go to Documents/Ion.
 On the air
 ----------
 Ion sends a CW ID at the end of every link and every 9.5 minutes during
-one. Esc or Abort stops it transmitting at any time.
+one (Setup, CW ID). With that off Ion does not identify your station:
+that is then up to you. Esc or Abort stops it transmitting at any time.
 
 Apache-2.0, see LICENSE and NOTICE. N0JLF.

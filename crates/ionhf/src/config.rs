@@ -33,6 +33,8 @@ pub struct Config {
     pub clipper: Clipper,
     /// Offer the stream gear (`ion::link::frame::caps::STREAM`); off: plain ARQ.
     pub stream: bool,
+    /// Key a CW ID at the end of every link and every 9.5 minutes of one.
+    pub cw_id: bool,
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
@@ -59,6 +61,7 @@ impl Default for Config {
             gear: Gear::Goodput,
             clipper: Clipper::Classic,
             stream: true,
+            cw_id: true,
             host_enabled: false,
             host_port: 8300,
             tci_url: "ws://127.0.0.1:50001".into(),

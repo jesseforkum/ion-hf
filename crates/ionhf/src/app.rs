@@ -151,6 +151,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         let _ = cmds.send(IonCmd::SetStream(cfg.stream));
+        let _ = cmds.send(IonCmd::SetCwId(cfg.cw_id));
         let _ = cmds.send(IonCmd::NetStore(Some(Config::dir().join("nets").join("objects"))));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
@@ -482,6 +483,12 @@ impl App {
     pub fn set_ofdm_db(&mut self, db: f32) {
         self.cfg.ofdm_db = db;
         self.cmd(IonCmd::SetOfdmDb(db));
+        self.mark_dirty();
+    }
+
+    pub fn set_cw_id(&mut self, on: bool) {
+        self.cfg.cw_id = on;
+        self.cmd(IonCmd::SetCwId(on));
         self.mark_dirty();
     }
 

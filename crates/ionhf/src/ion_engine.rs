@@ -147,6 +147,13 @@ pub enum IonCmd {
     /// A host's TXPOWER: everything we transmit this many dB below the
     /// operator's drive, from the next burst (see [`host_gain`]).
     TxPowerDb(f32),
+    /// The operator's CW ID setting. Off: we key none, at a link's end or
+    /// during one; one on the air ends, and the waits for other stations'
+    /// IDs stay.
+    SetCwId(bool),
+    /// A host's RETRIES: its calls go out this many times (`None`: Ion's
+    /// own count), from the next call on.
+    CallTries(Option<u32>),
 }
 
 /// Most a host may take the transmit audio down, dB.
@@ -295,6 +302,8 @@ pub struct IonStatus {
     pub heard: Vec<(String, f32)>,
     /// Our CW ID is on the air.
     pub cw_id: bool,
+    /// Listening, and a burst that may be a call is coming in.
+    pub call_in: bool,
     /// The stream gear and the cues.
     pub stream: Box<StreamView>,
     /// The net we are in, if any.
@@ -431,6 +440,10 @@ struct Worker {
     idle_close: Option<f64>,
     /// The host's TXPOWER, dB (0: the operator's drive).
     tx_db: f32,
+    /// The operator's setting: we key CW IDs.
+    cw_id: bool,
+    /// The host's RETRIES, as tries.
+    call_tries: Option<u32>,
 }
 
 impl Worker {
@@ -478,6 +491,8 @@ impl Worker {
             net_regulars: Vec::new(),
             idle_close: None,
             tx_db: 0.0,
+            cw_id: true,
+            call_tries: None,
         }
     }
 
@@ -573,6 +588,7 @@ impl Worker {
         self.settled();
         self.node = on_air_node(&self.call, self.gear, self.stream, self.ofdm_db, self.idle_close);
         self.node.set_plot(self.plot);
+        self.node.set_own_id(self.cw_id);
         self.node.station_mut().set_slot_pick(self.slice_pick);
         self.node.station_mut().set_narrow(self.narrow);
         self.connected_at = None;
@@ -881,6 +897,9 @@ impl Worker {
                 }
                 self.reset();
                 self.id_before_session(now);
+                if let Some(n) = self.call_tries {
+                    self.node.station_mut().set_call_tries(n);
+                }
                 self.node.station_mut().connect(&peer, now);
                 self.note(format!("Ion: calling {peer}"));
             }
@@ -942,6 +961,11 @@ impl Worker {
                 self.node.station_mut().set_idle_close(s);
             }
             IonCmd::TxPowerDb(db) => self.tx_db = db,
+            IonCmd::SetCwId(on) => {
+                self.cw_id = on;
+                self.node.set_own_id(on);
+            }
+            IonCmd::CallTries(n) => self.call_tries = n,
             IonCmd::GroupOpen(port, name) => {
                 if let Some(old) = self.ports.remove(&port) {
                     self.bcast.close(old);
@@ -1063,7 +1087,10 @@ impl Worker {
             harq_recovered: st.harq_recovered,
             codewords_failed: st.codewords_failed,
             polls: st.polls,
-            on_air: self.node.on_air() || self.bcast_on_air || self.net.as_ref().is_some_and(NetNode::on_air),
+            on_air: self.node.on_air()
+                || self.bcast_on_air
+                || self.id_on_air
+                || self.net.as_ref().is_some_and(NetNode::on_air),
             busy: self.channel_busy(),
             connected_s: self.connected_at.map_or(0.0, |t| self.now() - t),
             holding: s.holding(),
@@ -1071,6 +1098,7 @@ impl Worker {
             groups: self.bcast.groups(),
             heard: self.bcast.heard(self.now()),
             cw_id: self.id_on_air,
+            call_in: self.net.is_none() && self.node.call_in(),
             stream: Box::new(StreamView {
                 gear: s.stream_status(),
                 cues: st.cued_bursts as u64 + self.node.cues_heard(),
@@ -1150,6 +1178,13 @@ impl Worker {
             if !link_idle {
                 // A link was taken (a call heard) while an ID was owed.
                 self.id_before_session(now);
+            }
+            if !self.cw_id && !self.id_on_air {
+                // No CW ID of ours: none is owed, and nothing waits for one.
+                self.id_due = None;
+                self.id_call = None;
+                self.keyed_since_id = false;
+                self.keyed_from = None;
             }
             // In a net, past the grace: any gap, so a quiet net (where every
             // burst of net control's is answered, and no burst of a member's

@@ -16,7 +16,7 @@ use super::station::{
 };
 use super::stream;
 use crate::fec;
-use crate::level::{FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
+use crate::level::{FLOOR_WAVE, FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
 use crate::phy::{self, Constellation, DataMode, Numerology, PhyRx, Pilots, TxOptions};
 use crate::phy_mfsk::{self, MfskBurst, MfskRx};
 use crate::slots::{OFFSETS_HZ, SLOTS, SlotMeter};
@@ -1118,6 +1118,15 @@ impl Receivers {
     /// A burst of the ladder's waveforms is coming in.
     pub fn busy(&self) -> bool {
         self.ofdm.busy() || self.ofdm_long.busy() || self.ofdm_slice.iter().any(PhyRx::busy) || self.mfsk.busy()
+    }
+
+    /// A control burst in the floor waveform is coming in, its header
+    /// read: what a call is (and other links' control bursts down there).
+    pub fn control_in(&self) -> bool {
+        self.mfsk.receiving().any(|(mode, user)| {
+            let wave = Wave::Mfsk(mode);
+            wave == FLOOR_WAVE && user_code(wave, user) == CONTROL
+        })
     }
 
     /// A lifeline burst may be coming in. Apart from [`Self::busy`]: the

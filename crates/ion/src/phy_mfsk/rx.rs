@@ -369,6 +369,12 @@ impl MfskRx {
         }
     }
 
+    /// The bursts being received (their headers are in): each one's mode
+    /// and user bits.
+    pub fn receiving(&self) -> impl Iterator<Item = (MfskMode, u16)> + '_ {
+        self.bursts.iter().map(|b| (b.mode, b.user))
+    }
+
     /// True while a burst is being received.
     pub fn busy(&self) -> bool {
         !self.bursts.is_empty() || self.cands.iter().any(|c| c.synced && c.zfine >= Z_BUSY)

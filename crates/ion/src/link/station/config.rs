@@ -2,6 +2,9 @@
 
 use crate::level::{Guard, LADDER, Wave};
 
+/// [`Config::call_tries`] unless set.
+pub const CALL_TRIES: u32 = 6;
+
 /// Link settings; [`Config::new`] holds the defaults.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -18,8 +21,10 @@ pub struct Config {
     /// and with HARQ each costs a fraction of a frame.
     pub margin_db: f32,
     pub max_level: usize,
-    /// Tries for the call and the turn.
+    /// Tries for the stream gear's handshake.
     pub retries: u32,
+    /// Times a call goes out before it fails unanswered.
+    pub call_tries: u32,
     /// Tries for the goodbye before closing anyway.
     pub disc_retries: u32,
     /// Wait for an answer this long beyond its expected end, then ask again.
@@ -275,6 +280,7 @@ impl Config {
             margin_db: -1.0,
             max_level: LADDER.len() - 1,
             retries: 6,
+            call_tries: CALL_TRIES,
             disc_retries: 3,
             reply_slack_s: 2.0,
             idle_s: 10.0,

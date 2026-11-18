@@ -364,6 +364,23 @@ fn calling_nobody_gives_up() {
 }
 
 #[test]
+fn a_call_goes_out_as_often_as_set() {
+    let ours = ion::link::station::CALL_TRIES;
+    for (set, want) in [(None, ours), (Some(3), 3), (Some(1), 1), (Some(0), 1), (Some(21), 21)] {
+        let mut sim = pair(20.0, 6, |m| m.deaf = Some(1));
+        if let Some(n) = set {
+            sim.stations[0].set_call_tries(n);
+        }
+        sim.stations[0].connect("W1AW", 0.0);
+        let ok = sim.run_until(1_800.0, |s| s.stations[0].state() == State::Failed);
+        assert!(ok, "{set:?}: still {:?} after {:.0} s", sim.stations[0].state(), sim.t);
+        let calls = sim.stations[0].stats().control_bursts;
+        eprintln!("{set:?}: {calls} calls, no answer after {:.0} s", sim.t);
+        assert_eq!(calls, want, "{set:?}");
+    }
+}
+
+#[test]
 fn receiver_can_ask_to_disconnect() {
     let mut sim = pair(15.0, 7, |_| {});
     transfer(&mut sim, 3_000, 300.0);

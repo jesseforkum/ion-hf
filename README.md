@@ -26,7 +26,8 @@ for links and group chat such as Ragtime's for broadcast groups.
 - Radio control over TCI (ExpertSDR / SunSDR), Icom CI-V, Kenwood /
   Elecraft / Yaesu CAT and Hamlib `rigctld`, or a sound card with PTT by
   CAT, RTS, DTR or VOX.
-- CW identification during and at the end of every link.
+- CW identification during and at the end of every link (a setting, on
+  by default).
 
 ## Status
 

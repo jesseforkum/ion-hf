@@ -95,6 +95,12 @@ fn station(app: &mut App, ui: &mut egui::Ui) {
             app.mark_dirty();
         }
         ui.end_row();
+        ui.label(RichText::new("CW ID").color(theme::MUTED));
+        let mut on = app.cfg.cw_id;
+        if ui.checkbox(&mut on, "On").changed() {
+            app.set_cw_id(on);
+        }
+        ui.end_row();
     });
     if app.cfg.call.trim().is_empty() {
         ui.label(RichText::new("! call needed").color(theme::WARN));
