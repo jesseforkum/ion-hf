@@ -155,10 +155,10 @@ impl QcCode {
             x[(KB + j) * z..(KB + j + 1) * z].copy_from_slice(pj);
         }
         // Extension rows (only reference columns before their own parity).
-        for r in CORE_ROWS..self.mb {
+        for (r, row) in self.rows.iter().enumerate().take(self.mb).skip(CORE_ROWS) {
             let own = KB + r;
             let mut acc = vec![0u8; z];
-            for &(c, s) in &self.rows[r] {
+            for &(c, s) in row {
                 if c != own {
                     debug_assert!(c < own);
                     Self::xor_shifted(&mut acc, &x[c * z..(c + 1) * z], s);

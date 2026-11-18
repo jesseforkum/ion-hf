@@ -128,8 +128,8 @@ impl Fft320 {
     }
 
     fn fft64(&self, x: &mut [Complex; 64]) {
-        for i in 0..64 {
-            let j = self.rev[i] as usize;
+        for (i, &j) in self.rev.iter().enumerate() {
+            let j = j as usize;
             if j > i {
                 x.swap(i, j);
             }
