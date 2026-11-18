@@ -69,6 +69,27 @@ struct Args {
     /// 1280x720 and 1920x1080, named after `shot_set`.
     shot_set: Option<String>,
     shot_at: Option<f64>,
+    /// `TCPIP <host> <port>`: serve the host interface on this command
+    /// port, whatever the settings say.
+    host_port: Option<u16>,
+}
+
+/// The command port of `TCPIP <host> <port>`, which is how Winlink's RMS
+/// Trimode starts a VARA modem. The host interface listens on this
+/// machine alone, so the host is only looked at.
+fn tcpip(host: Option<&str>, port: Option<&str>) -> Option<u16> {
+    // The data port is the next one up.
+    let Some(port) = port
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|p| (1..u16::MAX).contains(p))
+    else {
+        log::warn!("TCPIP: no usable port in {host:?} {port:?}");
+        return None;
+    };
+    if !matches!(host, Some("127.0.0.1" | "localhost" | "::1")) {
+        log::warn!("TCPIP: asked for {host:?}; the host interface listens on 127.0.0.1 only");
+    }
+    Some(port)
 }
 
 fn parse_args() -> Args {
@@ -88,6 +109,7 @@ fn parse_args() -> Args {
         size: None,
         shot_set: None,
         shot_at: None,
+        host_port: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -118,6 +140,10 @@ fn parse_args() -> Args {
             }
             "--shot-set" => args.shot_set = it.next(),
             "--shot-at" => args.shot_at = it.next().and_then(|v| v.parse().ok()),
+            "TCPIP" => {
+                let (host, port) = (it.next(), it.next());
+                args.host_port = tcpip(host.as_deref(), port.as_deref());
+            }
             "-h" | "--help" => {
                 println!("ionhf [--loopback] [--tci ws://127.0.0.1:50001] [--connect CALL] [--setup]");
                 std::process::exit(0);
@@ -165,6 +191,10 @@ fn main() -> eframe::Result {
     if let Some(url) = args.tci {
         cfg.tci_url = url;
         cfg.radio.backend = Backend::Tci;
+    }
+    if let Some(port) = args.host_port {
+        cfg.host_enabled = true;
+        cfg.host_port = port;
     }
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -301,4 +331,18 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tcpip;
+
+    #[test]
+    fn trimode_command_line_gives_the_port() {
+        assert_eq!(tcpip(Some("127.0.0.1"), Some("8320")), Some(8320));
+        assert_eq!(tcpip(Some("192.168.1.5"), Some("8300")), Some(8300));
+        for port in [None, Some(""), Some("0"), Some("65535"), Some("70000"), Some("x")] {
+            assert_eq!(tcpip(Some("127.0.0.1"), port), None, "{port:?}");
+        }
+    }
 }

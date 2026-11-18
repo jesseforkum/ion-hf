@@ -12,13 +12,20 @@ top. It drives the radio over TCI
 ionhf [--loopback] [--loop-snr DB] [--tci ws://host:port] [--connect CALL]
       [--setup] [--log] [--net PAGE] [--shots DIR] [--quit S] [--gear goodput|ladder]
       [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
-      [--shot-every S]
+      [--shot-every S] [TCPIP HOST PORT]
 ```
 
 - `--loopback`: no radio; simulated stations answer (below). `--loop-snr`
   sets the simulated channel's SNR (default 10 dB, the `loopback_snr_db`
   setting).
 - `--tci`: use TCI at this address instead of the configured radio.
+- `TCPIP HOST PORT`: serve the host interface on command port `PORT`
+  (data on the next one up), whatever the settings say; the settings
+  take that port and keep it. It
+  is the command line Winlink's RMS Trimode starts a VARA modem with
+  (`VARA.exe TCPIP 127.0.0.1 8300`), so Trimode can start Ion as its
+  VARA program. Ion listens on this machine only, whatever `HOST` says.
+  Not tried with Trimode itself.
 - `--connect`: call a station at start.
 - `--setup`: start on Setup; `--log`: on the Log; `--net PAGE`: on that
   page of the Net (`member`, `ncs`, `history` with the newest net shown).
