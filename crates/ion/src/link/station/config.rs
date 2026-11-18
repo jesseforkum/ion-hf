@@ -231,6 +231,10 @@ pub struct Config {
     pub life_max_s: f64,
     /// Over the floor's threshold (`thresholds_db`, mean SNR), dB.
     pub life_resume_db: f32,
+    /// Nothing queued or in flight either way and nothing delivered for
+    /// this long: we say goodbye ([`super::End::Idle`]). `None` (the
+    /// default): a quiet link stays up, its idle check-ins answered.
+    pub idle_close_s: Option<f64>,
 }
 
 /// The sending side's choice of level ([`Config::gear`]).
@@ -326,6 +330,7 @@ impl Config {
             life_silent_s: 300.0,
             life_max_s: 900.0,
             life_resume_db: 1.0,
+            idle_close_s: None,
         }
     }
 }

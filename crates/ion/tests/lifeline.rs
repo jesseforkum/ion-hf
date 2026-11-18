@@ -469,6 +469,8 @@ fn end_name(e: Option<End>) -> &'static str {
         Some(End::LinkLost) => "lost",
         Some(End::Weak { confirmed: true }) => "weak",
         Some(End::Weak { confirmed: false }) => "weak?",
+        Some(End::Idle { confirmed: true }) => "idle",
+        Some(End::Idle { confirmed: false }) => "idle?",
     }
 }
 
