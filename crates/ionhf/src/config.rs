@@ -35,6 +35,8 @@ pub struct Config {
     pub stream: bool,
     /// Key a CW ID at the end of every link and every 9.5 minutes of one.
     pub cw_id: bool,
+    /// Draw the waterfall.
+    pub waterfall: bool,
     pub host_enabled: bool,
     /// Command port; data is the next one up.
     pub host_port: u16,
@@ -62,6 +64,7 @@ impl Default for Config {
             clipper: Clipper::Classic,
             stream: true,
             cw_id: true,
+            waterfall: true,
             host_enabled: false,
             host_port: 8300,
             tci_url: "ws://127.0.0.1:50001".into(),

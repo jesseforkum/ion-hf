@@ -82,6 +82,11 @@ caller sends it. With `cw_id` off, identifying the station as its licence
 requires is up to the operator. It takes effect at once; an ID on the air
 is finished. A host's `CWID …` does not change it.
 
+`waterfall` (Setup, **Waterfall**; `true` by default) draws the
+waterfall. Off, its spectrum is not computed and the passband shows the
+scale and the bands on a blank ground; reception is the same. It takes
+effect at once.
+
 **Log file.** Everything the Log shows goes to `logs/ionhf.log` as it
 happens, one line each (`2026-10-29 19:38:53Z RX   CONACK +15 dB`), kept
 across runs. Past 2 MB it rolls over to `ionhf.1.log` (then `.2`, `.3`;
@@ -111,7 +116,7 @@ arrives at the close.
 | Modem | The lamp panel and the link's counts (Bursts, Frames, Resent, HARQ increments / recoveries, Lost codewords, Polls, Ctrl bursts, Air time), the open broadcast groups and who is heard in them; the level readout with S/N, Rate, Data and the send progress; the decode plot; the band meter (how clean each third of the passband is here); the waterfall; the Log. **Disconnect** and **Abort** sit beside the state while linked. |
 | Net | One screen a role, and **History**. Above both, the net's controls and, in a net, a timeline from its start to its end, filled to now, with a tick and call where each station checked in and where priority or emergency traffic came (hover for the time). **Member**: **Join** (the net named, or the first heard; **Leave**, **Abort**); in the net its state, NCS, slot, relay, stations and the traffic listed. On the left the check-in: the call from Setup, the line, **Short**, **Relay** and **Attended**, then the traffic: a message, a file or both, precedence, **NCS** or **Net** (through net control); **Queue** before joining, **Send** once in; the outbox and files received. In the middle the net's page: its name (the page's first heading, else the net), purpose and mode, frequency, backup, time, NCS, alternate and next net, then the body. On the right the messages and a box to send to net control. **NCS**: before the net the profile (frequency, backup, start, end, next net, alternate, regulars, mode, purpose, and the page in Markdown beside a live preview) and **Start**. Running: its state (**Open** while check-ins are, **Closing** with the time left), round, stations, the next beacon; **Check-ins** on or off, **Beacon** to send one now, **Page** to edit the profile (offered again when an edit is done), **Close** (the summary first, then the close; **Now** to stop waiting) and **Abort**. The roster (slot, call, line, traffic, S/N up and down, route, level, missed polls, whether it holds the page; **To** one member); on the right the traffic that came in, open items first by precedence (**Pass** for traffic meant for the net, **Folder** for files, **Handled**), and the bulletins with a box to send to all or **To** one member, at a precedence, with a **File** (for all it goes as an object, so a station that holds it skips it). **History**: past nets, **Export**, **Folder**. A page is Markdown plus three blocks the app draws: `::: steps` (a step a line), `::: agenda` (`01:15 Weather briefing | KJ5ET`) and `::: note`, each closed by `:::`; an older build shows their lines as text. A link and a net exclude each other; Esc is Abort. |
 | Log | The Log in place of the passband, the panel still above. |
-| Setup | Station (call, grid, **CW ID**), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports). |
+| Setup | Station (call, grid, **CW ID**), Radio (link type, port, model, sound cards with **Rescan**; applies on restart), Levels (drive and the OFDM level), Keying (PTT, **TX audio** and lead time), Host (the VARA-style ports), Display (**Waterfall**). |
 
 ### Lamps
 

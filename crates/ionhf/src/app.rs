@@ -145,6 +145,7 @@ impl App {
         threads: Threads,
     ) -> Self {
         let _ = engine.send(Msg::Ion(Some(threads.ion.audio.clone())));
+        let _ = engine.send(Msg::Spectrum(cfg.waterfall));
         let cmds = &threads.ion.cmds;
         let _ = cmds.send(IonCmd::SetCall(cfg.call.clone()));
         let _ = cmds.send(IonCmd::SetOfdmDb(cfg.ofdm_db));
@@ -492,6 +493,13 @@ impl App {
         self.mark_dirty();
     }
 
+    pub fn set_waterfall(&mut self, on: bool) {
+        self.cfg.waterfall = on;
+        let _ = self.engine.send(Msg::Spectrum(on));
+        self.waterfall.clear();
+        self.mark_dirty();
+    }
+
     pub fn set_clipper(&mut self, c: Clipper) {
         self.cfg.clipper = c;
         self.cmd(IonCmd::SetBurstClip(c == Clipper::Burst));
@@ -538,7 +546,9 @@ impl App {
         while let Ok(ev) = self.events.try_recv() {
             match ev {
                 UiEvent::Spectrum(row) => {
-                    self.waterfall.push_row(&row);
+                    if self.cfg.waterfall {
+                        self.waterfall.push_row(&row);
+                    }
                     let _ = self.spectrum_return.try_send(row);
                 }
                 UiEvent::Status(s) => self.status = s,

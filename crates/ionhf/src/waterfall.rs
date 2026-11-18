@@ -83,6 +83,12 @@ impl Waterfall {
         self.dirty = true;
     }
 
+    pub fn clear(&mut self) {
+        self.pixels.fill(Color32::BLACK);
+        self.floor_db = None;
+        self.dirty = true;
+    }
+
     /// Draws the waterfall with its frequency scale, `bands` shaded over it
     /// and the frequency under the pointer.
     pub fn show(&mut self, ui: &mut egui::Ui, height: f32, cursor: &Cursor, bands: &[Band]) {
