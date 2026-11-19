@@ -23,8 +23,8 @@ impl MfskRx {
         let mut j = 0.0;
         for k in known {
             let start = t0c + k.end + d as i64 - w as i64;
-            for t in 0..k.n {
-                j += self.corr1(start, w, f + k.hz[t]).norm_sqr();
+            for hz in &k.hz[..k.n] {
+                j += self.corr1(start, w, f + hz).norm_sqr();
             }
         }
         j

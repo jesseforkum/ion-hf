@@ -1,12 +1,13 @@
 //! The signal processing Ion builds on: oscillators, filters, the FFT, the
 //! CW sender for the station ID, and the HF channel models it is tested
-//! through (Watterson, and a port of the IONOS SIM box).
+//! through (Watterson, a port of the IONOS SIM box, and ham QRM).
 
 pub mod channel;
 pub mod cw;
 pub mod dsp;
 pub mod fft;
 pub mod ionos;
+pub mod qrm;
 
 pub use cw::CwMod;
 

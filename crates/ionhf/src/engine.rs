@@ -39,6 +39,8 @@ pub enum Msg {
     /// Where received audio goes (`None`: nowhere).
     Ion(Option<Sender<IonIn>>),
     IonTx(Vec<f32>),
+    /// Whether the waterfall's rows are computed.
+    Spectrum(bool),
     Shutdown,
 }
 
@@ -88,6 +90,7 @@ pub struct Engine {
     msgs: Receiver<Msg>,
     spectrum_return: Receiver<Vec<f32>>,
     spectrum: Spectrum,
+    spectrum_on: bool,
     repaint: Box<dyn Fn() + Send>,
     ion: Option<Sender<IonIn>>,
     quiet_until: Instant,
@@ -125,6 +128,7 @@ impl Engine {
             msgs,
             spectrum_return,
             spectrum: Spectrum::new(),
+            spectrum_on: true,
             repaint,
             ion: None,
             quiet_until: Instant::now(),
@@ -188,6 +192,7 @@ impl Engine {
                 self.last_pull = None;
                 self.key();
             }
+            Msg::Spectrum(on) => self.spectrum_on = on,
             Msg::Shutdown => {}
         }
     }
@@ -244,8 +249,10 @@ impl Engine {
                 let _ = h.send(IonIn::Gap(a.len() + b.len()));
             }
         }
-        self.spectrum.push(a);
-        self.spectrum.push(b);
+        if self.spectrum_on {
+            self.spectrum.push(a);
+            self.spectrum.push(b);
+        }
         chunk.commit_all();
 
         let mut sent_any = false;
@@ -486,6 +493,42 @@ mod tests {
         }
         let unkeyed = loop_rx.try_iter().filter(|c| matches!(c, LoopCmd::Ptt(false))).count() > 0;
         (done && unkeyed, warning, took)
+    }
+
+    #[test]
+    fn no_spectrum_rows_with_the_waterfall_off() {
+        let (mut rx_prod, rx_cons) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE);
+        let (tx_prod, _tx_cons) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE);
+        let (ui_tx, ui_rx) = crossbeam_channel::unbounded();
+        let (_msg_tx, msg_rx) = crossbeam_channel::unbounded();
+        let (_spec_tx, spec_rx) = crossbeam_channel::bounded(1);
+        let (loop_tx, _loop_rx) = crossbeam_channel::unbounded::<LoopCmd>();
+        let mut engine = Engine::new(
+            rx_cons,
+            tx_prod,
+            Arc::new(Shared::default()),
+            RadioCtl::Loopback(loop_tx),
+            ui_tx,
+            msg_rx,
+            spec_rx,
+            Box::new(|| {}),
+        );
+        let mut rows = |engine: &mut Engine| {
+            let mut n = 0;
+            for _ in 0..10 {
+                for _ in 0..SPECTRUM_HOP {
+                    rx_prod.push(0.0).unwrap();
+                }
+                engine.drain_rx();
+                n += ui_rx.try_iter().filter(|e| matches!(e, UiEvent::Spectrum(_))).count();
+            }
+            n
+        };
+        assert_eq!(rows(&mut engine), 10);
+        engine.handle(Msg::Spectrum(false));
+        assert_eq!(rows(&mut engine), 0);
+        engine.handle(Msg::Spectrum(true));
+        assert_eq!(rows(&mut engine), 10);
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 use crate::level::{Guard, LADDER, Wave};
 
+/// [`Config::call_tries`] unless set.
+pub const CALL_TRIES: u32 = 6;
+
 /// Link settings; [`Config::new`] holds the defaults.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -18,8 +21,10 @@ pub struct Config {
     /// and with HARQ each costs a fraction of a frame.
     pub margin_db: f32,
     pub max_level: usize,
-    /// Tries for the call and the turn.
+    /// Tries for the stream gear's handshake.
     pub retries: u32,
+    /// Times a call goes out before it fails unanswered.
+    pub call_tries: u32,
     /// Tries for the goodbye before closing anyway.
     pub disc_retries: u32,
     /// Wait for an answer this long beyond its expected end, then ask again.
@@ -135,6 +140,37 @@ pub struct Config {
     /// ACKs (`crate::slots`); off: always the centre. The receiving side
     /// names its pick either way, and listens in all three.
     pub slice_slots: bool,
+    /// The third we ask for slice bursts in (`crate::slots`: 0 the
+    /// centre, 1 below, 2 above), whatever the slot meter says. `None`:
+    /// the meter's pick.
+    pub slot_pick: Option<u8>,
+    /// Keep the link to the slice levels both ways: ours, and the peer's
+    /// through our ACKs ([`crate::link::report::ChanReport::narrow`]).
+    pub narrow: bool,
+    /// Narrow the link by itself when QRM over part of the passband stops
+    /// it (`station::qrm`).
+    pub qrm_narrow: bool,
+    /// Narrowed for QRM: the other thirds clean this long and it widens,
+    /// s (`station::qrm`).
+    pub qrm_clear_s: f64,
+    /// Narrowed: the longest data burst, s (`None`: as unnarrowed). The
+    /// receiving side decides to widen only when it hears one, so shorter
+    /// bursts widen sooner once the QRM goes, but move less while it stays
+    /// (docs/link.md, "Narrowing for QRM").
+    pub narrow_burst_s: Option<f64>,
+    /// Narrowed: move at once when a slice burst is half lost and another
+    /// third, dirty until then, measured clean through it; and count the
+    /// other thirds clear from the start of the burst that measured them
+    /// so.
+    pub qrm_quick: bool,
+    /// Narrow on trial when the link is in trouble under QRM and never
+    /// showed S/N to spare (`qrm::TRIAL_S`, `qrm::TRIAL_CONTRAST`).
+    pub qrm_trial: bool,
+    /// The peer, narrowed, moves our slice bursts to another third: what
+    /// it stored went through the QRM that took the old one, and the
+    /// increments would have to rebuild those frames alone, so they go
+    /// fresh (docs/link.md, "Narrowing for QRM").
+    pub harq_fresh_on_move: bool,
     /// How the sending side picks each data burst's level.
     pub gear: Gear,
     /// HARQ increments may stretch a burst to `max_burst_long_s` rather
@@ -200,6 +236,10 @@ pub struct Config {
     pub life_max_s: f64,
     /// Over the floor's threshold (`thresholds_db`, mean SNR), dB.
     pub life_resume_db: f32,
+    /// Nothing queued or in flight either way and nothing delivered for
+    /// this long: we say goodbye ([`super::End::Idle`]). `None` (the
+    /// default): a quiet link stays up, its idle check-ins answered.
+    pub idle_close_s: Option<f64>,
 }
 
 /// The sending side's choice of level ([`Config::gear`]).
@@ -240,6 +280,7 @@ impl Config {
             margin_db: -1.0,
             max_level: LADDER.len() - 1,
             retries: 6,
+            call_tries: CALL_TRIES,
             disc_retries: 3,
             reply_slack_s: 2.0,
             idle_s: 10.0,
@@ -269,6 +310,14 @@ impl Config {
             power_aware: false,
             start_margin_db: Some(3.0),
             slice_slots: true,
+            slot_pick: None,
+            narrow: false,
+            qrm_narrow: true,
+            qrm_clear_s: super::qrm::CLEAR_S,
+            narrow_burst_s: None,
+            qrm_quick: true,
+            qrm_trial: true,
+            harq_fresh_on_move: true,
             gear: Gear::Goodput,
             harq_stretch: true,
             merge_pieces: true,
@@ -287,6 +336,7 @@ impl Config {
             life_silent_s: 300.0,
             life_max_s: 900.0,
             life_resume_db: 1.0,
+            idle_close_s: None,
         }
     }
 }

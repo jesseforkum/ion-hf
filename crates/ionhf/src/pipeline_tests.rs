@@ -308,6 +308,38 @@ fn a_broadcast_run_ends_with_one_id() {
     h.cmds.send(IonCmd::Stop).unwrap();
 }
 
+/// An ID still owed when a link starts goes first, before the link keys,
+/// and under the call we keyed with, not the one set since.
+#[test]
+fn an_owed_id_goes_before_the_next_link_under_the_old_call() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    h.cmds.send(IonCmd::GroupOpen(1, "NET".into())).unwrap();
+    h.cmds.send(IonCmd::GroupSend(1, b"one".to_vec(), None)).unwrap();
+    assert!(rig.run_until(Duration::from_secs(20), |r| r.keyed), "no broadcast");
+    assert!(
+        rig.run_until(Duration::from_secs(30), |r| !r.keyed),
+        "broadcast never ended"
+    );
+    // Its ID is owed a few seconds on: a new call and a link before then.
+    h.cmds.send(IonCmd::SetCall("N0NEW".into())).unwrap();
+    h.cmds.send(IonCmd::Connect("LOOP".into())).unwrap();
+    let ok = rig.run_until(Duration::from_secs(15), |r| r.keyed);
+    assert!(ok, "nothing keyed; notes {:?}", rig.ion_notes);
+    rig.run_until(Duration::from_millis(200), |_| false);
+    assert!(rig.id_sent(), "the link keyed before the ID; notes {:?}", rig.ion_notes);
+    assert!(
+        rig.ion_notes.iter().any(|n| n.contains("CW ID (DE N0ABC)")),
+        "{:?}",
+        rig.ion_notes
+    );
+    let ok = rig.run_until(Duration::from_secs(60), |r| r.ion_state == Some(State::Connected));
+    assert!(ok, "never connected; notes {:?}", rig.ion_notes);
+    let n = rig.ion_notes.iter().filter(|n| n.contains("CW ID")).count();
+    assert_eq!(n, 1, "{:?}", rig.ion_notes);
+    h.cmds.send(IonCmd::Stop).unwrap();
+}
+
 /// A host program (standing in for Pat) drives Ion through the VARA-style
 /// interface: connect to LOOP, send a line, read the echo, wait for
 /// BUFFER 0, disconnect.
@@ -421,4 +453,565 @@ fn ragtime_style_client_comes_up_and_holds_a_session() {
         "{:?}",
         c.said
     );
+}
+
+/// One station's host program on the simulated band: its command port
+/// and its KISS port.
+struct NetClient {
+    cmd: TcpStream,
+    lines: BufReader<TcpStream>,
+    kiss: TcpStream,
+    kiss_in: Vec<u8>,
+    /// A line not yet whole.
+    line: Vec<u8>,
+    said: Vec<String>,
+    /// (to, from, data) of every frame on the net's port.
+    frames: Vec<(String, String, Vec<u8>)>,
+}
+
+impl NetClient {
+    fn connect(port: u16) -> NetClient {
+        let cmd = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let kiss = TcpStream::connect(("127.0.0.1", port - 200)).unwrap();
+        cmd.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+        kiss.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+        NetClient {
+            lines: BufReader::new(cmd.try_clone().unwrap()),
+            cmd,
+            kiss,
+            kiss_in: Vec::new(),
+            line: Vec::new(),
+            said: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, line: &str) {
+        self.cmd.write_all(format!("{line}\r").as_bytes()).unwrap();
+    }
+
+    /// A frame for the net (port 1): to `to`, or the whole net.
+    fn frame(&mut self, to: &str, data: &[u8]) {
+        let f = crate::host::net_frame(to, "", data);
+        self.kiss.write_all(&crate::host::kiss_frame(1 << 4, &f)).unwrap();
+    }
+
+    /// What has come in on both ports.
+    fn pump(&mut self) {
+        // A timeout keeps what came of a line.
+        while let Ok(n) = self.lines.read_until(b'\r', &mut self.line)
+            && n > 0
+            && self.line.ends_with(b"\r")
+        {
+            self.said.push(String::from_utf8_lossy(&self.line).trim().to_string());
+            self.line.clear();
+        }
+        let mut b = [0u8; 4096];
+        while let Ok(n) = self.kiss.read(&mut b)
+            && n > 0
+        {
+            self.kiss_in.extend_from_slice(&b[..n]);
+        }
+        for (command, payload) in crate::host::kiss_frames(&mut self.kiss_in) {
+            if command == 1 << 4
+                && let Some((to, from, data)) = crate::host::net_unframe(&payload)
+            {
+                self.frames.push((to, from, data.to_vec()));
+            }
+        }
+    }
+
+    fn said(&self, line: &str) -> bool {
+        self.said.iter().any(|l| l == line)
+    }
+
+    fn said_like(&self, start: &str) -> bool {
+        self.said.iter().any(|l| l.starts_with(start))
+    }
+
+    fn got(&self, to: &str, from: &str, data: &[u8]) -> bool {
+        self.frames.iter().any(|f| f.0 == to && f.1 == from && f.2 == data)
+    }
+}
+
+/// Pumps every client until `done` or `secs` have passed.
+fn net_until(cs: &mut [NetClient], secs: u64, done: impl Fn(&[NetClient]) -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < end {
+        for c in cs.iter_mut() {
+            c.pump();
+        }
+        if done(cs) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A net on the simulated band (`sim`), in real time, driven only through
+/// each station's host interface: N0NCS runs TNARES, KJ5ET and AG5B join
+/// it and check in with a line and traffic listed, their traffic reaches
+/// net control, and its object and bulletin reach them, and the Close too. About 3 minutes of three
+/// stations decoding: `cargo test -p ionhf -- --ignored a_net_runs`.
+#[test]
+#[ignore]
+fn a_net_runs_over_the_host_interface() {
+    let calls = ["N0NCS", "KJ5ET", "AG5B"];
+    let ports: Vec<u16> = calls.iter().map(|_| crate::host::free_port()).collect();
+    let o = crate::sim::Opts {
+        stations: calls.len(),
+        mode: ion_dsp::ionos::Mode::Wgn,
+        snr_db: vec![20.0],
+        calls: calls.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    let band = crate::sim::Band::start(&o, &ports).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !band.listening() {
+        assert!(Instant::now() < end, "host ports never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut cs: Vec<NetClient> = ports.iter().map(|&p| NetClient::connect(p)).collect();
+    for (c, call) in cs.iter_mut().zip(calls) {
+        c.send(&format!("MYCALL {call}"));
+    }
+    cs[1].send("NET LINE Trousdale County ARES");
+    cs[2].send("NET TRAFFIC 1 P");
+    for c in &mut cs[1..] {
+        c.send("NET JOIN TNARES");
+    }
+    cs[0].send("NET OPEN TNARES");
+    cs[0].send("NET OFFER");
+    let ok = net_until(&mut cs, 10, |cs| {
+        cs.iter().all(|c| c.said("NET PORT 1")) && cs[0].said.iter().filter(|l| *l == "OK").count() >= 2
+    });
+    assert!(ok, "{:?}", cs.iter().map(|c| &c.said).collect::<Vec<_>>());
+    let announcement = b"# TNARES\nNet control N0NCS, 3.975 MHz".to_vec();
+    let id = ion::link::net::ObjectId::of(&announcement);
+    cs[0].frame("", &announcement);
+    cs[0].frame("", b"Net closes at 2130. de N0NCS");
+    cs[1].frame("", b"KJ5ET: no traffic, all well");
+    cs[2].frame("N0NCS", b"AG5B: generator test complete");
+
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 600, |cs| {
+        cs[0].said_like("NET IN KJ5ET ")
+            && cs[0].said_like("NET IN AG5B ")
+            && cs[0].said("NET LINE KJ5ET Trousdale County ARES")
+            && cs[0].said("NET TRAFFIC AG5B 1 P")
+            && cs[1..]
+                .iter()
+                .all(|c| c.said(&format!("NET OBJECT {id}")) && c.got(&format!("#{id}"), "N0NCS", &announcement))
+            && cs[0].got("N0NCS", "KJ5ET", b"KJ5ET: no traffic, all well")
+            && cs[0].got("N0NCS", "AG5B", b"AG5B: generator test complete")
+            && cs[1..]
+                .iter()
+                .all(|c| c.said_like("NET JOINED N0NCS TNARES ") && c.got("", "N0NCS", b"Net closes at 2130. de N0NCS"))
+    });
+    let report = |cs: &[NetClient]| {
+        cs.iter()
+            .map(|c| format!("said {:?}\nframes {:?}", c.said, c.frames))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    assert!(cs[0].said_like("NET HEARD "), "{}", report(&cs));
+    println!(
+        "net over the host interface: checked in, traffic and bulletin in {:?}",
+        t.elapsed()
+    );
+
+    cs[0].send("NET CLOSE");
+    let ok = net_until(&mut cs, 60, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
+    assert!(ok, "{}", report(&cs));
+}
+
+/// The Net section's records over the simulated band, driven through the
+/// host interface: N0NCS opens TNARES and offers its announcement, AG5B
+/// checks in with a line and a Priority message, net control logs both,
+/// offers the summary, and closes once AG5B has it; AG5B merges it into
+/// its own log. About 3 minutes of two stations decoding:
+/// `cargo test -p ionhf -- --ignored a_net_logs_and_sends_its_summary`.
+#[test]
+#[ignore]
+fn a_net_logs_and_sends_its_summary() {
+    use crate::net_doc::{self, Announcement, Record};
+    use crate::net_log::{Item, NetLog, NetRecord, Role, tests::TempDir};
+    use ion::link::net::{ObjectId, Precedence};
+
+    let calls = ["N0NCS", "AG5B"];
+    let ports: Vec<u16> = calls.iter().map(|_| crate::host::free_port()).collect();
+    let o = crate::sim::Opts {
+        stations: calls.len(),
+        mode: ion_dsp::ionos::Mode::Wgn,
+        snr_db: vec![20.0],
+        calls: calls.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    let band = crate::sim::Band::start(&o, &ports).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !band.listening() {
+        assert!(Instant::now() < end, "host ports never opened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let dir = TempDir::new("net-e2e");
+    let now = crate::net_log::now;
+    let mut ncs_log = NetLog::create(
+        &dir.0.join("N0NCS"),
+        NetRecord {
+            net: "TNARES".into(),
+            ncs: "N0NCS".into(),
+            operator: "N0NCS".into(),
+            opened: now(),
+            ..NetRecord::default()
+        },
+    );
+    let mut cs: Vec<NetClient> = ports.iter().map(|&p| NetClient::connect(p)).collect();
+    for (c, call) in cs.iter_mut().zip(calls) {
+        c.send(&format!("MYCALL {call}"));
+    }
+    cs[1].send("NET LINE Trousdale County ARES");
+    cs[1].send("NET TRAFFIC 1 P");
+    cs[1].send("NET JOIN TNARES");
+    cs[0].send("NET OPEN TNARES");
+    cs[0].send("NET OFFER");
+    let ok = net_until(&mut cs, 10, |cs| {
+        cs.iter().all(|c| c.said("NET PORT 1")) && cs[0].said.iter().filter(|l| *l == "OK").count() >= 2
+    });
+    assert!(ok, "{:?}", cs.iter().map(|c| &c.said).collect::<Vec<_>>());
+    let ann = Announcement {
+        net: "TNARES".into(),
+        ncs: "N0NCS".into(),
+        freq_hz: Some(3_975_000),
+        body: "# Tonight\n\n1. Check-ins\n2. Traffic, **Priority** first\n".into(),
+        ..Announcement::default()
+    };
+    let ann_bytes = Record::Announcement(ann.clone()).encode();
+    let ann_id = ObjectId::of(&ann_bytes);
+    cs[0].frame("", &ann_bytes);
+    let msg = Record::Message(net_doc::Message {
+        precedence: Precedence::Priority,
+        to: net_doc::To::Ncs,
+        text: "AG5B: shelter open, 40 cots".into(),
+    });
+    cs[1].frame("", &msg.encode());
+
+    // Net control's side of the log, from what its host interface says.
+    let mut seen = (0, 0);
+    let mut log_from_host = |c: &NetClient, log: &mut NetLog| {
+        for l in &c.said[seen.0..] {
+            let w: Vec<&str> = l.split(' ').collect();
+            match w[..] {
+                ["NET", "IN", call, slot, ref via @ ..] => {
+                    let via = via.get(1).copied();
+                    log.checked_in(call, slot.parse().unwrap_or(0), via, now());
+                }
+                ["NET", "LINE", call, ..] => {
+                    let line = l.splitn(4, ' ').nth(3).unwrap_or("");
+                    log.line(call, line, now());
+                }
+                ["NET", "TRAFFIC", call, n, p, ..] => {
+                    let t = ion::link::net::Traffic {
+                        items: n.parse().unwrap_or(0),
+                        precedence: crate::ion_engine::precedence_of(p).unwrap_or_default(),
+                        short: w.len() > 5,
+                    };
+                    log.traffic_listed(call, t, now());
+                }
+                _ => {}
+            }
+        }
+        for (to, from, data) in &c.frames[seen.1..] {
+            if let Record::Message(m) = Record::decode(data) {
+                log.item(Item {
+                    at: now(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    precedence: m.precedence,
+                    subject: net_doc::subject(&m.text),
+                    text: m.text,
+                    state: net_doc::State::Received,
+                    ..Item::default()
+                });
+            }
+        }
+        seen = (c.said.len(), c.frames.len());
+    };
+    let report = |cs: &[NetClient]| {
+        cs.iter()
+            .map(|c| format!("said {:?}\nframes {:?}", c.said, c.frames))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 600, |cs| {
+        cs[0].said_like("NET IN AG5B ")
+            && cs[0].said("NET LINE AG5B Trousdale County ARES")
+            && cs[0].said("NET TRAFFIC AG5B 1 P")
+            && cs[0].frames.iter().any(|f| f.1 == "AG5B")
+            && cs[1].got(&format!("#{ann_id}"), "N0NCS", &ann_bytes)
+    });
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    log_from_host(&cs[0], &mut ncs_log);
+    let r = &NetLog::load(&ncs_log.path).unwrap().rec;
+    assert_eq!(r.checkins[0].call, "AG5B");
+    assert_eq!(r.checkins[0].line, "Trousdale County ARES");
+    assert_eq!(r.traffic[0].precedence, Precedence::Priority);
+    assert_eq!(r.traffic[0].from, "AG5B");
+    let got = cs[1].frames.iter().find(|f| f.0 == format!("#{ann_id}")).unwrap();
+    assert_eq!(Record::decode(&got.2), Record::Announcement(ann));
+    println!("announcement, check-in and Priority message in {:?}", t.elapsed());
+
+    // The close: the summary to all, then NET CLOSE once the member has it.
+    let summary = ncs_log.summary(now());
+    let sum_bytes = Record::Summary(summary.clone()).encode();
+    let sum_id = ObjectId::of(&sum_bytes);
+    println!("summary {} B", sum_bytes.len());
+    cs[0].send("NET OFFER");
+    cs[0].frame("", &sum_bytes);
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 300, |cs| cs[1].got(&format!("#{sum_id}"), "N0NCS", &sum_bytes));
+    assert!(ok, "after {:?}:\n{}", t.elapsed(), report(&cs));
+    println!("summary held in {:?}", t.elapsed());
+    // At once, likely while the member is sending its report: net control
+    // lets that turn end before its Closes.
+    cs[0].send("NET CLOSE");
+    let t = Instant::now();
+    let ok = net_until(&mut cs, 120, |cs| cs.iter().all(|c| c.said("NET CLOSED")));
+    println!("closed in {:?}", t.elapsed());
+    assert!(ok, "{}", report(&cs));
+    ncs_log.close(now());
+
+    let mut member = NetLog::create(
+        &dir.0.join("AG5B"),
+        NetRecord {
+            net: "TNARES".into(),
+            operator: "AG5B".into(),
+            role: Role::Member,
+            opened: now(),
+            ..NetRecord::default()
+        },
+    );
+    let Record::Summary(s) = Record::decode(&sum_bytes) else {
+        panic!("not a summary")
+    };
+    assert_eq!(s, summary);
+    member.merge(&s);
+    let m = &NetLog::load(&member.path).unwrap().rec;
+    assert!(m.summary);
+    assert_eq!(m.ncs, "N0NCS");
+    assert_eq!(m.checkins[0].line, "Trousdale County ARES");
+    assert_eq!(m.traffic[0].precedence, Precedence::Priority);
+    assert_eq!(m.traffic[0].subject, "AG5B: shelter open, 40 cots");
+}
+
+/// 200 lines of 100 bytes: line `i` starts at offset `100 i`.
+fn numbered_lines() -> Vec<u8> {
+    (0..200)
+        .flat_map(|i| format!("{i:05} {}\n", "x".repeat(93)).into_bytes())
+        .collect()
+}
+
+/// What LOOP sends back for `sent`: each whole line, prefixed.
+fn loop_echo(sent: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for l in sent.split_inclusive(|&b| b == b'\n').filter(|l| l.ends_with(b"\n")) {
+        out.extend(b"LOOP copies: ");
+        out.extend(l);
+    }
+    out
+}
+
+/// Waits for a line starting with `head` said after line `from`.
+fn said_after(c: &HostClient, from: usize, head: &str) -> Option<String> {
+    c.said[from..].iter().find(|l| l.starts_with(head)).cloned()
+}
+
+/// Data2G's host extensions as Ragtime uses them, against LOOP: TIMEOUT
+/// and TXPOWER at start-up (TXPOWER only down), data written before
+/// CONNECTED dropped, and Data2G's mid-burst clean (its
+/// test_cleantxbuffer_mid_burst): LATE for an offset already on air, then a
+/// clean that keeps the last 1000 bytes. The burst on air settles
+/// delivered, and LOOP echoes exactly the bytes before the limbo's end and
+/// the kept tail.
+#[test]
+fn data2g_client_cleans_mid_burst() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let (_host, port) = host_on(&rig, &h);
+    let mut c = HostClient::connect(port);
+    for l in [
+        &format!("MYCALL {CALL}"),
+        "DATA2G ON",
+        "TIMEOUT",
+        "TIMEOUT 86400",
+        "TIMEOUT",
+        "TXPOWER",
+        "TXPOWER -3",
+        "TXPOWER 3",
+        "TXPOWER",
+        "TXPOWER 0",
+        "CLEANTXBUFFER",
+    ] {
+        c.send(l);
+    }
+    assert!(c.read_until(&mut rig, 5, |s| s.len() >= 11), "{:?}", c.said);
+    assert_eq!(
+        c.said[..11],
+        [
+            "OK",
+            "OK",
+            "TIMEOUT 1000000000.0",
+            "OK",
+            "TIMEOUT 86400.0",
+            "TXPOWER 0.0",
+            "OK",
+            "WRONG",
+            "TXPOWER -3.0",
+            "OK",
+            "CLEANTXBUFFER BUFFEREMPTY"
+        ]
+    );
+    c.data.write_all(b"early\n").unwrap();
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    let sent = numbered_lines();
+    c.data.write_all(&sent).unwrap();
+    let n0 = c.said.len();
+    assert!(
+        c.read_until(&mut rig, 30, |s| s[n0..].iter().any(|l| l == "PTT ON")),
+        "{:?}",
+        c.said
+    );
+    c.send("CLEANTXBUFFER 0");
+    c.send("CLEANTXBUFFER 19000");
+    let answered = |s: &[String]| s[n0..].iter().filter(|l| l.starts_with("CLEANTXBUFFER")).count() >= 2;
+    assert!(c.read_until(&mut rig, 5, answered), "{:?}", c.said);
+    let replies: Vec<&String> = c.said[n0..].iter().filter(|l| l.starts_with("CLEANTXBUFFER")).collect();
+    assert_eq!(replies[0], "CLEANTXBUFFER LATE");
+    let w: Vec<u64> = replies[1]
+        .strip_prefix("CLEANTXBUFFER OK ")
+        .unwrap_or_else(|| panic!("{:?}", c.said))
+        .split(' ')
+        .map(|x| x.parse().unwrap())
+        .collect();
+    let (drop_from, limbo_to) = (w[0], w[3]);
+    assert_eq!(w[1], 19_000);
+    assert!(w[2] < limbo_to && limbo_to == drop_from, "{w:?}");
+    let settled = format!("CLEANTXBUFFER SETTLED {} {limbo_to} {limbo_to}", w[2]);
+    assert!(c.read_until(&mut rig, 90, |s| s.contains(&settled)), "{:?}", c.said);
+    let kept = [&sent[..limbo_to as usize], &sent[19_000..]].concat();
+    let echo = loop_echo(&kept);
+    let got = c.data_until(&mut rig, 180, b"LOOP copies: 00199");
+    let got = [got, c.data_until(&mut rig, 1, b"\n")].concat();
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&echo),
+        "said {:?}",
+        c.said
+    );
+    assert!(c.read_until(&mut rig, 30, |s| last_is(s, "BUFFER 0")), "{:?}", c.said);
+    c.send("DISCONNECT");
+    assert!(
+        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED CLIENT")),
+        "{:?}",
+        c.said
+    );
+}
+
+/// A VARA client's CLEANTXBUFFER mid-burst: `CLEANTXBUFFER OK`, BUFFER 0
+/// at once (the burst on air still goes, but it counts as gone), no
+/// offsets and no SETTLED; LOOP echoes a prefix of what was written.
+#[test]
+fn vara_client_cleans_mid_burst() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let (_host, port) = host_on(&rig, &h);
+    let mut c = HostClient::connect(port);
+    c.send(&format!("MYCALL {CALL}"));
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    let sent = numbered_lines();
+    c.data.write_all(&sent).unwrap();
+    let n0 = c.said.len();
+    assert!(
+        c.read_until(&mut rig, 30, |s| s[n0..].iter().any(|l| l == "PTT ON")),
+        "{:?}",
+        c.said
+    );
+    let n1 = c.said.len();
+    c.send("CLEANTXBUFFER 5");
+    c.send("CLEANTXBUFFER");
+    let ok_at = |s: &[String]| s[n1..].iter().position(|l| l == "CLEANTXBUFFER OK").map(|i| n1 + i);
+    let answered = |s: &[String]| ok_at(s).is_some_and(|i| said_after_in(s, i, "BUFFER"));
+    assert!(c.read_until(&mut rig, 5, answered), "{:?}", c.said);
+    let i = ok_at(&c.said).unwrap();
+    assert!(c.said[n1..i].iter().any(|l| l == "WRONG"), "{:?}", c.said);
+    let buffer = c.said[i..].iter().find(|l| l.starts_with("BUFFER"));
+    assert_eq!(buffer.map(String::as_str), Some("BUFFER 0"), "{:?}", c.said);
+    let mut got = c.data_until(&mut rig, 120, b"\n");
+    loop {
+        let more = c.data_until(&mut rig, 15, b"\x00");
+        if more.is_empty() {
+            break;
+        }
+        got.extend(more);
+    }
+    let echo = loop_echo(&sent);
+    assert!(
+        !got.is_empty() && echo.starts_with(&got),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+    assert!(got.len() < echo.len());
+    assert!(said_after(&c, 0, "CLEANTXBUFFER SETTLED").is_none(), "{:?}", c.said);
+    c.send("DISCONNECT");
+    assert!(
+        c.read_until(&mut rig, 60, |s| last_is(s, "DISCONNECTED")),
+        "{:?}",
+        c.said
+    );
+}
+
+fn said_after_in(s: &[String], from: usize, head: &str) -> bool {
+    s[from..].iter().any(|l| l.starts_with(head))
+}
+
+/// TIMEOUT 20: a quiet link closes about 20 s after the last data
+/// (`DISCONNECTED IDLE`); the setting goes when the client does.
+#[test]
+fn data2g_timeout_closes_an_idle_link() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let (_host, port) = host_on(&rig, &h);
+    let mut c = HostClient::connect(port);
+    for l in [&format!("MYCALL {CALL}"), "DATA2G ON", "TIMEOUT 20"] {
+        c.send(l);
+    }
+    c.send(&format!("CONNECT {CALL} LOOP"));
+    let up = |s: &[String]| s.iter().any(|l| l.starts_with("CONNECTED"));
+    assert!(c.read_until(&mut rig, 60, up), "{:?}", c.said);
+    assert_eq!(c.said[..4], ["OK", "OK", "OK", "OK"]);
+    c.data.write_all(b"hi\n").unwrap();
+    let got = c.data_until(&mut rig, 60, b"LOOP copies: hi\n");
+    assert!(got.ends_with(b"LOOP copies: hi\n"), "{:?}", c.said);
+    let quiet = Instant::now();
+    assert!(
+        c.read_until(&mut rig, 90, |s| s.iter().any(|l| l.starts_with("DISCONNECTED"))),
+        "{:?}",
+        c.said
+    );
+    assert_eq!(said_after(&c, 0, "DISCONNECTED").as_deref(), Some("DISCONNECTED IDLE"));
+    let t = quiet.elapsed().as_secs_f64();
+    assert!(t > 12.0 && t < 60.0, "closed {t:.0} s after the echo");
+    drop(c);
+    let mut c = HostClient::connect(port);
+    c.send("DATA2G ON");
+    c.send("TIMEOUT");
+    assert!(c.read_until(&mut rig, 5, |s| s.len() >= 2), "{:?}", c.said);
+    assert_eq!(c.said[..2], ["OK", "TIMEOUT 1000000000.0"]);
 }

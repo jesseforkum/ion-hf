@@ -303,7 +303,9 @@ impl Logbook {
             .auto_shrink([false, false])
             .stick_to_bottom(true);
         if self.jump_live {
-            area = area.vertical_scroll_offset(f32::MAX);
+            // Not f32::MAX: show_rows makes a row number of it, which panics.
+            let bottom = shown.len() as f32 * (row_h + ui.spacing().item_spacing.y);
+            area = area.vertical_scroll_offset(bottom);
         }
         let style = ui.style().clone();
         let out = egui::Frame::new()
@@ -335,5 +337,38 @@ impl Logbook {
         let bottom = out.state.clamped_offset().y + out.inner_rect.height() >= out.content_size.y - row_h;
         self.live = bottom;
         self.jump_live = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(lines: usize) -> Logbook {
+        let mut b = Logbook {
+            lines: VecDeque::new(),
+            file: None,
+            filter: Filter::All,
+            search: String::new(),
+            live: false,
+            jump_live: false,
+        };
+        for n in 0..lines {
+            b.push(Kind::Link, format!("line {n}"));
+        }
+        b
+    }
+
+    #[test]
+    fn live_jumps_to_the_end() {
+        for lines in [0, 3, 2000] {
+            let mut b = book(lines);
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                b.jump_live = true;
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| b.show(ui));
+            }
+            assert!(b.live, "{lines} lines");
+        }
     }
 }

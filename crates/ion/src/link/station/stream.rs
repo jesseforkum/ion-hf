@@ -219,6 +219,7 @@ impl Station {
             && !self.peer_wants_disc
             && !self.want_disc
             && self.cfg.pin_level.is_none()
+            && self.level_cap() > super::qrm::SLICE_TOP
             && self.aim_db.is_some_and(|a| a < stream::BELOW_DB)
             && !self.id_near(now)
     }
@@ -437,6 +438,7 @@ impl Station {
             frames,
             cue: false,
             td_ease: false,
+            slot: None,
         };
         self.stats.stream_periods += 1;
         Some(self.note_tx(b))
@@ -900,6 +902,7 @@ impl Station {
             spans: Vec::new(),
             cue: false,
             td_ease: false,
+            slot: None,
         }
     }
 

@@ -1,10 +1,28 @@
 //! [`NetStation`] on audio.
 
 use super::*;
+use crate::level::{LADDER, Wave};
 use crate::link::audio;
+use crate::link::node::BurstNote;
 use crate::{phy_chorus, phy_mfsk};
 
 const FS: f64 = 48_000.0;
+
+fn net_note(tx: bool, code: usize, wave: Wave, frames: usize, snr_db: Option<f32>, lost: u32, secs: f64) -> BurstNote {
+    BurstNote {
+        tx,
+        level: (code < LADDER.len()).then_some(code),
+        what: match frames {
+            0 => format!("NET {}", crate::sounding::level_name(code, wave)),
+            n => format!("NET {} ×{n}", crate::sounding::level_name(code, wave)),
+        },
+        snr_db,
+        lost,
+        secs,
+        calls: None,
+        reported_db: None,
+    }
+}
 
 /// A net station driven by audio: [`NetStation`] plus every receiver, as
 /// [`crate::link::Node`] is for a link.
@@ -22,6 +40,7 @@ pub struct NetNode {
     /// sample, the audio), and the last plan received.
     chorus_rec: Option<(ChorusPlan, f64, Vec<f32>)>,
     chorus_done: Option<f64>,
+    journal: Vec<BurstNote>,
 }
 
 impl NetNode {
@@ -38,6 +57,7 @@ impl NetNode {
             on_air: false,
             fed: 0,
             chorus_rec: None,
+            journal: Vec::new(),
             chorus_done: None,
         }
     }
@@ -53,6 +73,43 @@ impl NetNode {
 
     pub fn station_mut(&mut self) -> &mut NetStation {
         &mut self.station
+    }
+
+    /// See [`NetStation::set_line`].
+    pub fn set_line(&mut self, line: &str) {
+        self.station.set_line(line);
+    }
+
+    /// See [`NetStation::set_traffic`].
+    pub fn set_traffic(&mut self, traffic: Traffic) {
+        self.station.set_traffic(traffic);
+    }
+
+    /// See [`NetStation::offer`].
+    pub fn offer(&mut self, data: &[u8]) -> ObjectId {
+        self.station.offer(data)
+    }
+
+    /// See [`NetStation::withdraw`].
+    pub fn withdraw(&mut self, id: ObjectId) {
+        self.station.withdraw(id);
+    }
+
+    /// See [`NetStation::take_events`].
+    pub fn take_events(&mut self) -> Vec<NetEvent> {
+        self.station.take_events()
+    }
+
+    /// The bursts sent and heard since the last call.
+    pub fn take_journal(&mut self) -> Vec<BurstNote> {
+        std::mem::take(&mut self.journal)
+    }
+
+    fn note(&mut self, n: BurstNote) {
+        if self.journal.len() >= 256 {
+            self.journal.remove(0);
+        }
+        self.journal.push(n);
     }
 
     /// Received 48 kHz audio ending at `now` (ignored while we transmit).
@@ -95,6 +152,17 @@ impl NetNode {
                     }
                 }
             }
+            let lost = h.inc.frames.iter().filter(|f| f.is_none()).count() as u32;
+            let n = h.inc.frames.len();
+            self.note(net_note(
+                false,
+                h.inc.code,
+                h.inc.wave,
+                n,
+                Some(h.inc.snr_db),
+                lost,
+                0.0,
+            ));
             let t = |s: u64| t0 + (s as f64 - self.fed as f64) / FS;
             let air = (t(h.start_sample), t(h.end_sample));
             self.station.on_rx_at(&h.inc, now, Some(air));
@@ -172,6 +240,16 @@ impl NetNode {
                 audio::CENTER_HZ,
             ));
             self.on_air = true;
+            self.note(BurstNote {
+                tx: true,
+                level: None,
+                what: "NET chorus".into(),
+                snr_db: None,
+                lost: 0,
+                secs: out.len() as f64 / FS,
+                calls: None,
+                reported_db: None,
+            });
             return Some(out);
         }
         if self.rx.busy() {
@@ -181,6 +259,8 @@ impl NetNode {
         let mut out = vec![0.0; self.lead];
         out.extend(audio::transmit_with(&b, self.ofdm_gain));
         self.on_air = true;
+        let secs = out.len() as f64 / FS;
+        self.note(net_note(true, b.code, b.wave, b.frames.len(), None, 0, secs));
         Some(out)
     }
 
@@ -193,6 +273,11 @@ impl NetNode {
 
     pub fn on_air(&self) -> bool {
         self.on_air
+    }
+
+    /// Receiving a burst (or what may be one).
+    pub fn busy(&self) -> bool {
+        self.rx.busy()
     }
 
     /// See [`crate::link::Node::set_ofdm_gain_db`].

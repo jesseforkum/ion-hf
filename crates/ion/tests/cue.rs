@@ -84,8 +84,8 @@ fn a_station_without_cues_gets_none_and_the_transfer_completes() {
     // Either end without cues: the caller, then the called station.
     for (cue_a, cue_b) in [(true, false), (false, true)] {
         let (sim, seen) = link(cue_a, cue_b, 0.0);
-        assert_eq!(sim.stations[0].caps(), 0);
-        assert_eq!(sim.stations[1].caps(), 0);
+        assert_eq!(sim.stations[0].caps() & caps::CUE, 0);
+        assert_eq!(sim.stations[1].caps() & caps::CUE, 0);
         let s = seen.lock().unwrap();
         assert!(s.bursts.iter().any(|b| b.0 == 0) && s.bursts.iter().any(|b| b.0 == 1));
         assert!(sim.log.iter().all(|e| !e.cue));
@@ -101,8 +101,8 @@ fn a_station_without_cues_gets_none_and_the_transfer_completes() {
 #[test]
 fn two_stations_with_cues_use_them() {
     let (sim, seen) = link(true, true, 0.0);
-    assert_eq!(sim.stations[0].caps(), caps::CUE);
-    assert_eq!(sim.stations[1].caps(), caps::CUE);
+    assert_eq!(sim.stations[0].caps() & caps::CUE, caps::CUE);
+    assert_eq!(sim.stations[1].caps() & caps::CUE, caps::CUE);
     let s = seen.lock().unwrap();
     let cued = s.bursts.iter().filter(|b| b.2).count();
     assert!(cued > 0, "no cued bursts: {:?}", s.bursts);

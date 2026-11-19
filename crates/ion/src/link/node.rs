@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::audio::{self, PhyAir, Receivers, RxPlot};
 use super::frame::{AckInfo, Frame, Kind, Life, Tiny};
 use super::report::ChanClass;
-use super::station::{Air, CONTROL, Config, Incoming, Station, TINY, user_hi, user_session};
+use super::station::{Air, CONTROL, Config, Incoming, State, Station, TINY, user_hi, user_session};
 use super::stream::{self, Ctl, STREAM, TONES};
 use crate::level::{LADDER, Wave};
 
@@ -209,6 +209,8 @@ pub struct Node {
     journal: Vec<BurstNote>,
     /// Mid-link CW ID this often (None: never, as in simulation).
     id_every_s: Option<f64>,
+    /// We key ours (the waits for the peer's stay either way).
+    own_id: bool,
     /// When we last keyed, and the peer whose ID length the station knows.
     last_key: f64,
     id_peer: String,
@@ -239,6 +241,7 @@ impl Node {
             group_in: Vec::new(),
             plots: Vec::new(),
             id_every_s: None,
+            own_id: true,
             last_key: f64::NEG_INFINITY,
             id_peer: String::new(),
             watch: None,
@@ -250,6 +253,18 @@ impl Node {
     /// too: its waits allow for our ID, ours for its.
     pub fn set_id_every(&mut self, every_s: Option<f64>) {
         self.id_every_s = every_s;
+    }
+
+    /// Off: we key no mid-link CW ID of our own. The peer may still key
+    /// its own, and our waits go on allowing for it.
+    pub fn set_own_id(&mut self, on: bool) {
+        self.own_id = on;
+    }
+
+    /// Listening, with a burst coming in that may be a call
+    /// ([`Receivers::control_in`]); whose, and for whom, its end tells.
+    pub fn call_in(&self) -> bool {
+        self.station.state() == State::Listening && self.rx.control_in()
     }
 
     /// Bursts sent and heard since the last call (at most the last 256).
@@ -391,6 +406,9 @@ impl Node {
                 snr_db: 10.0 * h.score.max(1e-3).log10(),
                 chan: crate::chan::ChannelMeas::of_snr(0.0),
                 slot: 0,
+                thirds: [f32::NAN; 3],
+                qrm_db: [f32::NAN; 3],
+                third: None,
                 grid: None,
             };
             self.station.on_rx(&inc, now);
@@ -465,7 +483,7 @@ impl Node {
         let streamed = b.code == STREAM || b.code == TONES;
         if let (Some(every), Some(t0), false) = (self.id_every_s, self.station.link_t0(), streamed) {
             let due = t0 + ((now - t0) / every).floor() * every;
-            if now - t0 >= every && due > self.last_key {
+            if self.own_id && now - t0 >= every && due > self.last_key {
                 out.extend(crate::sounding::cw(&format!("DE {}", self.station.call())));
                 out.extend(std::iter::repeat_n(0.0, (ID_GAP_S * 48_000.0) as usize));
                 self.note(BurstNote {

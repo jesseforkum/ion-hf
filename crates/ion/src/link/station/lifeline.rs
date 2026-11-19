@@ -61,6 +61,7 @@ impl Station {
             spans: Vec::new(),
             cue: false,
             td_ease: false,
+            slot: None,
         }
     }
 
@@ -139,7 +140,7 @@ impl Station {
         self.aim_db = Some(snr);
         self.target = self.level_for(snr);
         let start = self.level_for(snr - self.cfg.start_margin_db.unwrap_or(0.0));
-        self.level = self.usable_below(start.min(self.target).min(self.cfg.max_level), now);
+        self.level = self.usable_below(start.min(self.target).min(self.level_cap()), now);
         // Straight on: data, or a check-in.
         self.last_tx_end = f64::NEG_INFINITY;
     }

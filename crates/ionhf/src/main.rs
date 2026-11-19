@@ -2,7 +2,7 @@
 //! Express) on VARA-style host ports and KISS.
 //!
 //! Usage: ionhf [--loopback] [--tci ws://host:port] [--connect CALL]
-//! [--setup] [--log] [--shots DIR] [--quit S] [--loop-snr DB]
+//! [--setup] [--log] [--net PAGE] [--shots DIR] [--quit S] [--loop-snr DB]
 //! [--gear goodput|ladder] [--stream on|off] [--size WxH] [--shot-set NAME --shot-at S]
 //! ionhf --sim ...: headless stations on a simulated band (see `sim`)
 
@@ -16,6 +16,10 @@ mod history;
 mod host;
 mod ion_engine;
 mod logbook;
+mod markdown;
+mod net_app;
+mod net_doc;
+mod net_log;
 mod panel;
 #[cfg(test)]
 mod pipeline_tests;
@@ -56,12 +60,36 @@ struct Args {
     stream: Option<bool>,
     /// Open on the log.
     log: bool,
+    /// Open on this page of the Net (profile, roster, traffic, checkin,
+    /// inbox, log).
+    net: Option<String>,
     /// Window size in pixels (screenshots); the saved size is left alone.
     size: Option<[f32; 2]>,
     /// With `shots`: one set of screenshots `shot_at` seconds in, at
     /// 1280x720 and 1920x1080, named after `shot_set`.
     shot_set: Option<String>,
     shot_at: Option<f64>,
+    /// `TCPIP <host> <port>`: serve the host interface on this command
+    /// port, whatever the settings say.
+    host_port: Option<u16>,
+}
+
+/// The command port of `TCPIP <host> <port>`, which is how Winlink's RMS
+/// Trimode starts a VARA modem. The host interface listens on this
+/// machine alone, so the host is only looked at.
+fn tcpip(host: Option<&str>, port: Option<&str>) -> Option<u16> {
+    // The data port is the next one up.
+    let Some(port) = port
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|p| (1..u16::MAX).contains(p))
+    else {
+        log::warn!("TCPIP: no usable port in {host:?} {port:?}");
+        return None;
+    };
+    if !matches!(host, Some("127.0.0.1" | "localhost" | "::1")) {
+        log::warn!("TCPIP: asked for {host:?}; the host interface listens on 127.0.0.1 only");
+    }
+    Some(port)
 }
 
 fn parse_args() -> Args {
@@ -77,9 +105,11 @@ fn parse_args() -> Args {
         gear: None,
         stream: None,
         log: false,
+        net: None,
         size: None,
         shot_set: None,
         shot_at: None,
+        host_port: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -101,6 +131,7 @@ fn parse_args() -> Args {
                 None => eprintln!("--stream: on or off"),
             },
             "--log" => args.log = true,
+            "--net" => args.net = it.next(),
             "--size" => {
                 args.size = it.next().and_then(|v| {
                     let (w, h) = v.split_once('x')?;
@@ -109,6 +140,10 @@ fn parse_args() -> Args {
             }
             "--shot-set" => args.shot_set = it.next(),
             "--shot-at" => args.shot_at = it.next().and_then(|v| v.parse().ok()),
+            "TCPIP" => {
+                let (host, port) = (it.next(), it.next());
+                args.host_port = tcpip(host.as_deref(), port.as_deref());
+            }
             "-h" | "--help" => {
                 println!("ionhf [--loopback] [--tci ws://127.0.0.1:50001] [--connect CALL] [--setup]");
                 std::process::exit(0);
@@ -156,6 +191,10 @@ fn main() -> eframe::Result {
     if let Some(url) = args.tci {
         cfg.tci_url = url;
         cfg.radio.backend = Backend::Tci;
+    }
+    if let Some(port) = args.host_port {
+        cfg.host_enabled = true;
+        cfg.host_port = port;
     }
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -271,6 +310,17 @@ fn main() -> eframe::Result {
             }
             app.setup |= args.setup;
             app.log_view |= args.log;
+            if let Some(page) = args.net.as_deref() {
+                match net_app::Page::parse(page) {
+                    Some(p) => {
+                        app.net_view = true;
+                        app.nets.page = p;
+                        app.nets.refresh_past();
+                        app.nets.shown = (!app.nets.past.is_empty()).then_some(0);
+                    }
+                    None => eprintln!("--net: profile, roster, traffic, checkin, inbox or log"),
+                }
+            }
             app.shots = args.shots.as_ref().map(std::path::PathBuf::from);
             app.shot_set = args.shot_set.zip(args.shot_at);
             app.pixel_size = args.size;
@@ -281,4 +331,18 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tcpip;
+
+    #[test]
+    fn trimode_command_line_gives_the_port() {
+        assert_eq!(tcpip(Some("127.0.0.1"), Some("8320")), Some(8320));
+        assert_eq!(tcpip(Some("192.168.1.5"), Some("8300")), Some(8300));
+        for port in [None, Some(""), Some("0"), Some("65535"), Some("70000"), Some("x")] {
+            assert_eq!(tcpip(Some("127.0.0.1"), port), None, "{port:?}");
+        }
+    }
 }

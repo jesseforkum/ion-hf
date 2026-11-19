@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
@@ -29,28 +29,34 @@ const BLOCK: usize = SAMPLE_RATE / 100;
 /// Covers both resamplers' filters, and their uneven block sizes.
 const DELAY: usize = SAMPLE_RATE / 20;
 
-struct Opts {
-    stations: usize,
-    mode: Mode,
-    paths: usize,
-    snr_db: Vec<f32>,
-    port: u16,
-    calls: Vec<String>,
-    seed: u64,
-    gear: crate::config::Gear,
+pub(crate) struct Opts {
+    pub stations: usize,
+    pub mode: Mode,
+    pub paths: usize,
+    pub snr_db: Vec<f32>,
+    pub port: u16,
+    pub calls: Vec<String>,
+    pub seed: u64,
+    pub gear: crate::config::Gear,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts {
+            stations: 2,
+            mode: Mode::Mpg,
+            paths: 2,
+            snr_db: vec![10.0],
+            port: 8300,
+            calls: Vec::new(),
+            seed: 1,
+            gear: crate::config::Gear::default(),
+        }
+    }
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts {
-        stations: 2,
-        mode: Mode::Mpg,
-        paths: 2,
-        snr_db: vec![10.0],
-        port: 8300,
-        calls: Vec::new(),
-        seed: 1,
-        gear: crate::config::Gear::default(),
-    };
+    let mut o = Opts::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().ok_or(format!("{a} needs a value"));
@@ -137,79 +143,150 @@ pub fn run(args: &[String]) {
         o.snr_db,
         o.port
     );
-
-    let mut air = Vec::new();
-    let mut keep = Vec::new();
-    for i in 0..o.stations {
-        let (rx_prod, rx_cons) = rtrb::RingBuffer::<f32>::new(2 * SAMPLE_RATE);
-        let (tx_prod, tx_cons) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE);
-        let shared = Arc::new(Shared::default());
-        let (ui_tx, ui_rx) = crossbeam_channel::bounded(16_384);
-        let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
-        let (_spec_tx, spec_rx) = crossbeam_channel::bounded(32);
-        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        let call = o.calls.get(i).cloned().unwrap_or_default();
-        let port = o.port + 10 * i as u16;
-
-        let ion = ion_engine::spawn(call, msg_tx.clone(), ui_tx.clone(), Box::new(|| {}));
-        let _ = ion.cmds.send(ion_engine::IonCmd::SetGear(o.gear.link()));
-        let engine = Engine::new(
-            rx_cons,
-            tx_prod,
-            shared.clone(),
-            RadioCtl::Loopback(cmd_tx),
-            ui_tx.clone(),
-            msg_rx,
-            spec_rx,
-            Box::new(|| {}),
-        );
-        let engine = std::thread::Builder::new()
-            .name(format!("dsp{i}"))
-            .spawn(move || engine.run())
-            .expect("spawn dsp thread");
-        let _ = msg_tx.send(Msg::Ion(Some(ion.audio.clone())));
-        let host = match crate::host::spawn(port, ion.cmds.clone(), ui_tx.clone()) {
-            Ok(h) => h,
-            Err(e) => {
-                log::error!("sim: station {i} port {port}: {e}");
-                return;
+    let ports: Vec<u16> = (0..o.stations).map(|i| o.port + 10 * i as u16).collect();
+    match Band::start(&o, &ports) {
+        Ok(mut band) => {
+            while !band.listening() {
+                std::thread::sleep(Duration::from_millis(100));
             }
-        };
-        std::thread::Builder::new()
-            .name(format!("log{i}"))
-            .spawn(move || report(i, ui_rx))
-            .expect("spawn log thread");
-        log::info!("sim: station {i} on {port} (data {}, KISS {})", port + 1, port - 200);
-        air.push(Air {
-            rx: rx_prod,
-            tx: tx_cons,
-            shared,
-            cmds: cmd_rx,
-        });
-        keep.push((ion, host, engine, msg_tx, _spec_tx, ui_tx));
+            log::info!("sim: every station's host ports are open");
+            band.wait();
+        }
+        Err(e) => log::error!("sim: {e}"),
+    }
+}
+
+/// One station: its Ion worker, DSP thread and host interface.
+struct Station {
+    _ion: ion_engine::IonHandle,
+    host: crate::host::HostHandle,
+    engine: Option<std::thread::JoinHandle<()>>,
+    msgs: crossbeam_channel::Sender<Msg>,
+}
+
+/// The stations and the band between them, in real time until dropped.
+pub(crate) struct Band {
+    stations: Vec<Station>,
+    stop: Arc<AtomicBool>,
+    air: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Band {
+    /// Station `i` on host port `ports[i]` (data one above, KISS 200 below).
+    pub(crate) fn start(o: &Opts, ports: &[u16]) -> Result<Band, String> {
+        let mut air = Vec::new();
+        let mut stations = Vec::new();
+        for (i, &port) in ports.iter().enumerate().take(o.stations) {
+            let (rx_prod, rx_cons) = rtrb::RingBuffer::<f32>::new(2 * SAMPLE_RATE);
+            let (tx_prod, tx_cons) = rtrb::RingBuffer::<f32>::new(SAMPLE_RATE);
+            let shared = Arc::new(Shared::default());
+            let (ui_tx, ui_rx) = crossbeam_channel::bounded(16_384);
+            let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
+            let (_spec_tx, spec_rx) = crossbeam_channel::bounded(32);
+            let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+            let call = o.calls.get(i).cloned().unwrap_or_default();
+
+            let ion = ion_engine::spawn(call, msg_tx.clone(), ui_tx.clone(), Box::new(|| {}));
+            let _ = ion.cmds.send(ion_engine::IonCmd::SetGear(o.gear.link()));
+            let engine = Engine::new(
+                rx_cons,
+                tx_prod,
+                shared.clone(),
+                RadioCtl::Loopback(cmd_tx),
+                ui_tx.clone(),
+                msg_rx,
+                spec_rx,
+                Box::new(|| {}),
+            );
+            let engine = std::thread::Builder::new()
+                .name(format!("dsp{i}"))
+                .spawn(move || engine.run())
+                .expect("spawn dsp thread");
+            let _ = msg_tx.send(Msg::Ion(Some(ion.audio.clone())));
+            let host = crate::host::spawn(port, ion.cmds.clone(), ui_tx.clone())
+                .map_err(|e| format!("station {i} port {port}: {e}"))?;
+            std::thread::Builder::new()
+                .name(format!("log{i}"))
+                .spawn(move || report(i, ui_rx))
+                .expect("spawn log thread");
+            log::info!("sim: station {i} on {port} (data {}, KISS {})", port + 1, port - 200);
+            air.push(Air {
+                rx: rx_prod,
+                tx: tx_cons,
+                shared,
+                cmds: cmd_rx,
+            });
+            stations.push(Station {
+                _ion: ion,
+                host,
+                engine: Some(engine),
+                msgs: msg_tx,
+            });
+        }
+
+        let n = stations.len();
+        let ref_power = TX_LEVEL * TX_LEVEL / 2.0;
+        let snr_db = o.snr_db.clone();
+        let snr = |j: usize| *snr_db.get(j).or(snr_db.last()).unwrap_or(&10.0);
+        // dirs[i][j]: i → j. Each receiver's noise comes in on one of its paths.
+        let dirs: Vec<Vec<Option<Dir>>> = (0..n)
+            .map(|i| {
+                (0..n)
+                    .map(|j| {
+                        let noisy = i == if j == 0 { 1 } else { 0 };
+                        let seed = o.seed.wrapping_mul(1_000_003) ^ ((i as u64) << 16 | j as u64);
+                        (j != i).then(|| Dir::new(o.mode, o.paths, seed, noisy.then(|| (ref_power, snr(j)))))
+                    })
+                    .collect()
+            })
+            .collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("band".into())
+            .spawn(move || carry(air, dirs, &stop2))
+            .expect("spawn band thread");
+        Ok(Band {
+            stations,
+            stop,
+            air: Some(thread),
+        })
     }
 
-    let ref_power = TX_LEVEL * TX_LEVEL / 2.0;
-    let snr = |j: usize| *o.snr_db.get(j).or(o.snr_db.last()).unwrap_or(&10.0);
-    // dirs[i][j]: i → j. Each receiver's noise comes in on one of its paths.
-    let mut dirs: Vec<Vec<Option<Dir>>> = (0..o.stations)
-        .map(|i| {
-            (0..o.stations)
-                .map(|j| {
-                    let noisy = i == if j == 0 { 1 } else { 0 };
-                    let seed = o.seed.wrapping_mul(1_000_003) ^ ((i as u64) << 16 | j as u64);
-                    (j != i).then(|| Dir::new(o.mode, o.paths, seed, noisy.then(|| (ref_power, snr(j)))))
-                })
-                .collect()
-        })
-        .collect();
+    /// Every station's host ports are open.
+    pub(crate) fn listening(&self) -> bool {
+        self.stations.iter().all(|s| s.host.listening())
+    }
 
-    let mut tx = vec![[0.0f32; BLOCK]; o.stations];
-    let mut rx = vec![[0.0f32; BLOCK]; o.stations];
-    let mut keyed = vec![false; o.stations];
-    let mut underruns = vec![0u64; o.stations];
+    fn wait(&mut self) {
+        if let Some(t) = self.air.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for Band {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.wait();
+        for s in &mut self.stations {
+            let _ = s.msgs.send(Msg::Shutdown);
+            if let Some(e) = s.engine.take() {
+                let _ = e.join();
+            }
+        }
+    }
+}
+
+/// What each station sends to what the others hear, 10 ms at a time.
+fn carry(mut air: Vec<Air>, mut dirs: Vec<Vec<Option<Dir>>>, stop: &AtomicBool) {
+    let n = air.len();
+    let mut tx = vec![[0.0f32; BLOCK]; n];
+    let mut rx = vec![[0.0f32; BLOCK]; n];
+    let mut keyed = vec![false; n];
+    let mut underruns = vec![0u64; n];
     let mut next = Instant::now();
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         for (i, a) in air.iter_mut().enumerate() {
             while let Ok(c) = a.cmds.try_recv() {
                 if let LoopCmd::Ptt(on) = c
@@ -266,6 +343,7 @@ fn report(i: usize, ui: Receiver<UiEvent>) {
         match ev {
             UiEvent::Ion(IonEvent::Note(n)) => log::info!("sim{i}: {n}"),
             UiEvent::Ion(IonEvent::Received(b)) => log::info!("sim{i}: received {} bytes", b.len()),
+            UiEvent::Ion(IonEvent::Net(e)) => log::info!("sim{i}: net {e:?}"),
             UiEvent::Ion(IonEvent::Status(s)) => {
                 let now = (s.state, s.peer.clone(), s.level);
                 if last.as_ref() != Some(&now) {

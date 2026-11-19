@@ -22,6 +22,7 @@ fn tiny(wave: Wave, kind: u8, extra: u16) -> Outgoing {
         spans: Vec::new(),
         cue: false,
         td_ease: false,
+        slot: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn data(wave: Wave, code: usize, n: usize) -> Outgoing {
         spans: Vec::new(),
         cue: false,
         td_ease: false,
+        slot: None,
     }
 }
 
@@ -467,6 +469,8 @@ fn end_name(e: Option<End>) -> &'static str {
         Some(End::LinkLost) => "lost",
         Some(End::Weak { confirmed: true }) => "weak",
         Some(End::Weak { confirmed: false }) => "weak?",
+        Some(End::Idle { confirmed: true }) => "idle",
+        Some(End::Idle { confirmed: false }) => "idle?",
     }
 }
 

@@ -105,6 +105,9 @@ fn lamps(app: &mut App, ui: &mut egui::Ui, width: f32, s: f32) {
 /// the peer's last as the receiver; with no link, our last broadcast
 /// burst's while groups are open.
 fn on_air(app: &App) -> (Option<usize>, bool) {
+    if app.net().is_some() {
+        return (app.net_level, app.net_tx);
+    }
     let Some(s) = app.link.as_ref().filter(|_| app.linked()) else {
         let groups = app.link.as_ref().is_some_and(|s| !s.groups.is_empty());
         return (app.bcast_level.filter(|_| groups), true);
@@ -118,6 +121,20 @@ fn on_air(app: &App) -> (Option<usize>, bool) {
 
 fn counts(app: &App, ui: &mut egui::Ui, width: f32) {
     let Some(s) = &app.link else { return };
+    if let Some(n) = s.net.as_deref() {
+        let st = &n.stats;
+        let counts = [
+            ("Bursts", st.bursts.to_string()),
+            ("Polls", st.polls.to_string()),
+            ("Rounds", st.rounds.to_string()),
+            ("Pieces", (st.bul_pieces + st.obj_pieces).to_string()),
+            ("Repairs", (st.bul_repairs + st.obj_repairs).to_string()),
+            ("Air", theme::clock(st.airtime_s)),
+        ]
+        .map(|(k, v)| (k, RichText::new(v).monospace()));
+        pairs(ui, &counts, width);
+        return;
+    }
     let counts = [
         ("Bursts", s.data_bursts.to_string()),
         ("Frames", s.frames_sent.to_string()),
@@ -171,7 +188,9 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
     let rate = link.filter(|s| s.connected_s > 5.0).map_or("—".into(), |s| {
         panel::bps_text((s.bytes_acked + s.bytes_received) as f64 * 8.0 / s.connected_s)
     });
-    let data = link.map_or("—".into(), |s| theme::bytes(s.bytes_acked + s.bytes_received));
+    let data = link
+        .filter(|s| s.net.is_none())
+        .map_or("—".into(), |s| theme::bytes(s.bytes_acked + s.bytes_received));
     let snr = app.hist.last_here.map_or("—".into(), |v| format!("{v:+.1} dB"));
     pairs(
         ui,
@@ -204,6 +223,31 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
         let text = format!("TX {} / {}", theme::bytes(s.bytes_acked), theme::bytes(total));
         panel::progress(ui, frac, &text, width, scale);
     }
+}
+
+/// The thirds, clickable: a click pins the slice there, a second click
+/// leaves it to the meter; Narrow keeps the link to the slice levels.
+fn slice_row(app: &mut App, ui: &mut egui::Ui, band: [f32; 3]) {
+    let (pick, hand, narrow, peer) = app.link.as_ref().map_or((None, false, false, false), |s| {
+        (s.slice_pick, s.narrow_hand, s.narrow, s.peer_narrow)
+    });
+    ui.horizontal(|ui| {
+        let w = ui.available_width();
+        let mut clicked = None;
+        ui.allocate_ui_with_layout(vec2(w - 92.0, 52.0), Layout::top_down(egui::Align::Min), |ui| {
+            clicked = theme::band_meter(ui, band, app.band_use(), pick);
+        });
+        if let Some(k) = clicked {
+            app.set_slice(if pick == Some(k) { None } else { Some(k) });
+        }
+        let label = RichText::new("Narrow").color(if narrow || peer { theme::TEXT } else { theme::MUTED });
+        if ui
+            .add_sized(vec2(84.0, 30.0), egui::Button::selectable(hand, label))
+            .clicked()
+        {
+            app.set_narrow(!hand);
+        }
+    });
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -257,7 +301,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             let band = app.link.as_ref().map(|s| s.band);
             if let Some(b) = band {
-                theme::band_meter(ui, b, app.band_use());
+                slice_row(app, ui, b);
             }
             let fall = (rest - if band.is_some() { 58.0 } else { 0.0 }).max(100.0);
             app.waterfall_panel(ui, fall);

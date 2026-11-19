@@ -30,6 +30,7 @@ impl Station {
                 ) => {
                     self.last_progress = now;
                     self.last_moved = now;
+                    self.last_data = now;
                     self.link_t0 = Some(now - self.air.duration(inc.wave, TINY, 0));
                     self.state = State::Connected;
                     self.clear_wait();
@@ -45,7 +46,7 @@ impl Station {
                         Some(m) => self.usable_below(
                             self.level_for(snr_db - self.air_db(FLOOR) - m)
                                 .min(self.target)
-                                .min(self.cfg.max_level),
+                                .min(self.level_cap()),
                             now,
                         ),
                         None => FLOOR,
@@ -151,6 +152,8 @@ impl Station {
                 self.peer_heard = Some(a.burst);
                 self.last_progress = now;
                 self.ack_in(a.burst, a.bitmap, stored, snr, now);
+                // After the ACK has been put down to the level it answers.
+                self.peer_narrows(a.report.is_some_and(|r| r.narrow), now);
                 self.clear_wait();
             }
         }
@@ -200,6 +203,7 @@ impl Station {
             }
             ok.push(got);
         }
+        self.check_limbo();
         ok
     }
 
@@ -246,7 +250,15 @@ impl Station {
         // stored from: a change of guard means the echoes defeated the old
         // one, and its LLRs are the suspect ones.
         let mut parity: Vec<(u32, usize, usize, usize)> = Vec::new(); // offset, held, start, bits
-        if lv.frame == FrameSize::Long && lv.wave == self.peer_wave {
+        let moved = self.cfg.harq_fresh_on_move
+            && self.cfg.slice_slots
+            && self.peer_narrow
+            && lv.wave == Wave::Ofdm(Guard::Slice)
+            && self.peer_slot != self.sent_slot;
+        if lv.frame == FrameSize::Long {
+            self.sent_slot = self.peer_slot;
+        }
+        if lv.frame == FrameSize::Long && lv.wave == self.peer_wave && !moved {
             parity.extend(
                 self.at_peer
                     .iter()
@@ -254,7 +266,11 @@ impl Station {
             );
         }
         let mut parity_bits: usize = parity.iter().map(|p| p.3).sum();
-        let too_big = |n: usize, bits: usize, s: f64| n > cap || (n > 0 && self.data_s(level, bits, cue) > s);
+        // The PHY's limit too: HARQ's stretch to `max_burst_long_s` is more
+        // than a slice burst can hold.
+        let max_bits = self.air.max_bits(lv.wave, level);
+        let too_big =
+            |n: usize, bits: usize, s: f64| n > cap || bits > max_bits || (n > 0 && self.data_s(level, bits, cue) > s);
         let mut rest = Vec::new();
         if cue && self.cfg.harq_partial {
             if too_big(parity.len(), parity_bits, max_s) {
@@ -269,7 +285,7 @@ impl Station {
             }
         } else {
             let parity_s = if self.cfg.harq_stretch {
-                max_s.max(self.cfg.max_burst_long_s)
+                self.narrow_cap_s(max_s.max(self.cfg.max_burst_long_s))
             } else {
                 max_s
             };
@@ -291,7 +307,6 @@ impl Station {
             .chain(self.at_peer_rest.iter().map(|r| r.0))
             .collect();
         let mut room = 0;
-        let max_bits = self.air.max_bits(lv.wave, level);
         while parity.len() + room < cap
             && stored + room < harq::MAX_SLOTS
             && self.data_s(level, parity_bits + (room + 1) * slot, cue) <= max_s
@@ -399,6 +414,7 @@ impl Station {
             frames,
             spans,
             cue,
+            slot: None,
         }
     }
 }

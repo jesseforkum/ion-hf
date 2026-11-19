@@ -21,6 +21,7 @@ fn heard(level: usize, plot: bool) -> Vec<Option<RxPlot>> {
         frames: vec![f.encode(LADDER[level].frame_bytes()); 3],
         spans: Vec::new(),
         cue: false,
+        slot: None,
     };
     let mut x = vec![0.0; 4800];
     x.extend(audio::transmit(&out));

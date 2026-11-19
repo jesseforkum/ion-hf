@@ -462,6 +462,9 @@ impl Acq {
             snr_db,
             chan: crate::chan::ChannelMeas::of_snr(snr_db),
             slot: 0,
+            thirds: [f32::NAN; 3],
+            qrm_db: [f32::NAN; 3],
+            third: None,
             grid: None,
         }
     }

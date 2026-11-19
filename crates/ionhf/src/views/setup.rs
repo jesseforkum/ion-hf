@@ -20,12 +20,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 // Cards in rows, as many across as fit.
                 type Body = fn(&mut App, &mut egui::Ui);
-                let cards: [(&str, Body); 5] = [
+                let cards: [(&str, Body); 6] = [
                     ("Station", station),
                     ("Radio", radio),
                     ("Levels", levels),
                     ("Keying", keying),
                     ("Host", host),
+                    ("Display", display),
                 ];
                 let gap = 12.0;
                 let avail = ui.available_width();
@@ -95,10 +96,27 @@ fn station(app: &mut App, ui: &mut egui::Ui) {
             app.mark_dirty();
         }
         ui.end_row();
+        ui.label(RichText::new("CW ID").color(theme::MUTED));
+        let mut on = app.cfg.cw_id;
+        if ui.checkbox(&mut on, "On").changed() {
+            app.set_cw_id(on);
+        }
+        ui.end_row();
     });
     if app.cfg.call.trim().is_empty() {
         ui.label(RichText::new("! call needed").color(theme::WARN));
     }
+}
+
+fn display(app: &mut App, ui: &mut egui::Ui) {
+    row(ui, "display", |ui| {
+        ui.label(RichText::new("Waterfall").color(theme::MUTED));
+        let mut on = app.cfg.waterfall;
+        if ui.checkbox(&mut on, "On").changed() {
+            app.set_waterfall(on);
+        }
+        ui.end_row();
+    });
 }
 
 fn radio(app: &mut App, ui: &mut egui::Ui) {

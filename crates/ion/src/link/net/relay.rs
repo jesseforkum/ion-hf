@@ -29,6 +29,13 @@ pub(super) struct Kid {
     pub(super) snr_down: Option<f32>,
     /// NCS's messages for it.
     pub(super) dir_in: Inbox,
+    /// Its check-in line's parts, to forward to NCS, and which went.
+    pub(super) line: [Option<Vec<u8>>; 2],
+    pub(super) line_fwd: [bool; 2],
+    /// Our offer list's version it is getting, and which of that list's
+    /// frames went (bit per frame).
+    pub(super) offer_ver: u32,
+    pub(super) offer_parts: u8,
 }
 
 impl Kid {
@@ -46,6 +53,10 @@ impl Kid {
             dir: 0,
             snr_down: None,
             dir_in: Inbox::default(),
+            line: [None, None],
+            line_fwd: [true, true],
+            offer_ver: 0,
+            offer_parts: u8::MAX,
         }
     }
 }
@@ -140,8 +151,8 @@ impl NetStation {
         }
     }
 
-    /// What leaf `c` lacks of the bulletin and its own messages, and our
-    /// call if it does not know us yet (or is due an ID).
+    /// What leaf `c` lacks of the bulletin, offered objects and its own
+    /// messages, and our call if it does not know us yet (or is due an ID).
     fn kid_down_burst(&mut self, c: u8, now: f64) -> Option<Outgoing> {
         let k = self.kids.get(&c)?;
         let up = self.heard.get(&c).map(|h| h.0);
@@ -159,6 +170,28 @@ impl NetStation {
             p.extend(pack_call(self.ncs_call.as_deref().unwrap_or("")));
             frames.push(ctrl_frame(self.my_slot.unwrap_or(ALL), p));
         }
+        // The offer list, when it changed, or when its report says it has
+        // everything else but missed an offer.
+        let unaware = k.report.as_ref().is_some_and(|p| {
+            let b = u16::from_le_bytes([p[6], p[7]]);
+            b < OBJ_BLOCK
+                && b >= self.bul_known
+                && (0..MAX_OFFERS).any(|i| self.known_offers[i].is_some() && p[13] >> i & 1 == 0)
+        });
+        let mut parts = if k.offer_ver == self.offer_ver && !unaware {
+            k.offer_parts
+        } else {
+            0
+        };
+        let list = offer_frames(&self.known_offers, self.my_slot.unwrap_or(ALL));
+        // As much of what it has not had as fits; the rest next turn.
+        let missing: Vec<usize> = (0..list.len()).filter(|x| parts >> x & 1 == 0).collect();
+        let left = room.saturating_sub(frames.len());
+        for &x in missing.iter().take(left) {
+            frames.push(list[x].clone());
+            parts |= 1 << x;
+        }
+        let offers = !missing.is_empty() && left > 0;
         let down = |slot: u8, hist: &[u8], from: u32, frames: &mut Vec<Frame>| {
             let mut off = from as usize;
             while off < hist.len() && frames.len() < room {
@@ -175,7 +208,7 @@ impl NetStation {
         // pieces help anyone else who hears them.
         let mut bul_sent = None;
         if let Some((b, short)) = k.bul
-            && let Some(data) = self.bul_rx.get(&b).and_then(|r| r.data.as_ref())
+            && let Some(data) = self.block_data(b)
         {
             let sources = net_code::k_of(data.len());
             let want = lacking(short, sources);
@@ -183,11 +216,17 @@ impl NetStation {
             let per = pieces_per_frame(max);
             let n = want.min(room.saturating_sub(frames.len()) * per);
             if n > 0 {
-                frames.extend(bul_frames(b, data, sent, n, per));
-                self.stats.bul_pieces += n as u32;
-                self.stats.bul_repairs += (sent..sent + n as u32)
+                frames.extend(bul_frames(b, &data, sent, n, per));
+                let repairs = (sent..sent + n as u32)
                     .filter(|i| (i % 256) as usize >= sources)
                     .count() as u32;
+                if b >= OBJ_BLOCK {
+                    self.stats.obj_pieces += n as u32;
+                    self.stats.obj_repairs += repairs;
+                } else {
+                    self.stats.bul_pieces += n as u32;
+                    self.stats.bul_repairs += repairs;
+                }
                 bul_sent = Some((b, sent + n as u32));
             }
         }
@@ -201,6 +240,10 @@ impl NetStation {
             if let Some(bs) = bul_sent {
                 k.bul_sent = bs;
             }
+            if offers {
+                k.offer_ver = self.offer_ver;
+                k.offer_parts = parts;
+            }
         }
         Some(Outgoing {
             td_ease: false,
@@ -211,6 +254,7 @@ impl NetStation {
             extra: 0,
             frames: frames.iter().map(|f| f.encode(size)).collect(),
             spans: Vec::new(),
+            slot: None,
         })
     }
 
@@ -229,5 +273,43 @@ impl NetStation {
         } else {
             self.kids.entry(c).or_insert_with(Kid::new);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::sim::ModelAir;
+
+    /// Each burst to a leaf stays within its room, and the offer list
+    /// counts as sent only once every part of it has gone.
+    #[test]
+    fn a_leaf_gets_the_whole_offer_list_in_parts() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut r = NetStation::new(NetConfig::new("W1AW", "EMCOMM", false), air);
+        r.my_slot = Some(1);
+        r.calls.insert(2, "W5FAR".into());
+        r.kids.insert(2, Kid::new());
+        r.known_offers = std::array::from_fn(|k| Some(ObjectId::of(&[k as u8])));
+        r.offer_ver = 1;
+        let parts = offer_frames(&r.known_offers, 1).len();
+        let room = r.room(FLOOR, 64);
+        let mut seen = std::collections::BTreeSet::new();
+        for turn in 0..2 * parts {
+            let Some(b) = r.kid_down_burst(2, turn as f64) else {
+                break;
+            };
+            assert!(b.frames.len() <= room, "{} frames in a room of {room}", b.frames.len());
+            for f in b.frames.iter().filter_map(|f| Frame::decode(f)) {
+                if f.payload.first() == Some(&C_OFFER) {
+                    seen.insert(f.payload[1]);
+                }
+            }
+            let k = &r.kids[&2];
+            let done = k.offer_ver == r.offer_ver && k.offer_parts.count_ones() as usize >= parts;
+            assert_eq!(done, seen.len() == parts, "after turn {turn}: {:#b}", k.offer_parts);
+            r.kids.get_mut(&2).unwrap().confirmed = true;
+        }
+        assert_eq!(seen.len(), parts, "parts sent {seen:?}");
     }
 }

@@ -7,6 +7,7 @@
 use ion_dsp::channel::{Channel, Profile, add_awgn};
 use ion_dsp::dsp::{AUDIO_RATE, NoiseGen, noise_sigma};
 use ion_dsp::ionos::{self, Ionos};
+use ion_dsp::qrm::Qrm;
 
 use super::harq::Soft;
 use super::sim::{Medium, ModelAir, scheduled};
@@ -15,7 +16,7 @@ use super::station::{
 };
 use super::stream;
 use crate::fec;
-use crate::level::{FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
+use crate::level::{FLOOR_WAVE, FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
 use crate::phy::{self, Constellation, DataMode, Numerology, PhyRx, Pilots, TxOptions};
 use crate::phy_mfsk::{self, MfskBurst, MfskRx};
 use crate::slots::{OFFSETS_HZ, SLOTS, SlotMeter};
@@ -439,12 +440,13 @@ pub fn slot_of(extra: u16) -> usize {
     }
 }
 
-/// Audio centre of burst `b`: a slice data burst in its slot
-/// ([`crate::slots`]), everything else at [`CENTER_HZ`] (tiny and control
-/// bursts too, whose `extra` is their message).
+/// Audio centre of burst `b`: a slice-wave burst in its slot
+/// ([`Outgoing::slot`], or a data burst's `extra`; [`crate::slots`]),
+/// everything else at [`CENTER_HZ`].
 pub fn center_of(b: &Outgoing) -> f32 {
-    match b.wave {
-        Wave::Ofdm(Guard::Slice) if b.code < LADDER.len() => CENTER_HZ + OFFSETS_HZ[slot_of(b.extra)],
+    match (b.wave, b.slot) {
+        (Wave::Ofdm(Guard::Slice), Some(k)) => CENTER_HZ + OFFSETS_HZ[(k as usize).min(SLOTS - 1)],
+        (Wave::Ofdm(Guard::Slice), None) if b.code < LADDER.len() => CENTER_HZ + OFFSETS_HZ[slot_of(b.extra)],
         _ => CENTER_HZ,
     }
 }
@@ -508,6 +510,9 @@ pub fn decode(b: &phy::RxBurst) -> Incoming {
         snr_db: b.snr_db,
         chan: b.chan,
         slot: 0,
+        thirds: [f32::NAN; 3],
+        qrm_db: [f32::NAN; 3],
+        third: None,
         grid: b.grid.clone(),
     }
 }
@@ -539,6 +544,9 @@ pub fn decode_mfsk(b: &MfskBurst) -> Incoming {
         snr_db: b.snr_db,
         chan: b.chan,
         slot: 0,
+        thirds: [f32::NAN; 3],
+        qrm_db: [f32::NAN; 3],
+        third: None,
         grid: None,
     }
 }
@@ -971,11 +979,27 @@ impl Receivers {
     pub fn process(&mut self, samples: &[f32], out: &mut Vec<Incoming>) {
         self.run(samples);
         let slot = self.slot;
-        out.extend(self.ofdm_out.iter().map(|b| Incoming { slot, ..decode(b) }));
-        out.extend(self.mfsk_out.iter().map(|b| Incoming { slot, ..decode_mfsk(b) }));
+        let thirds = if self.meter.ready() {
+            self.meter.scores()
+        } else {
+            [f32::NAN; 3]
+        };
+        out.extend(self.ofdm_out.iter().zip(&self.ofdm_slot).map(|(b, k)| Incoming {
+            slot,
+            thirds,
+            qrm_db: self.qrm_db(b, *k),
+            third: k.map(|k| k as u8),
+            ..decode(b)
+        }));
+        out.extend(self.mfsk_out.iter().map(|b| Incoming {
+            slot,
+            thirds,
+            ..decode_mfsk(b)
+        }));
         out.append(&mut self.stream_out);
         out.extend(self.lifeline_out.iter().map(|b| Incoming {
             slot,
+            thirds,
             ..decode_lifeline(b)
         }));
         self.plots.clear();
@@ -1001,8 +1025,19 @@ impl Receivers {
     pub fn process_heard(&mut self, samples: &[f32], out: &mut Vec<Heard>) {
         self.run(samples);
         let slot = self.slot;
-        out.extend(self.ofdm_out.iter().map(|b| Heard {
-            inc: Incoming { slot, ..decode(b) },
+        let thirds = if self.meter.ready() {
+            self.meter.scores()
+        } else {
+            [f32::NAN; 3]
+        };
+        out.extend(self.ofdm_out.iter().zip(&self.ofdm_slot).map(|(b, k)| Heard {
+            inc: Incoming {
+                slot,
+                thirds,
+                qrm_db: self.qrm_db(b, *k),
+                third: k.map(|k| k as u8),
+                ..decode(b)
+            },
             start_sample: b.start_sample,
             end_sample: b.start_sample + ofdm_len(b),
             mfsk: None,
@@ -1025,6 +1060,17 @@ impl Receivers {
             end_sample: b.start_sample + lifeline_len(&b),
             mfsk: Some(b),
         }));
+    }
+
+    /// A slice burst's measure of the QRM in the other thirds (`k`: the
+    /// third it was heard in).
+    fn qrm_db(&self, b: &phy::RxBurst, k: Option<usize>) -> [f32; SLOTS] {
+        match k {
+            Some(k) => self
+                .meter
+                .qrm_db(b.start_sample, b.start_sample + ofdm_len(b), k, b.snr_db),
+            None => [f32::NAN; SLOTS],
+        }
     }
 
     /// The slot meter's pick (0 the centre) and each third's score.
@@ -1072,6 +1118,15 @@ impl Receivers {
     /// A burst of the ladder's waveforms is coming in.
     pub fn busy(&self) -> bool {
         self.ofdm.busy() || self.ofdm_long.busy() || self.ofdm_slice.iter().any(PhyRx::busy) || self.mfsk.busy()
+    }
+
+    /// A control burst in the floor waveform is coming in, its header
+    /// read: what a call is (and other links' control bursts down there).
+    pub fn control_in(&self) -> bool {
+        self.mfsk.receiving().any(|(mode, user)| {
+            let wave = Wave::Mfsk(mode);
+            wave == FLOOR_WAVE && user_code(wave, user) == CONTROL
+        })
     }
 
     /// A lifeline burst may be coming in. Apart from [`Self::busy`]: the
@@ -1124,6 +1179,9 @@ impl AudioMedium {
             snr_db: 10.0 * h.score.max(1e-3).log10(),
             chan: crate::chan::ChannelMeas::of_snr(0.0),
             slot: 0,
+            thirds: [f32::NAN; 3],
+            qrm_db: [f32::NAN; 3],
+            third: None,
             grid: None,
         })
     }
@@ -1160,7 +1218,15 @@ pub struct AudioMedium {
     heard: Vec<Incoming>,
     /// Where each side's receivers' audio last ended, seconds.
     heard_to: [f64; 2],
+    /// Where each side's own last burst ended, seconds.
+    sent_to: [f64; 2],
+    /// QRM each side hears, dB over a steady tone at our peak.
+    qrm: [Vec<(Qrm, f32)>; 2],
 }
+
+/// With QRM, the receivers also hear up to this much of the silence
+/// before each burst (noise and the QRM), so the slot meter sees it.
+const QRM_GAP_S: f64 = 4.0;
 
 impl AudioMedium {
     pub fn new(profile: Profile, snr_db: f32, seed: u64) -> Self {
@@ -1177,6 +1243,8 @@ impl AudioMedium {
             dir_db: [0.0; 2],
             pep: false,
             heard_to: [0.0; 2],
+            sent_to: [0.0; 2],
+            qrm: [Vec::new(), Vec::new()],
         }
     }
 
@@ -1203,6 +1271,8 @@ impl AudioMedium {
             dir_db: [0.0; 2],
             pep: false,
             heard_to: [0.0; 2],
+            sent_to: [0.0; 2],
+            qrm: [Vec::new(), Vec::new()],
         }
     }
 
@@ -1232,6 +1302,14 @@ impl AudioMedium {
             );
             **ch = [a.with_offset(offset_hz, 0.0), b.with_offset(offset_hz, 0.0)];
         }
+        self
+    }
+
+    /// Side `k` (0 or 1) hears `q` at `db` over a steady tone at our peak
+    /// (`ion_dsp::TX_LEVEL`), through its bursts and the silence before
+    /// them ([`QRM_GAP_S`]), along with any QRM given before.
+    pub fn with_qrm(mut self, k: usize, q: Qrm, db: f32) -> Self {
+        self.qrm[k].push((q, db));
         self
     }
 
@@ -1304,13 +1382,36 @@ impl Medium for AudioMedium {
         input.resize(input.len() + latency + tail, 0.0);
         let first = ((start - lead_s) * AUDIO_RATE as f64).max(0.0) as u64;
         let gap = first.saturating_sub(self.receivers[to].clock());
-        self.receivers[to].skip(gap as usize);
+        self.sent_to[from] = end;
+        let sigma = noise_sigma(power, snr_db, 2400.0, AUDIO_RATE);
+        let peak = ion_dsp::TX_LEVEL * ion_dsp::TX_LEVEL / 2.0;
+        if !self.qrm[to].is_empty() {
+            // The silence before the burst, from the end of our own last
+            // burst (deaf while sending) and at most QRM_GAP_S of it.
+            let own = (self.sent_to[to] * AUDIO_RATE as f64) as u64;
+            let from_s = first.saturating_sub((QRM_GAP_S * AUDIO_RATE as f64) as u64).max(own);
+            let clock = self.receivers[to].clock();
+            if from_s > clock {
+                self.receivers[to].skip((from_s - clock) as usize);
+            }
+            let clock = self.receivers[to].clock();
+            if first > clock {
+                let mut quiet = vec![0f32; (first - clock) as usize];
+                add_awgn(&mut quiet, sigma, &mut self.noise);
+                for (q, db) in &mut self.qrm[to] {
+                    q.add(&mut quiet, clock, peak * 10f32.powf(*db / 10.0));
+                }
+                let mut none = Vec::new();
+                self.receivers[to].process(&quiet, &mut none);
+            }
+        } else {
+            self.receivers[to].skip(gap as usize);
+        }
         self.heard_to[to] = start - lead_s + input.len() as f64 / AUDIO_RATE as f64;
         let mut out = vec![0.0; input.len()];
         match &mut self.paths {
             Paths::Watterson(ch) => {
                 ch[from].process(&input, &mut out);
-                let sigma = noise_sigma(power, snr_db, 2400.0, AUDIO_RATE);
                 add_awgn(&mut out, sigma, &mut self.noise);
             }
             Paths::Ionos(ch, reference) => {
@@ -1323,6 +1424,10 @@ impl Medium for AudioMedium {
                 };
                 ch[from].process(&input, Some((p, snr_db)), &mut out);
             }
+        }
+        let clock = self.receivers[to].clock();
+        for (q, db) in &mut self.qrm[to] {
+            q.add(&mut out, clock, peak * 10f32.powf(*db / 10.0));
         }
         self.heard.clear();
         self.receivers[1 - from].process(&out, &mut self.heard);
@@ -1348,6 +1453,7 @@ mod tests {
             frames: vec![vec![0x6B; LADDER[level].frame_bytes()]; 2],
             spans: Vec::new(),
             cue,
+            slot: None,
         }
     }
 
@@ -1384,6 +1490,7 @@ mod tests {
                 frames: Vec::new(),
                 spans: Vec::new(),
                 cue: false,
+                slot: None,
             };
             // At the most OFDM gain there is, and pre-corrected for an
             // offset: the tones do not follow the OFDM gain.
@@ -1408,6 +1515,7 @@ mod tests {
             frames: vec![vec![0x6B; fec::K / 8]; stream::codewords(o)],
             spans: vec![(0, stream::OPTS[o].n); stream::codewords(o)],
             cue: false,
+            slot: None,
         };
         let g = ofdm_gain(OFDM_AIR_GAIN_DB);
         let base = transmit_with(&period, 1.0);
@@ -1430,6 +1538,7 @@ mod tests {
             frames: vec![vec![0x11; fec::K_SHORT / 8]; stream::mfsk_frames(m)],
             spans: Vec::new(),
             cue: false,
+            slot: None,
         };
         assert!(peak(&transmit_with(&mfsk_period, ofdm_gain(OFDM_AIR_GAIN_MAX_DB))) <= ion_dsp::TX_LEVEL * 1.0001);
     }

@@ -168,6 +168,7 @@ fn llrs_combine_across_a_level_change() {
             extra: 0,
             frames: vec![f.clone()],
             spans: vec![(0, Rate::R2_3.n())],
+            slot: None,
         };
         let inc = harq::increment(Rate::R2_3.n(), LADDER[QPSK_2_3].coded_bits());
         let second = Outgoing {
@@ -179,6 +180,7 @@ fn llrs_combine_across_a_level_change() {
             extra: 0,
             frames: vec![f.clone()],
             spans: vec![(Rate::R2_3.n(), inc)],
+            slot: None,
         };
         let mut rx = HarqRx::new();
         let a = over_the_air(&first, 7.0, 10 + seed);
@@ -309,4 +311,82 @@ fn stored_codewords_are_not_continued_in_another_guard() {
             w[1].0
         );
     }
+}
+
+/// Every slice data burst sent: (third, spans).
+type SentSlices = Arc<std::sync::Mutex<Vec<(u8, Vec<(usize, usize)>)>>>;
+
+/// The model channel with QRM over two thirds at B, as its slot meter
+/// would show it: the high third clean until `moves`, then the low one.
+/// A slice data burst in a third under the QRM is heard and wiped.
+struct MovingQrm {
+    inner: ModelMedium,
+    moves: f64,
+    sent: SentSlices,
+}
+
+impl Medium for MovingQrm {
+    fn carry(&mut self, from: usize, b: &Outgoing, start: f64, end: f64) -> Option<ion::link::Incoming> {
+        let mut inc = self.inner.carry(from, b, start, end)?;
+        if from != 0 {
+            return Some(inc);
+        }
+        let clean: u8 = if end < self.moves { 2 } else { 1 };
+        inc.thirds = std::array::from_fn(|k| if k == clean as usize { 0.0 } else { 20.0 });
+        inc.slot = clean;
+        if b.wave == Wave::Ofdm(Guard::Slice) && b.code < LADDER.len() {
+            let third = audio::slot_of(b.extra) as u8;
+            inc.third = Some(third);
+            self.sent.lock().unwrap().push((third, b.spans.clone()));
+            if third != clean
+                && let Some(Soft::Model(slots)) = &mut inc.soft
+            {
+                for s in slots {
+                    s.gamma = 0.0;
+                }
+            }
+        }
+        Some(inc)
+    }
+}
+
+#[test]
+fn frames_go_fresh_when_qrm_moves_the_slice() {
+    // B, narrowed, has A's slice bursts in the clean third. The QRM moves
+    // onto it: the burst it catches is heard and stored, worth nothing, and
+    // B asks for the third now clean. Increments there would have to
+    // rebuild those frames from parity alone.
+    let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+    let a = Station::new(Config::new("N0ABC"), air.clone());
+    let mut cfg = Config::new("W1AW");
+    cfg.narrow = true;
+    let mut b = Station::new(cfg, air.clone());
+    b.listen();
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut sim = Sim::new(
+        a,
+        b,
+        Box::new(MovingQrm {
+            inner: ModelMedium::new(12.0, 5),
+            moves: 90.0,
+            sent: sent.clone(),
+        }),
+        air,
+    );
+    let n = 6_000;
+    let data: Vec<u8> = (0..n).map(|i| (i * 11 % 251) as u8).collect();
+    sim.stations[0].connect("W1AW", 0.0);
+    sim.stations[0].send(&data);
+    assert!(sim.run_until(3_600.0, |s| s.stations[1].stats().bytes_received >= n as u64));
+    assert_eq!(sim.stations[1].take_received(), data);
+    let sent = sent.lock().unwrap();
+    let moved = sent
+        .windows(2)
+        .position(|w| w[0].0 == 2 && w[1].0 == 1)
+        .expect("the slice never moved");
+    assert!(sent[..=moved].iter().all(|s| s.0 == 2), "{sent:?}");
+    assert!(
+        sent[moved + 1].1.iter().all(|&(from, _)| from == 0),
+        "increments after the move: {sent:?}"
+    );
 }

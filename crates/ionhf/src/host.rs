@@ -21,12 +21,50 @@
 //! `MODES` lists one mode, `ION` (Ion picks its levels itself), and
 //! `BCAST MODE n ...` is answered `OK` for an open port.
 //!
+//! Ion Net (`docs/ion-net.md`, Host interface): `NET OPEN name` runs a net
+//! as net control, `NET JOIN [name]` joins one (the first heard), each
+//! answered `NET PORT n` (a KISS port, 1–15, beside the groups'), or
+//! `WRONG` while a link is up or being called. Then `NET CHECKINS ON|OFF`,
+//! `NET LINE text`, `NET TRAFFIC n R|W|P|E [SHORT]`, `NET OFFER` (the next
+//! frame on the net's port is an object to offer) and `NET CLOSE` (net
+//! control: close the net; member: leave), each `OK` or `WRONG`. Events:
+//! `NET JOINED ncs net slot`, `NET IN call slot [VIA call]`,
+//! `NET LINE call text`, `NET TRAFFIC call n R|W|P|E [SHORT]`,
+//! `NET HEARD call up_db down_db` (net control, as the roster changes;
+//! `-` not known yet), `NET MISSED call`, `NET RELAY call VIA call`,
+//! `NET ROUTE call VIA call|DIRECT`, `NET OBJECT id [CACHED]` (`id`: 20
+//! hex digits, `ObjectId`), `NET CLOSED` (`NET CLOSED LOST`: a member
+//! heard nothing of net control for `NetConfig::lost_after_s`). Frames on
+//! the net's port (KISS data) carry
+//! `[to length][to][from length][from][data]`, both ways: from the host
+//! `from` is empty and an empty `to` is the whole net (net control: a
+//! bulletin; member: traffic for net control); to the host both are
+//! filled in, an empty `to` was a bulletin and `#id` an object (after its
+//! `NET OBJECT` line). Messages overheard between other stations are not
+//! passed on. `CONNECT` is `WRONG` while a net is up. When the command
+//! client goes the net keeps running (the Net screen shows it) and a new
+//! client attaches to it with `NET OPEN` or `NET JOIN`.
+//!
+//! `RETRIES [n]` gets or sets how many more times this client's calls go
+//! out unanswered after the first (0 to 20, as Data2G's; BPQ32 passes the
+//! line on from its port config). `PENDING` goes out while we listen and a
+//! burst that may be a call is coming in, then `CONNECTED` if it was one
+//! for us, else `CANCELPENDING`: a scanning client stays on the frequency
+//! in between.
+//!
+//! `CLEANTXBUFFER` drops what has never been on air, as VARA's; what is
+//! on air unacknowledged (the limbo) still goes, and a VARA client's
+//! `BUFFER` leaves it out ([`ion::link::Clean`]).
+//!
 //! `DATA2G ON` (off again with `DATA2G OFF` or when the command client
-//! leaves): `DISCONNECTED` says why, as Data2G's host does (its
-//! `docs/arq.md` §9): `CLIENT`, `PEER`, `ABORT`, `LINK_LOST`,
-//! `LINK_FAILED weak path` (the lifeline's hold ran out), `NO_ANSWER`,
-//! with `unconfirmed` when our goodbye went unacknowledged. Data2G's other
-//! `DATA2G ON` extensions are not offered (`WRONG`, as before).
+//! leaves) turns on Data2G's host extensions (its `docs/arq.md` §9):
+//! `DISCONNECTED` says why (`CLIENT`, `IDLE`, `PEER`, `ABORT`,
+//! `LINK_LOST`, `LINK_FAILED weak path`, `NO_ANSWER`, with `unconfirmed`
+//! when our goodbye went unacknowledged); `CLEANTXBUFFER [n]` answers in
+//! host offsets, then `CLEANTXBUFFER SETTLED` (Data2G PR #118); data
+//! written before `CONNECTED` is dropped; `TIMEOUT [s]` gets or sets the
+//! link idle close and `TXPOWER [dB]` the output level below the
+//! operator's drive (Data2G PR #122; never above it).
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -35,11 +73,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use ion::link::State;
-use ion::link::station::End;
+use ion::link::net::{NetEvent, Traffic};
+use ion::link::station::{CALL_TRIES, End};
+use ion::link::{Clean, Settled, State};
 
 use crate::engine::UiEvent;
-use crate::ion_engine::{IonCmd, IonStatus};
+use crate::ion_engine::{IonCmd, IonStatus, TX_POWER_MIN_DB, precedence_of, traffic_words};
+
+/// What `TIMEOUT` says with no idle close set (Ion's default: a quiet link
+/// stays up); setting it or more turns the idle close off. Finite, as
+/// clients parse it as a number.
+const NO_IDLE_CLOSE_S: f64 = 1e9;
+/// `RETRIES`' most, as Data2G's.
+const MAX_RETRIES: u32 = 20;
+/// Longest wait for the Ion worker's answer to a `CLEANTXBUFFER`.
+const CLEAN_WAIT: Duration = Duration::from_secs(5);
 
 /// Data2G's words for why a link ended (`DISCONNECTED reason [detail]
 /// [unconfirmed]`).
@@ -51,6 +99,7 @@ fn end_words(end: Option<End>, state: State) -> String {
         Some(End::NoAnswer) => "NO_ANSWER".into(),
         Some(End::LinkLost) => "LINK_LOST".into(),
         Some(End::Weak { confirmed }) => format!("LINK_FAILED weak path{}", unconfirmed(confirmed)),
+        Some(End::Idle { confirmed }) => format!("IDLE{}", unconfirmed(confirmed)),
         None if state == State::Failed => "LINK_LOST".into(),
         None => "ABORT".into(),
     }
@@ -59,7 +108,7 @@ fn end_words(end: Option<End>, state: State) -> String {
 /// From the Ion worker to the host interface.
 #[derive(Debug)]
 pub enum HostIn {
-    Status(IonStatus),
+    Status(Box<IonStatus>),
     Received(Vec<u8>),
     /// A frame of the group on this KISS port.
     GroupFrame(u8, Vec<u8>),
@@ -71,6 +120,80 @@ pub enum HostIn {
     GroupDropped(u8, u32),
     /// Our frame with this ACKMODE tag has gone out.
     GroupSent(u16),
+    /// The answer to [`IonCmd::Clean`].
+    Clean(Clean),
+    /// A `CLEANTXBUFFER` limbo resolved.
+    Settled(Settled),
+    /// Something happened in the net ([`NetEvent::Closed`] also when it
+    /// was refused, left or dropped).
+    Net(NetEvent),
+}
+
+/// A `NET` command.
+#[derive(Debug, PartialEq)]
+enum NetCmd {
+    Open(String),
+    Join(String),
+    Checkins(bool),
+    Line(String),
+    Traffic(Traffic),
+    Offer,
+    Beacon,
+    Close,
+}
+
+/// A `NET` command line; `LINE` keeps its text as typed.
+fn parse_net(text: &str) -> Option<NetCmd> {
+    let up = text.to_ascii_uppercase();
+    let words: Vec<&str> = up.split_whitespace().collect();
+    match words.as_slice() {
+        ["NET", "OPEN", name @ ..] if !name.is_empty() => Some(NetCmd::Open(name.join(" "))),
+        ["NET", "JOIN", name @ ..] => Some(NetCmd::Join(name.join(" "))),
+        ["NET", "CHECKINS", on @ ("ON" | "OFF")] => Some(NetCmd::Checkins(*on == "ON")),
+        ["NET", "LINE", ..] => {
+            let rest = text.trim().split_once(char::is_whitespace)?.1.trim_start();
+            let line = rest.split_once(char::is_whitespace).map_or("", |(_, t)| t.trim());
+            Some(NetCmd::Line(line.to_string()))
+        }
+        ["NET", "TRAFFIC", n, p, rest @ ..] if matches!(rest, [] | ["SHORT"]) => Some(NetCmd::Traffic(Traffic {
+            items: n.parse().ok()?,
+            precedence: precedence_of(p)?,
+            short: !rest.is_empty(),
+        })),
+        ["NET", "OFFER"] => Some(NetCmd::Offer),
+        ["NET", "BEACON"] => Some(NetCmd::Beacon),
+        ["NET", "CLOSE"] => Some(NetCmd::Close),
+        _ => None,
+    }
+}
+
+/// A frame on the net's KISS port: `[to length][to][from length][from][data]`.
+pub(crate) fn net_frame(to: &str, from: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + to.len() + from.len() + data.len());
+    for call in [to, from] {
+        let b = &call.as_bytes()[..call.len().min(255)];
+        out.push(b.len() as u8);
+        out.extend_from_slice(b);
+    }
+    out.extend_from_slice(data);
+    out
+}
+
+/// (to, from, data) of a frame on the net's KISS port.
+pub(crate) fn net_unframe(b: &[u8]) -> Option<(String, String, &[u8])> {
+    let call = |b: &[u8]| -> Option<(String, usize)> {
+        let n = *b.first()? as usize;
+        let c = b.get(1..1 + n)?;
+        c.is_ascii().then(|| (String::from_utf8_lossy(c).into_owned(), 1 + n))
+    };
+    let (to, a) = call(b)?;
+    let (from, c) = call(&b[a..])?;
+    Some((to, from, &b[a + c..]))
+}
+
+/// S/N for `NET HEARD`, `-` not known.
+fn db_word(v: Option<f32>) -> String {
+    v.map_or("-".into(), |v| format!("{v:.1}"))
 }
 
 /// KISS framing.
@@ -89,7 +212,7 @@ const MAX_PORT: u8 = 15;
 /// level: Ion picks its own from the stations it hears).
 const ION_MODE: &str = "MODE ION 2400 255 16 3.0 30.0";
 
-fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![FEND, command];
     for &b in payload {
         match b {
@@ -104,7 +227,7 @@ fn kiss_frame(command: u8, payload: &[u8]) -> Vec<u8> {
 
 /// Whole KISS frames out of `buf` (command byte, payload), leaving a
 /// partial one there.
-fn kiss_frames(buf: &mut Vec<u8>) -> Vec<(u8, Vec<u8>)> {
+pub(crate) fn kiss_frames(buf: &mut Vec<u8>) -> Vec<(u8, Vec<u8>)> {
     let mut out = Vec::new();
     loop {
         let Some(start) = buf.iter().position(|&b| b == FEND) else {
@@ -263,8 +386,35 @@ struct Host {
     ports: std::collections::BTreeMap<u8, String>,
     /// The command client has sent a BCAST command: it gets the statuses.
     bcast_client: bool,
-    /// The command client sent `DATA2G ON`: DISCONNECTED says why.
+    /// The command client sent `DATA2G ON`.
     data2g: bool,
+    /// Its `RETRIES`: tries of a call after the first (`None`: Ion's own).
+    retries: Option<u32>,
+    /// `PENDING` said, and neither `CONNECTED` nor `CANCELPENDING` since.
+    pending: bool,
+    /// The command client's net: its KISS port, and whether we run it.
+    net_port: Option<u8>,
+    net_ncs: bool,
+    /// A net is up (the client's, or one started on the screen).
+    net_up: bool,
+    /// Its net control, who objects come from.
+    net_ncs_call: String,
+    /// The next frame on the net's port is an object to offer.
+    offer_next: bool,
+    /// S/N last told with `NET HEARD`, rounded to dB, by call.
+    net_heard: std::collections::BTreeMap<String, (Option<i32>, Option<i32>)>,
+    /// Lines for the command client, sent at the end of each service.
+    replies: Vec<String>,
+    /// A `CLEANTXBUFFER` waits for the worker's answer since then: later
+    /// commands wait too, so every answer goes in order.
+    waiting: Option<Instant>,
+    /// DATA2G ON: the limbo we reported (host offsets), until SETTLED; and
+    /// as the last status had it (from, first unacknowledged, to).
+    limbo: Option<(u64, u64)>,
+    status_limbo: Option<(u64, u64, u64)>,
+    /// The client's TIMEOUT and TXPOWER (dB).
+    timeout: Option<f64>,
+    tx_db: f32,
 }
 
 impl Host {
@@ -292,6 +442,20 @@ impl Host {
             ports: std::collections::BTreeMap::new(),
             bcast_client: false,
             data2g: false,
+            retries: None,
+            pending: false,
+            net_port: None,
+            net_ncs: false,
+            net_up: false,
+            net_ncs_call: String::new(),
+            offer_next: false,
+            net_heard: std::collections::BTreeMap::new(),
+            replies: Vec::new(),
+            waiting: None,
+            limbo: None,
+            status_limbo: None,
+            timeout: None,
+            tx_db: 0.0,
         }
     }
 
@@ -299,12 +463,105 @@ impl Host {
         let _ = self.ui.try_send(UiEvent::Host(s));
     }
 
+    /// The whole KISS frames the client has sent so far.
+    fn kiss_in_frames(&mut self) {
+        for (command, payload) in kiss_frames(&mut self.kiss_in) {
+            let port = command >> 4;
+            match command & 0x0F {
+                KISS_DATA if self.net_port == Some(port) => self.net_frame_in(&payload, None),
+                KISS_ACKMODE if self.net_port == Some(port) && payload.len() > 2 => {
+                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
+                    self.net_frame_in(&payload[2..], Some(tag));
+                }
+                KISS_DATA if self.ports.contains_key(&port) && !payload.is_empty() => {
+                    let _ = self.ion.send(IonCmd::GroupSend(port, payload, None));
+                }
+                KISS_ACKMODE if self.ports.contains_key(&port) && payload.len() > 2 => {
+                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
+                    let _ = self.ion.send(IonCmd::GroupSend(port, payload[2..].to_vec(), Some(tag)));
+                }
+                KISS_PERSIST if !payload.is_empty() => {
+                    let _ = self.ion.send(IonCmd::GroupPersist(payload[0]));
+                }
+                // Other ports, and settings that mean nothing to Ion.
+                _ => {}
+            }
+        }
+    }
+
     fn say(&mut self, line: &str) {
+        // Lines carry text from the air (check-in lines, net names): a CR
+        // in one must not start a line of its own.
+        self.replies
+            .push(line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect());
+    }
+
+    fn flush(&mut self) {
+        let lines = std::mem::take(&mut self.replies);
         if let Some(c) = self.cmd.as_mut() {
-            let mut b = line.as_bytes().to_vec();
-            b.push(b'\r');
-            if c.write_all(&b).is_err() {
+            let mut b = Vec::new();
+            for l in lines {
+                b.extend(l.into_bytes());
+                b.push(b'\r');
+            }
+            if !b.is_empty() && c.write_all(&b).is_err() {
                 self.cmd = None;
+                self.client_gone();
+            }
+        }
+    }
+
+    /// The command client has gone (or another took its place): what it
+    /// set goes with it. Its groups close ("KISS 0" stays with the KISS
+    /// client); its TIMEOUT and TXPOWER go back to Ion's own.
+    fn client_gone(&mut self) {
+        self.note("Host disconnected".into());
+        self.bcast_client = false;
+        self.data2g = false;
+        self.forget_net();
+        self.line.clear();
+        self.waiting = None;
+        self.limbo = None;
+        self.pending = false;
+        if self.retries.take().is_some() {
+            let _ = self.ion.send(IonCmd::CallTries(None));
+        }
+        let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
+        for p in open {
+            self.close_port(p);
+        }
+        if self.timeout.take().is_some() {
+            let _ = self.ion.send(IonCmd::IdleClose(None));
+        }
+        if self.tx_db != 0.0 {
+            self.tx_db = 0.0;
+            let _ = self.ion.send(IonCmd::TxPowerDb(0.0));
+        }
+    }
+
+    /// One read of the data port onto the link; whether anything came.
+    fn read_data(&mut self) -> bool {
+        let mut buf = [0u8; 1024];
+        let Some(d) = self.data.as_mut() else {
+            return false;
+        };
+        match d.read(&mut buf) {
+            Ok(0) => {
+                self.data = None;
+                false
+            }
+            Ok(n) => {
+                if self.data2g && self.connected.is_none() {
+                    log::info!("Winlink host: DATA2G: {n} B before CONNECTED dropped");
+                } else {
+                    let _ = self.ion.send(IonCmd::Send(buf[..n].to_vec()));
+                }
+                true
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => false,
+            Err(_) => {
+                self.data = None;
+                false
             }
         }
     }
@@ -320,6 +577,10 @@ impl Host {
         if let Ok((s, addr)) = cmd_l.accept() {
             let _ = s.set_nonblocking(true);
             let _ = s.set_nodelay(true);
+            if self.cmd.is_some() {
+                self.client_gone();
+            }
+            self.replies.clear();
             self.cmd = Some(s);
             self.line.clear();
             self.note(format!("Host connected from {addr}"));
@@ -339,30 +600,19 @@ impl Host {
         let mut buf = [0u8; 1024];
         if let Some(c) = self.cmd.as_mut() {
             match c.read(&mut buf) {
-                Ok(0) => {
-                    self.cmd = None;
-                    self.note("Host disconnected".into());
-                    // Its groups go with it ("KISS 0" stays with the KISS
-                    // client).
-                    self.bcast_client = false;
-                    self.data2g = false;
-                    let open: Vec<u8> = self.ports.keys().copied().filter(|&p| p != 0).collect();
-                    for p in open {
-                        self.close_port(p);
-                    }
-                }
-                Ok(n) => self.line.extend_from_slice(&buf[..n]),
+                Ok(n) if n > 0 => self.line.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(_) => self.cmd = None,
+                _ => {
+                    self.cmd = None;
+                    self.client_gone();
+                }
             }
         }
-        while let Some(i) = self.line.iter().position(|&b| b == b'\r' || b == b'\n') {
-            let l: Vec<u8> = self.line.drain(..=i).collect();
-            let text = String::from_utf8_lossy(&l[..l.len() - 1]).trim().to_string();
-            if !text.is_empty() {
-                self.command(&text);
-            }
+        if self.waiting.is_some_and(|t| t.elapsed() >= CLEAN_WAIT) {
+            self.waiting = None;
+            self.say("CLEANTXBUFFER FAILED ");
         }
+        self.commands();
         let mut kiss_gone = false;
         if let Some(k) = self.kiss.as_mut() {
             match k.read(&mut buf) {
@@ -376,54 +626,11 @@ impl Host {
             self.kiss = None;
             self.close_port(0);
         }
-        for (command, payload) in kiss_frames(&mut self.kiss_in) {
-            let port = command >> 4;
-            match command & 0x0F {
-                KISS_DATA if self.ports.contains_key(&port) && !payload.is_empty() => {
-                    let _ = self.ion.send(IonCmd::GroupSend(port, payload, None));
-                }
-                KISS_ACKMODE if self.ports.contains_key(&port) && payload.len() > 2 => {
-                    let tag = u16::from_be_bytes([payload[0], payload[1]]);
-                    let _ = self.ion.send(IonCmd::GroupSend(port, payload[2..].to_vec(), Some(tag)));
-                }
-                KISS_PERSIST if !payload.is_empty() => {
-                    let _ = self.ion.send(IonCmd::GroupPersist(payload[0]));
-                }
-                // Other ports, and settings that mean nothing to Ion.
-                _ => {}
-            }
-        }
+        self.kiss_in_frames();
         // Data from the host goes onto the link.
-        if let Some(d) = self.data.as_mut() {
-            match d.read(&mut buf) {
-                Ok(0) => self.data = None,
-                Ok(n) => {
-                    let _ = self.ion.send(IonCmd::Send(buf[..n].to_vec()));
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                Err(_) => self.data = None,
-            }
-        }
+        self.read_data();
         for m in rx.try_iter() {
-            match m {
-                HostIn::Received(b) => self.to_host.extend(b),
-                HostIn::Status(s) => self.status(&s),
-                HostIn::GroupFrame(p, b) if self.ports.contains_key(&p) => {
-                    self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &b));
-                }
-                HostIn::GroupSent(tag) => {
-                    // To the KISS client that tagged it; the port byte is
-                    // the group's, which a client keys on the tag alone.
-                    self.kiss_out.extend(kiss_frame(KISS_ACKMODE, &tag.to_be_bytes()));
-                }
-                HostIn::GroupHeard(p, call, snr) if self.bcast_client => {
-                    let who = call.map(|c| format!("{c} ")).unwrap_or_default();
-                    self.say(&format!("BCAST {p} HEARD {who}{snr:.1}"));
-                }
-                HostIn::GroupLost(p, k) if self.bcast_client => self.say(&format!("BCAST {p} LOST {k}")),
-                HostIn::GroupDropped(p, k) if self.bcast_client => self.say(&format!("BCAST {p} DROPPED {k}")),
-                _ => {}
-            }
+            self.ion_in(m);
         }
         if !self.kiss_out.is_empty()
             && let Some(k) = self.kiss.as_mut()
@@ -451,6 +658,77 @@ impl Host {
             self.alive_at = Instant::now();
             self.say("IAMALIVE");
         }
+        self.flush();
+    }
+
+    fn ion_in(&mut self, m: HostIn) {
+        match m {
+            HostIn::Received(b) => self.to_host.extend(b),
+            HostIn::Status(s) => self.status(&s),
+            HostIn::GroupFrame(p, b) if self.ports.contains_key(&p) => {
+                self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &b));
+            }
+            HostIn::GroupSent(tag) => {
+                // To the KISS client that tagged it; the port byte is
+                // the group's, which a client keys on the tag alone.
+                self.kiss_out.extend(kiss_frame(KISS_ACKMODE, &tag.to_be_bytes()));
+            }
+            HostIn::GroupHeard(p, call, snr) if self.bcast_client => {
+                let who = call.map(|c| format!("{c} ")).unwrap_or_default();
+                self.say(&format!("BCAST {p} HEARD {who}{snr:.1}"));
+            }
+            HostIn::GroupLost(p, k) if self.bcast_client => self.say(&format!("BCAST {p} LOST {k}")),
+            HostIn::GroupDropped(p, k) if self.bcast_client => self.say(&format!("BCAST {p} DROPPED {k}")),
+            HostIn::Clean(r) if self.waiting.take().is_some() => {
+                let line = match r {
+                    Clean::Empty => "CLEANTXBUFFER BUFFEREMPTY".to_string(),
+                    Clean::Failed => "CLEANTXBUFFER FAILED ".to_string(),
+                    Clean::Late => "CLEANTXBUFFER LATE".to_string(),
+                    Clean::Done { drop, limbo } if self.data2g => {
+                        if limbo.0 < limbo.1 && self.limbo.is_none() {
+                            self.limbo = Some(limbo);
+                        }
+                        format!("CLEANTXBUFFER OK {} {} {} {}", drop.0, drop.1, limbo.0, limbo.1)
+                    }
+                    Clean::Done { .. } => "CLEANTXBUFFER OK".to_string(),
+                };
+                self.say(&line);
+            }
+            HostIn::Net(e) => self.net_event(e),
+            HostIn::Settled(s) if self.data2g && self.limbo.is_some_and(|l| l.0 == s.from) => {
+                self.limbo = None;
+                let unknown = if s.unknown { " UNKNOWN" } else { "" };
+                self.say(&format!(
+                    "CLEANTXBUFFER SETTLED {} {} {}{unknown}",
+                    s.from, s.split, s.to
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// CLEANTXBUFFER [n]: what the client has written so far goes to the
+    /// link first, then the worker answers.
+    fn clean(&mut self, upto: Option<u64>) {
+        while self.read_data() {}
+        let _ = self.ion.send(IonCmd::Clean {
+            upto,
+            vara: !self.data2g,
+        });
+        self.waiting = Some(Instant::now());
+    }
+
+    /// The command lines in, in order (none while one waits for its answer).
+    fn commands(&mut self) {
+        while self.waiting.is_none()
+            && let Some(i) = self.line.iter().position(|&b| b == b'\r' || b == b'\n')
+        {
+            let l: Vec<u8> = self.line.drain(..=i).collect();
+            let text = String::from_utf8_lossy(&l[..l.len() - 1]).trim().to_string();
+            if !text.is_empty() {
+                self.command(&text);
+            }
+        }
     }
 
     fn command(&mut self, text: &str) {
@@ -476,6 +754,7 @@ impl Host {
                 }
                 self.say("OK");
             }
+            ["CONNECT", ..] if self.net_up || self.net_port.is_some() => self.say("WRONG"),
             ["CONNECT", src, dst, ..] => {
                 if self.mycall.is_empty() {
                     self.mycall = src.to_string();
@@ -500,7 +779,21 @@ impl Host {
             }
             ["ABORT"] => {
                 self.say("OK");
-                let _ = self.ion.send(IonCmd::Stop);
+                // Before its DISCONNECTED: the limbo as the last status had
+                // it (acknowledged before the split).
+                if let Some((from, to)) = self.limbo.take() {
+                    let split = self
+                        .status_limbo
+                        .filter(|l| l.0 == from)
+                        .map_or(from, |l| l.1.clamp(from, to));
+                    self.say(&format!("CLEANTXBUFFER SETTLED {from} {split} {to} UNKNOWN"));
+                }
+                // A net goes with it only for a client attached to the net.
+                let _ = self.ion.send(if self.net_port.is_some() {
+                    IonCmd::Stop
+                } else {
+                    IonCmd::StopLink
+                });
                 self.calling = None;
                 if self.connected.take().is_some() {
                     self.disconnected("ABORT");
@@ -509,8 +802,49 @@ impl Host {
             }
             ["DATA2G", on @ ("ON" | "OFF")] => {
                 self.data2g = *on == "ON";
+                if !self.data2g {
+                    self.limbo = None;
+                }
                 self.say("OK");
             }
+            ["CLEANTXBUFFER"] => self.clean(None),
+            ["CLEANTXBUFFER", n] if self.data2g && n.len() <= 18 && n.bytes().all(|b| b.is_ascii_digit()) => {
+                self.clean(n.parse().ok());
+            }
+            ["RETRIES"] => {
+                let n = self.retries.unwrap_or(CALL_TRIES - 1);
+                self.say(&format!("RETRIES {n}"));
+            }
+            ["RETRIES", v] => match v.parse::<u32>() {
+                Ok(n) if n <= MAX_RETRIES && v.bytes().all(|b| b.is_ascii_digit()) => {
+                    self.retries = Some(n);
+                    let _ = self.ion.send(IonCmd::CallTries(Some(n + 1)));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
+            ["TIMEOUT"] if self.data2g => {
+                let s = self.timeout.unwrap_or(NO_IDLE_CLOSE_S);
+                self.say(&format!("TIMEOUT {s:.1}"));
+            }
+            ["TIMEOUT", v] if self.data2g => match v.parse::<f64>() {
+                Ok(s) if s > 0.0 && s.is_finite() => {
+                    self.timeout = (s < NO_IDLE_CLOSE_S).then_some(s);
+                    let _ = self.ion.send(IonCmd::IdleClose(self.timeout));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
+            ["TXPOWER"] if self.data2g => self.say(&format!("TXPOWER {:.1}", self.tx_db)),
+            // Reduce-only: 0 is the operator's drive, and nothing above it.
+            ["TXPOWER", v] if self.data2g => match v.parse::<f32>() {
+                Ok(db) if (TX_POWER_MIN_DB..=0.0).contains(&db) => {
+                    self.tx_db = db + 0.0;
+                    let _ = self.ion.send(IonCmd::TxPowerDb(self.tx_db));
+                    self.say("OK");
+                }
+                _ => self.say("WRONG"),
+            },
             ["SN"] => match self.last_snr {
                 Some(s) => self.say(&format!("SN {s:.1}")),
                 None => self.say("WRONG"),
@@ -519,7 +853,7 @@ impl Host {
             ["BCAST", "OPEN", rest @ ..] => {
                 self.bcast_client = true;
                 let name: Vec<&str> = rest.iter().take_while(|w| **w != "FROM").copied().collect();
-                let free = (1..=MAX_PORT).find(|p| !self.ports.contains_key(p));
+                let free = (1..=MAX_PORT).find(|p| !self.ports.contains_key(p) && self.net_port != Some(*p));
                 match (name.is_empty(), free) {
                     (false, Some(p)) => {
                         let name = name.join(" ");
@@ -545,10 +879,34 @@ impl Host {
                 let open = n.parse::<u8>().is_ok_and(|p| self.ports.contains_key(&p));
                 self.say(if open { "OK" } else { "WRONG" });
             }
+            ["SLICE", w] => {
+                let k = match *w {
+                    "AUTO" => Some(None),
+                    "MID" => Some(Some(0)),
+                    "LOW" => Some(Some(1)),
+                    "HIGH" => Some(Some(2)),
+                    _ => None,
+                };
+                match k {
+                    Some(k) => {
+                        let _ = self.ion.send(IonCmd::SetSlice(k));
+                        self.say("OK");
+                    }
+                    None => self.say("WRONG"),
+                }
+            }
+            ["NARROW", w @ ("ON" | "OFF")] => {
+                let _ = self.ion.send(IonCmd::SetNarrow(*w == "ON"));
+                self.say("OK");
+            }
             ["MODES"] => {
                 self.say(ION_MODE);
                 self.say("OK");
             }
+            ["NET", ..] => match parse_net(text) {
+                Some(c) => self.net_command(c),
+                None => self.say("WRONG"),
+            },
             [w, ..]
                 if w.starts_with("BW")
                     || matches!(
@@ -565,8 +923,160 @@ impl Host {
         }
     }
 
+    fn net_command(&mut self, c: NetCmd) {
+        let ncs = matches!(c, NetCmd::Open(_));
+        let ok = match c {
+            NetCmd::Open(_) | NetCmd::Join(_) if self.connected.is_some() || self.calling.is_some() => false,
+            NetCmd::Open(name) | NetCmd::Join(name) if self.net_port.is_none() => {
+                let free = (1..=MAX_PORT).find(|p| !self.ports.contains_key(p));
+                let Some(p) = free else {
+                    self.say("WRONG");
+                    return;
+                };
+                self.net_ncs = ncs;
+                self.net_port = Some(p);
+                self.net_heard.clear();
+                let _ = self.ion.send(if self.net_ncs {
+                    IonCmd::NetStart(name.clone())
+                } else {
+                    IonCmd::NetJoin(name.clone())
+                });
+                self.note(format!("Host: net {name} on KISS port {p}"));
+                self.say(&format!("NET PORT {p}"));
+                return;
+            }
+            NetCmd::Open(_) | NetCmd::Join(_) => {
+                let p = self.net_port.unwrap_or_default();
+                self.say(&format!("NET PORT {p}"));
+                return;
+            }
+            NetCmd::Checkins(on) if self.net_port.is_some() && self.net_ncs => {
+                let _ = self.ion.send(IonCmd::NetCheckins(on));
+                true
+            }
+            NetCmd::Line(text) => {
+                let _ = self.ion.send(IonCmd::NetLine(text));
+                true
+            }
+            NetCmd::Traffic(t) => {
+                let _ = self.ion.send(IonCmd::NetTraffic(t));
+                true
+            }
+            NetCmd::Offer if self.net_port.is_some() && self.net_ncs => {
+                self.offer_next = true;
+                true
+            }
+            NetCmd::Beacon if self.net_port.is_some() && self.net_ncs => {
+                let _ = self.ion.send(IonCmd::NetBeacon);
+                true
+            }
+            NetCmd::Close if self.net_port.is_some() => {
+                let _ = self.ion.send(IonCmd::NetClose);
+                true
+            }
+            _ => false,
+        };
+        self.say(if ok { "OK" } else { "WRONG" });
+    }
+
+    /// A frame from the host on the net's port.
+    /// A frame from the host on the net's port; `tag` (ACKMODE): told back
+    /// once the net has taken it.
+    fn net_frame_in(&mut self, payload: &[u8], tag: Option<u16>) {
+        let Some((to, _, data)) = net_unframe(payload) else {
+            log::info!("Winlink host: net frame without its header");
+            return;
+        };
+        let cmd = if std::mem::take(&mut self.offer_next) {
+            IonCmd::NetOffer(data.to_vec())
+        } else if to.is_empty() {
+            IonCmd::NetSend(data.to_vec())
+        } else {
+            IonCmd::NetSendTo(to, data.to_vec())
+        };
+        let _ = self.ion.send(cmd);
+        if let Some(t) = tag {
+            let _ = self.ion.send(IonCmd::NetAck(t));
+        }
+    }
+
+    fn net_event(&mut self, e: NetEvent) {
+        let Some(p) = self.net_port else { return };
+        match e {
+            NetEvent::Joined { ncs, net, slot } => {
+                self.say(&format!("NET JOINED {ncs} {net} {slot}"));
+                self.net_ncs_call = ncs;
+            }
+            NetEvent::Line { call, line } => self.say(format!("NET LINE {call} {line}").trim_end()),
+            NetEvent::Traffic { call, traffic } => {
+                self.say(&format!("NET TRAFFIC {call} {}", traffic_words(traffic)));
+            }
+            NetEvent::Object { id, data, cached } => {
+                self.say(&format!("NET OBJECT {id}{}", if cached { " CACHED" } else { "" }));
+                let frame = net_frame(&format!("#{id}"), &self.net_ncs_call, &data);
+                self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &frame));
+            }
+            NetEvent::CheckedIn { call, slot, via } => {
+                let via = via.map(|v| format!(" VIA {v}")).unwrap_or_default();
+                self.say(&format!("NET IN {call} {slot}{via}"));
+            }
+            NetEvent::Message {
+                from,
+                to,
+                data,
+                overheard: false,
+            } => {
+                let frame = net_frame(to.as_deref().unwrap_or(""), &from, &data);
+                self.kiss_out.extend(kiss_frame(p << 4 | KISS_DATA, &frame));
+            }
+            NetEvent::Message { .. } => {}
+            NetEvent::Missed { call } => self.say(&format!("NET MISSED {call}")),
+            NetEvent::Relayed { source, via } => self.say(&format!("NET RELAY {source} VIA {via}")),
+            NetEvent::Routed { call, via } => match via {
+                Some(v) => self.say(&format!("NET ROUTE {call} VIA {v}")),
+                None => self.say(&format!("NET ROUTE {call} DIRECT")),
+            },
+            NetEvent::Closed => {
+                self.say("NET CLOSED");
+                self.forget_net();
+            }
+            NetEvent::Lost => {
+                self.say("NET CLOSED LOST");
+                self.forget_net();
+            }
+        }
+    }
+
+    fn forget_net(&mut self) {
+        self.net_port = None;
+        self.offer_next = false;
+        self.net_heard.clear();
+    }
+
+    /// `NET HEARD` for each roster entry whose S/N changed by a dB or more.
+    fn net_heard(&mut self, net: &crate::ion_engine::NetStatus) {
+        let mut lines = Vec::new();
+        for r in &net.roster {
+            let now = (r.snr_up.map(|v| v.round() as i32), r.snr_down.map(|v| v.round() as i32));
+            if now == (None, None) || self.net_heard.get(&r.call) == Some(&now) {
+                continue;
+            }
+            self.net_heard.insert(r.call.clone(), now);
+            lines.push(format!(
+                "NET HEARD {} {} {}",
+                r.call,
+                db_word(r.snr_up),
+                db_word(r.snr_down)
+            ));
+        }
+        for l in lines {
+            self.say(&l);
+        }
+    }
+
     /// DISCONNECTED, with `why` for a client that sent `DATA2G ON`.
     fn disconnected(&mut self, why: &str) {
+        self.limbo = None;
         if self.data2g {
             self.say(&format!("DISCONNECTED {why}"));
         } else {
@@ -595,6 +1105,17 @@ impl Host {
         if s.snr_db.is_some() {
             self.last_snr = s.snr_db;
         }
+        self.net_up = s.net.is_some();
+        if let Some(n) = s.net.as_deref()
+            && self.net_port.is_some()
+        {
+            self.net_ncs = n.ncs;
+            if let Some(c) = &n.ncs_call {
+                self.net_ncs_call.clone_from(c);
+            }
+            self.net_heard(n);
+        }
+        self.status_limbo = s.limbo;
         let state = s.state;
         if self.last_state != Some(state) {
             self.last_state = Some(state);
@@ -623,9 +1144,27 @@ impl Host {
                 _ => {}
             }
         }
-        if self.connected.is_some() && self.last_buffer != Some(s.pending) {
-            self.last_buffer = Some(s.pending);
-            self.say(&format!("BUFFER {}", s.pending));
+        // A scanner stays on the frequency from PENDING until CONNECTED
+        // or CANCELPENDING.
+        let call_in = s.call_in && self.connected.is_none() && self.calling.is_none();
+        if self.pending && (self.connected.is_some() || !call_in) {
+            self.pending = false;
+            if self.connected.is_none() {
+                self.say("CANCELPENDING");
+            }
+        } else if !self.pending && call_in {
+            self.pending = true;
+            self.say("PENDING");
+        }
+        // A VARA client sees a cleaned limbo gone at once.
+        let buffer = if self.data2g {
+            s.pending
+        } else {
+            s.pending.saturating_sub(s.limbo_bytes)
+        };
+        if self.connected.is_some() && self.last_buffer != Some(buffer) {
+            self.last_buffer = Some(buffer);
+            self.say(&format!("BUFFER {buffer}"));
         }
         if s.on_air != self.last_ptt {
             self.last_ptt = s.on_air;
@@ -661,6 +1200,367 @@ pub(crate) fn free_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_commands_parse() {
+        use NetCmd::*;
+        let t = |items, precedence, short| {
+            Some(Traffic(ion::link::net::Traffic {
+                items,
+                precedence,
+                short,
+            }))
+        };
+        let cases = [
+            ("NET OPEN tnares", Some(Open("TNARES".into()))),
+            ("NET OPEN TN  ARES", Some(Open("TN ARES".into()))),
+            ("NET OPEN", None),
+            ("net join", Some(Join(String::new()))),
+            ("NET JOIN TNARES", Some(Join("TNARES".into()))),
+            ("NET CHECKINS ON", Some(Checkins(true))),
+            ("NET CHECKINS off", Some(Checkins(false))),
+            ("NET CHECKINS", None),
+            (
+                "NET LINE Trousdale County  ARES ",
+                Some(Line("Trousdale County  ARES".into())),
+            ),
+            ("net line  w5abc portable", Some(Line("w5abc portable".into()))),
+            ("NET LINE", Some(Line(String::new()))),
+            (
+                "NET TRAFFIC 2 P SHORT",
+                t(2, ion::link::net::Precedence::Priority, true),
+            ),
+            ("NET TRAFFIC 0 R", t(0, ion::link::net::Precedence::Routine, false)),
+            (
+                "net traffic 7 e short",
+                t(7, ion::link::net::Precedence::Emergency, true),
+            ),
+            ("NET TRAFFIC 1 W", t(1, ion::link::net::Precedence::Welfare, false)),
+            ("NET TRAFFIC 1 X", None),
+            ("NET TRAFFIC 1 PR", None),
+            ("NET TRAFFIC 1 E LONG", None),
+            ("NET TRAFFIC x R", None),
+            ("NET TRAFFIC 300 R", None),
+            ("NET TRAFFIC 1", None),
+            ("NET OFFER", Some(Offer)),
+            ("NET CLOSE", Some(Close)),
+            ("NET CLOSE NOW", None),
+            ("NET", None),
+            ("NET PORT", None),
+        ];
+        for (line, want) in cases {
+            assert_eq!(parse_net(line), want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn net_frame_header_round_trips() {
+        let f = net_frame("N0AAA", "", b"hello");
+        assert_eq!(f, b"\x05N0AAA\x00hello");
+        assert_eq!(net_unframe(&f), Some(("N0AAA".into(), String::new(), &b"hello"[..])));
+        let f = net_frame("", "KJ5ET", b"");
+        assert_eq!(net_unframe(&f), Some((String::new(), "KJ5ET".into(), &b""[..])));
+        // Through KISS, with bytes that need escaping.
+        let data = [0xC0, 0xDB, 0x00, 0xDC, 7];
+        let mut wire = kiss_frame(3 << 4 | KISS_DATA, &net_frame("AG5B", "N0JLF", &data));
+        let got = kiss_frames(&mut wire);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 3 << 4);
+        assert_eq!(net_unframe(&got[0].1), Some(("AG5B".into(), "N0JLF".into(), &data[..])));
+        for bad in [&b""[..], b"\x05N0A", b"\x00", b"\x02AB\x03C", b"\x01\xff\x00"] {
+            assert_eq!(net_unframe(bad), None, "{bad:?}");
+        }
+    }
+
+    /// A command client on a socket pair, its lines as Ion says them.
+    fn client_host() -> (Host, Receiver<IonCmd>, BufLines) {
+        let (ion, ion_rx) = crossbeam_channel::unbounded();
+        let (ui, _ui_rx) = crossbeam_channel::unbounded();
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (server, _) = l.accept().unwrap();
+        client.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let mut h = Host::new(ion, ui);
+        h.cmd = Some(server);
+        (h, ion_rx, BufLines(std::io::BufReader::new(client)))
+    }
+
+    struct BufLines(std::io::BufReader<TcpStream>);
+
+    impl BufLines {
+        /// The next line `h` has for its client.
+        fn next(&mut self, h: &mut Host) -> String {
+            use std::io::BufRead;
+            h.flush();
+            let mut b = Vec::new();
+            self.0.read_until(b'\r', &mut b).unwrap();
+            String::from_utf8_lossy(&b).trim().to_string()
+        }
+    }
+
+    /// The `NET` commands reach the Ion worker, frames on the net's port go
+    /// both ways with their header, and the events come back as lines.
+    #[test]
+    fn net_commands_and_frames_reach_the_worker_and_back() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("BCAST OPEN RAGTIME");
+        assert_eq!(said.next(&mut h), "BCAST PORT 1");
+        h.command("NET CHECKINS ON");
+        assert_eq!(said.next(&mut h), "WRONG");
+        h.command("NET OPEN TNARES");
+        assert_eq!(said.next(&mut h), "NET PORT 2");
+        h.command("NET OPEN TNARES");
+        assert_eq!(said.next(&mut h), "NET PORT 2");
+        h.command("BCAST OPEN OTHER");
+        assert_eq!(said.next(&mut h), "BCAST PORT 3");
+        for (c, reply) in [
+            ("NET CHECKINS OFF", "OK"),
+            ("NET LINE Trousdale County ARES", "OK"),
+            ("NET TRAFFIC 2 P SHORT", "OK"),
+            ("NET OFFER", "OK"),
+            ("CONNECT N0ABC LOOP", "WRONG"),
+            ("NET TRAFFIC 2", "WRONG"),
+        ] {
+            h.command(c);
+            assert_eq!(said.next(&mut h), reply, "{c}");
+        }
+        h.net_frame_in(&net_frame("", "", b"the announcement"), None);
+        h.net_frame_in(&net_frame("", "", b"a bulletin"), None);
+        h.net_frame_in(&net_frame("KJ5ET", "", b"for KJ5ET"), None);
+        h.net_frame_in(b"\x09short", None);
+        let cmds: Vec<IonCmd> = ion.try_iter().filter(|c| !matches!(c, IonCmd::GroupOpen(..))).collect();
+        let want = format!(
+            "{:?}",
+            [
+                IonCmd::NetStart("TNARES".into()),
+                IonCmd::NetCheckins(false),
+                IonCmd::NetLine("Trousdale County ARES".into()),
+                IonCmd::NetTraffic(Traffic {
+                    items: 2,
+                    precedence: ion::link::net::Precedence::Priority,
+                    short: true,
+                }),
+                IonCmd::NetOffer(b"the announcement".to_vec()),
+                IonCmd::NetSend(b"a bulletin".to_vec()),
+                IonCmd::NetSendTo("KJ5ET".into(), b"for KJ5ET".to_vec()),
+            ]
+        );
+        assert_eq!(format!("{cmds:?}"), want);
+
+        let events = [
+            NetEvent::CheckedIn {
+                call: "KJ5ET".into(),
+                slot: 1,
+                via: None,
+            },
+            NetEvent::CheckedIn {
+                call: "W5FAR".into(),
+                slot: 2,
+                via: Some("AG5B".into()),
+            },
+            NetEvent::Missed { call: "KJ5ET".into() },
+            NetEvent::Relayed {
+                source: "W5FAR".into(),
+                via: "AG5B".into(),
+            },
+            NetEvent::Routed {
+                call: "W5FAR".into(),
+                via: None,
+            },
+            NetEvent::Message {
+                from: "KJ5ET".into(),
+                to: Some("N0JLF".into()),
+                data: b"all well".to_vec(),
+                overheard: false,
+            },
+            NetEvent::Message {
+                from: "AG5B".into(),
+                to: Some("N0JLF".into()),
+                data: b"not ours".to_vec(),
+                overheard: true,
+            },
+            NetEvent::Line {
+                call: "KJ5ET".into(),
+                line: "Trousdale County ARES".into(),
+            },
+            NetEvent::Line {
+                call: "KJ5ET".into(),
+                line: String::new(),
+            },
+            NetEvent::Traffic {
+                call: "AG5B".into(),
+                traffic: Traffic {
+                    items: 3,
+                    precedence: ion::link::net::Precedence::Emergency,
+                    short: true,
+                },
+            },
+        ];
+        for e in events {
+            h.net_event(e);
+        }
+        for want in [
+            "NET IN KJ5ET 1",
+            "NET IN W5FAR 2 VIA AG5B",
+            "NET MISSED KJ5ET",
+            "NET RELAY W5FAR VIA AG5B",
+            "NET ROUTE W5FAR DIRECT",
+            "NET LINE KJ5ET Trousdale County ARES",
+            "NET LINE KJ5ET",
+            "NET TRAFFIC AG5B 3 E SHORT",
+        ] {
+            assert_eq!(said.next(&mut h), want);
+        }
+        let mut out = std::mem::take(&mut h.kiss_out);
+        let frames = kiss_frames(&mut out);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0].0, 2 << 4);
+        assert_eq!(
+            net_unframe(&frames[0].1),
+            Some(("N0JLF".into(), "KJ5ET".into(), &b"all well"[..]))
+        );
+
+        // An object, as a member gets it: its line, then its frame.
+        h.net_event(NetEvent::Joined {
+            ncs: "N0JLF".into(),
+            net: "TNARES".into(),
+            slot: 3,
+        });
+        assert_eq!(said.next(&mut h), "NET JOINED N0JLF TNARES 3");
+        let data = b"# TNARES\nFrequency 3.975 MHz".to_vec();
+        let id = ion::link::net::ObjectId::of(&data);
+        for cached in [false, true] {
+            h.net_event(NetEvent::Object {
+                id,
+                data: data.clone(),
+                cached,
+            });
+        }
+        assert_eq!(said.next(&mut h), format!("NET OBJECT {id}"));
+        assert_eq!(said.next(&mut h), format!("NET OBJECT {id} CACHED"));
+        assert_eq!(id.to_string().len(), 20);
+        let mut out = std::mem::take(&mut h.kiss_out);
+        let frames = kiss_frames(&mut out);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        let to = format!("#{id}");
+        assert_eq!(net_unframe(&frames[1].1), Some((to, "N0JLF".into(), &data[..])));
+
+        let mut net = crate::ion_engine::NetStatus {
+            ncs: true,
+            ..Default::default()
+        };
+        let entry = |up, down| ion::link::net::RosterEntry {
+            slot: 1,
+            call: "KJ5ET".into(),
+            via: None,
+            snr_up: up,
+            snr_down: down,
+            cap: 0,
+            last_heard_s: None,
+            missed: 0,
+            bytes_in: 0,
+            hears: Vec::new(),
+            caps: None,
+            version: None,
+            children: Vec::new(),
+            line: String::new(),
+            traffic: Traffic::default(),
+            holds: 0,
+        };
+        for (up, down) in [(Some(4.2), None), (Some(4.4), None), (Some(5.6), Some(-3.0))] {
+            net.roster = vec![entry(up, down)];
+            h.net_heard(&net);
+        }
+        assert_eq!(said.next(&mut h), "NET HEARD KJ5ET 4.2 -");
+        assert_eq!(said.next(&mut h), "NET HEARD KJ5ET 5.6 -3.0");
+
+        h.net_event(NetEvent::Closed);
+        assert_eq!(said.next(&mut h), "NET CLOSED");
+        h.command("NET JOIN");
+        assert_eq!(said.next(&mut h), "NET PORT 2");
+        h.net_event(NetEvent::Lost);
+        assert_eq!(said.next(&mut h), "NET CLOSED LOST");
+        h.net_event(NetEvent::Missed { call: "KJ5ET".into() });
+        h.command("NET CLOSE");
+        assert_eq!(said.next(&mut h), "WRONG");
+        h.command("NET JOIN");
+        assert_eq!(said.next(&mut h), "NET PORT 2");
+        assert!(matches!(ion.try_iter().last(), Some(IonCmd::NetJoin(n)) if n.is_empty()));
+    }
+
+    /// While a link is called or up, no net; while a net is up, no link.
+    #[test]
+    fn a_net_and_a_link_exclude_each_other() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("CONNECT N0ABC LOOP");
+        assert_eq!(said.next(&mut h), "OK");
+        h.command("NET JOIN");
+        assert_eq!(said.next(&mut h), "WRONG");
+        h.command("ABORT");
+        assert_eq!(said.next(&mut h), "OK");
+        assert!(ion.try_iter().any(|c| matches!(c, IonCmd::Connect(_))));
+        h.command("NET JOIN");
+        assert_eq!(said.next(&mut h), "NET PORT 1");
+        h.command("CONNECT N0ABC LOOP");
+        assert_eq!(said.next(&mut h), "WRONG");
+        assert!(!ion.try_iter().any(|c| matches!(c, IonCmd::Connect(_))));
+    }
+
+    /// ABORT ends a net only for the client attached to it; one that never
+    /// attached (the net runs from the Net screen) stops the link alone.
+    #[test]
+    fn abort_ends_a_net_only_for_its_client() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("ABORT");
+        assert_eq!(said.next(&mut h), "OK");
+        assert!(ion.try_iter().any(|c| matches!(c, IonCmd::StopLink)));
+        h.command("NET JOIN TNARES");
+        assert_eq!(said.next(&mut h), "NET PORT 1");
+        h.command("ABORT");
+        assert_eq!(said.next(&mut h), "OK");
+        assert!(ion.try_iter().any(|c| matches!(c, IonCmd::Stop)));
+    }
+
+    /// Text from the air (a check-in line, a net name) cannot start a line
+    /// of its own on the command port.
+    #[test]
+    fn on_air_text_cannot_inject_lines() {
+        let (mut h, _ion, mut said) = client_host();
+        h.command("NET OPEN TNARES");
+        assert_eq!(said.next(&mut h), "NET PORT 1");
+        h.net_event(NetEvent::Line {
+            call: "KJ5ET".into(),
+            line: "ARES\rDISCONNECTED\nNET CLOSED".into(),
+        });
+        h.net_event(NetEvent::Joined {
+            ncs: "N0JLF".into(),
+            net: "TN\rBUSY".into(),
+            slot: 1,
+        });
+        assert_eq!(said.next(&mut h), "NET LINE KJ5ET ARES DISCONNECTED NET CLOSED");
+        assert_eq!(said.next(&mut h), "NET JOINED N0JLF TN BUSY 1");
+    }
+
+    /// An ACKMODE frame on the net's port is sent like a data frame, and its
+    /// tag told back once the net has it.
+    #[test]
+    fn ackmode_frames_on_the_net_port_are_sent_and_acked() {
+        let (mut h, ion, mut said) = client_host();
+        h.command("NET JOIN TNARES");
+        assert_eq!(said.next(&mut h), "NET PORT 1");
+        let mut f = 0x1234u16.to_be_bytes().to_vec();
+        f.extend(net_frame("", "", b"AG5B: all well"));
+        h.kiss_in = kiss_frame(1 << 4 | KISS_ACKMODE, &f);
+        h.kiss_in_frames();
+        let cmds: Vec<IonCmd> = ion.try_iter().filter(|c| !matches!(c, IonCmd::NetJoin(_))).collect();
+        assert_eq!(
+            format!("{cmds:?}"),
+            format!(
+                "{:?}",
+                [IonCmd::NetSend(b"AG5B: all well".to_vec()), IonCmd::NetAck(0x1234)]
+            )
+        );
+    }
 
     /// A port another program holds (as a closing Ion would): the host
     /// waits, says so once, keeps its handle, and opens the ports once they
@@ -744,5 +1644,390 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!ui_rx.try_iter().any(|e| matches!(e, UiEvent::Warning(_))));
+    }
+
+    fn host() -> (Host, Receiver<IonCmd>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (ui, _) = crossbeam_channel::bounded(1);
+        (Host::new(tx, ui), rx)
+    }
+
+    /// Command lines as the client sends them.
+    fn feed(h: &mut Host, ls: &[&str]) {
+        for l in ls {
+            h.line.extend(l.as_bytes());
+            h.line.push(b'\r');
+        }
+        h.commands();
+    }
+
+    /// What has come back since the last call.
+    fn take(h: &mut Host) -> Vec<String> {
+        h.commands();
+        std::mem::take(&mut h.replies)
+    }
+
+    fn lines(h: &mut Host, ls: &[&str]) -> Vec<String> {
+        feed(h, ls);
+        take(h)
+    }
+
+    fn status(state: State, pending: usize, limbo: Option<(u64, u64, u64)>, limbo_bytes: usize) -> Box<IonStatus> {
+        Box::new(IonStatus {
+            state,
+            role: ion::link::Role::Sender,
+            peer: "LOOP".into(),
+            level: 0,
+            snr_db: None,
+            bytes_acked: 0,
+            bytes_received: 0,
+            pending,
+            data_bursts: 0,
+            frames_resent: 0,
+            increments_sent: 0,
+            harq_recovered: 0,
+            codewords_failed: 0,
+            polls: 0,
+            on_air: false,
+            busy: false,
+            connected_s: 0.0,
+            target_level: 0,
+            frames_sent: 0,
+            control_bursts: 0,
+            airtime_s: 0.0,
+            bursts: Vec::new(),
+            slot_tx: 0,
+            slot_rx: 0,
+            band: [0.0; 3],
+            holding: false,
+            slice_pick: None,
+            narrow_hand: false,
+            narrow: false,
+            peer_narrow: false,
+            end: None,
+            groups: Vec::new(),
+            heard: Vec::new(),
+            cw_id: false,
+            call_in: false,
+            stream: Box::default(),
+            net: None,
+            limbo,
+            limbo_bytes,
+        })
+    }
+
+    fn sent_db(rx: &Receiver<IonCmd>) -> Vec<f32> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                IonCmd::TxPowerDb(db) => Some(db),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Data2G's test_txpower_gets_and_sets_the_output_volume, reduce-only:
+    /// anything over the operator's drive is WRONG, and nothing over 0 dB
+    /// ever reaches the worker. The client leaving puts it back to 0.
+    #[test]
+    fn txpower_reduces_only() {
+        let (mut h, rx) = host();
+        let said = lines(&mut h, &["TXPOWER", "DATA2G ON", "TXPOWER", "TXPOWER -1.2", "TXPOWER"]);
+        assert_eq!(said, ["WRONG", "OK", "TXPOWER 0.0", "OK", "TXPOWER -1.2"]);
+        for b in [
+            "-60.1", "20.5", "abc", "nan", "1 2", "0.1", "3", "20", "+0.05", "inf", "-inf", "1e9",
+        ] {
+            assert_eq!(lines(&mut h, &[&format!("TXPOWER {b}")]), ["WRONG"], "{b}");
+        }
+        assert_eq!(
+            lines(&mut h, &["TXPOWER", "TXPOWER -60", "TXPOWER -0", "TXPOWER"]),
+            ["TXPOWER -1.2", "OK", "OK", "TXPOWER 0.0"]
+        );
+        let db = sent_db(&rx);
+        assert_eq!(db, [-1.2, -60.0, 0.0]);
+        assert!(db.iter().all(|&d| d <= 0.0));
+        lines(&mut h, &["TXPOWER -6"]);
+        h.client_gone();
+        assert_eq!(sent_db(&rx), [-6.0, 0.0]);
+        assert_eq!(lines(&mut h, &["DATA2G ON", "TXPOWER"]), ["OK", "TXPOWER 0.0"]);
+    }
+
+    /// Data2G's RETRIES: the tries of a call after the first, 0 to 20, for
+    /// this client's later calls; Ion's own count again once it has gone.
+    #[test]
+    fn retries_gets_sets_and_resets() {
+        let (mut h, rx) = host();
+        let ours = format!("RETRIES {}", CALL_TRIES - 1);
+        assert_eq!(
+            lines(&mut h, &["RETRIES", "RETRIES 2", "RETRIES", "RETRIES 0", "RETRIES 20"]),
+            [&ours, "OK", "RETRIES 2", "OK", "OK"]
+        );
+        for b in ["21", "-1", "+3", "x", "1.5", "1 2", "99999999999"] {
+            assert_eq!(lines(&mut h, &[&format!("RETRIES {b}")]), ["WRONG"], "{b:?}");
+        }
+        assert_eq!(lines(&mut h, &["RETRIES"]), ["RETRIES 20"]);
+        h.client_gone();
+        let tries: Vec<Option<u32>> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                IonCmd::CallTries(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tries, [Some(3), Some(1), Some(21), None]);
+        assert_eq!(lines(&mut h, &["RETRIES"]), [ours]);
+    }
+
+    /// A scanner (BPQ) stays on its frequency from PENDING to CONNECTED or
+    /// CANCELPENDING: exactly one of the two follows every PENDING.
+    #[test]
+    fn every_pending_is_resolved_once() {
+        let (mut h, _rx) = host();
+        lines(&mut h, &["MYCALL W1AW", "LISTEN ON"]);
+        let heard = |h: &mut Host, state, call_in| -> Vec<String> {
+            let mut s = status(state, 0, None, 0);
+            s.call_in = call_in;
+            h.ion_in(HostIn::Status(s));
+            take(h)
+                .into_iter()
+                .filter(|l| l.contains("PENDING") || l.starts_with("CONNECTED"))
+                .collect()
+        };
+        // Somebody else's burst.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert!(heard(&mut h, State::Listening, true).is_empty());
+        assert_eq!(heard(&mut h, State::Listening, false), ["CANCELPENDING"]);
+        assert!(heard(&mut h, State::Listening, false).is_empty());
+        // A call for us: CONNECTED says it, nothing is cancelled.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert_eq!(heard(&mut h, State::Connected, false), ["CONNECTED LOOP W1AW 2300"]);
+        assert!(heard(&mut h, State::Connected, false).is_empty());
+        assert!(heard(&mut h, State::Connected, true).is_empty());
+        // Listening stopped under a burst (LISTEN OFF, a net opened).
+        h.ion_in(HostIn::Status(status(State::Disconnected, 0, None, 0)));
+        h.ion_in(HostIn::Status(status(State::Listening, 0, None, 0)));
+        take(&mut h);
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        assert_eq!(heard(&mut h, State::Idle, false), ["CANCELPENDING"]);
+        // A client that leaves takes its PENDING with it.
+        assert_eq!(heard(&mut h, State::Listening, true), ["PENDING"]);
+        h.client_gone();
+        take(&mut h);
+        assert!(heard(&mut h, State::Listening, false).is_empty());
+    }
+
+    /// Data2G's test_timeout_sets_the_idle_close, with Ion's default (no
+    /// idle close) as a large number; setting that number turns it off.
+    #[test]
+    fn timeout_gets_sets_and_resets() {
+        let (mut h, rx) = host();
+        let said = lines(
+            &mut h,
+            &[
+                "TIMEOUT",
+                "DATA2G ON",
+                "TIMEOUT",
+                "TIMEOUT 0",
+                "TIMEOUT -5",
+                "TIMEOUT inf",
+                "TIMEOUT x",
+                "TIMEOUT 20",
+                "TIMEOUT",
+            ],
+        );
+        let mut want = vec!["WRONG", "OK", "TIMEOUT 1000000000.0"];
+        want.extend(["WRONG"; 4]);
+        want.extend(["OK", "TIMEOUT 20.0"]);
+        assert_eq!(said, want);
+        assert_eq!(lines(&mut h, &["TIMEOUT 86400", "TIMEOUT"]), ["OK", "TIMEOUT 86400.0"]);
+        assert_eq!(
+            lines(&mut h, &["TIMEOUT 1000000000.0", "TIMEOUT"]),
+            ["OK", "TIMEOUT 1000000000.0"]
+        );
+        lines(&mut h, &["TIMEOUT 20"]);
+        h.client_gone();
+        let set: Vec<Option<f64>> = rx
+            .try_iter()
+            .filter_map(|c| match c {
+                IonCmd::IdleClose(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(set, [Some(20.0), Some(86400.0), None, Some(20.0), None]);
+        assert_eq!(lines(&mut h, &["DATA2G ON", "TIMEOUT"]), ["OK", "TIMEOUT 1000000000.0"]);
+    }
+
+    fn clean_asked(rx: &Receiver<IonCmd>) -> Vec<(Option<u64>, bool)> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                IonCmd::Clean { upto, vara } => Some((upto, vara)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// VARA's CLEANTXBUFFER replies (FAILED with its trailing space); the
+    /// offset form is Data2G's only; a VARA client's BUFFER leaves the
+    /// limbo out; commands sent meanwhile are answered after it, in order.
+    #[test]
+    fn cleantxbuffer_as_vara() {
+        let (mut h, rx) = host();
+        assert!(lines(&mut h, &["CLEANTXBUFFER", "SN", "CLEANTXBUFFER 5"]).is_empty());
+        assert_eq!(clean_asked(&rx), [(None, true)]);
+        h.ion_in(HostIn::Clean(Clean::Empty));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER BUFFEREMPTY", "WRONG", "WRONG"]);
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Failed));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER FAILED "]);
+        h.connected = Some(("N0ABC".into(), "LOOP".into()));
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (900, 20_000),
+            limbo: (0, 900),
+        }));
+        h.ion_in(HostIn::Status(status(State::Connected, 400, Some((0, 500, 900)), 400)));
+        h.ion_in(HostIn::Settled(Settled {
+            from: 0,
+            split: 900,
+            to: 900,
+            unknown: false,
+        }));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER OK", "BUFFER 0"]);
+        // An answer nobody waits for (late) is dropped.
+        h.ion_in(HostIn::Clean(Clean::Empty));
+        assert!(take(&mut h).is_empty());
+    }
+
+    /// DATA2G ON: host offsets, LATE, SETTLED, a second clean repeating an
+    /// unsettled limbo, BUFFER counting the limbo, and ABORT with a limbo
+    /// unsettled (Data2G's test_cleantxbuffer_then_abort): the limbo
+    /// first, its fate unknown past what was acknowledged.
+    #[test]
+    fn cleantxbuffer_as_data2g() {
+        let (mut h, rx) = host();
+        feed(&mut h, &["MYCALL N0ABC", "DATA2G ON"]);
+        h.ion_in(HostIn::Status(status(State::Connected, 20_000, None, 0)));
+        assert_eq!(take(&mut h), ["OK", "OK", "CONNECTED LOOP N0ABC 2300", "BUFFER 20000"]);
+        feed(
+            &mut h,
+            &[
+                "CLEANTXBUFFER 0",
+                "CLEANTXBUFFER 19000",
+                "CLEANTXBUFFER",
+                "CLEANTXBUFFER 1x",
+                "CLEANTXBUFFER 1234567890123456789",
+            ],
+        );
+        h.ion_in(HostIn::Clean(Clean::Late));
+        h.commands();
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (1_800, 19_000),
+            limbo: (0, 1_800),
+        }));
+        h.ion_in(HostIn::Status(status(
+            State::Connected,
+            2_800,
+            Some((0, 600, 1_800)),
+            1_200,
+        )));
+        h.commands();
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (1_800, 1_800),
+            limbo: (0, 1_800),
+        }));
+        assert_eq!(
+            take(&mut h),
+            [
+                "CLEANTXBUFFER LATE",
+                "CLEANTXBUFFER OK 1800 19000 0 1800",
+                "BUFFER 2800",
+                "CLEANTXBUFFER OK 1800 1800 0 1800",
+                "WRONG",
+                "WRONG",
+            ]
+        );
+        assert_eq!(
+            clean_asked(&rx),
+            [(Some(0), false), (Some(19_000), false), (None, false)]
+        );
+        h.ion_in(HostIn::Settled(Settled {
+            from: 0,
+            split: 1_800,
+            to: 1_800,
+            unknown: false,
+        }));
+        assert_eq!(take(&mut h), ["CLEANTXBUFFER SETTLED 0 1800 1800"]);
+
+        feed(&mut h, &["CLEANTXBUFFER"]);
+        h.ion_in(HostIn::Clean(Clean::Done {
+            drop: (5_000, 9_000),
+            limbo: (3_000, 5_000),
+        }));
+        h.ion_in(HostIn::Status(status(
+            State::Connected,
+            1_000,
+            Some((3_000, 4_000, 5_000)),
+            1_000,
+        )));
+        feed(&mut h, &["ABORT"]);
+        assert_eq!(
+            take(&mut h),
+            [
+                "CLEANTXBUFFER OK 5000 9000 3000 5000",
+                "BUFFER 1000",
+                "OK",
+                "CLEANTXBUFFER SETTLED 3000 4000 5000 UNKNOWN",
+                "DISCONNECTED ABORT",
+            ]
+        );
+        // The worker's own word on it comes too late: dropped.
+        h.ion_in(HostIn::Settled(Settled {
+            from: 3_000,
+            split: 3_000,
+            to: 5_000,
+            unknown: true,
+        }));
+        assert!(take(&mut h).is_empty());
+    }
+
+    /// DATA2G ON drops what the client writes before CONNECTED; a VARA
+    /// client's goes to the link (VARA queues it).
+    #[test]
+    fn data2g_drops_data_before_connected() {
+        for data2g in [false, true] {
+            let (mut h, rx) = host();
+            let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+            let (server, _) = l.accept().unwrap();
+            server.set_nonblocking(true).unwrap();
+            h.data = Some(server);
+            if data2g {
+                feed(&mut h, &["DATA2G ON"]);
+            }
+            client.write_all(b"early").unwrap();
+            while !h.read_data() {}
+            h.connected = Some(("N0ABC".into(), "LOOP".into()));
+            client.write_all(b"late").unwrap();
+            while !h.read_data() {}
+            let sent: Vec<u8> = rx
+                .try_iter()
+                .flat_map(|c| match c {
+                    IonCmd::Send(b) => b,
+                    _ => Vec::new(),
+                })
+                .collect();
+            assert_eq!(sent, if data2g { &b"late"[..] } else { b"earlylate" });
+        }
+    }
+
+    #[test]
+    fn idle_end_words() {
+        assert_eq!(
+            end_words(Some(End::Idle { confirmed: true }), State::Disconnected),
+            "IDLE"
+        );
+        assert_eq!(
+            end_words(Some(End::Idle { confirmed: false }), State::Disconnected),
+            "IDLE unconfirmed"
+        );
     }
 }

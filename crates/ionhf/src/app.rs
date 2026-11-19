@@ -1,5 +1,6 @@
-//! The window: Ion as a modem. A header (call, state, Log, Setup), the
-//! modem view (lamps, level, decode plot, waterfall, log) or Setup;
+//! The window: Ion as a modem. A header (call, state, Net, Log, Setup),
+//! the modem view (lamps, level, decode plot, waterfall, log), the Net or
+//! Setup;
 //! events from the engine and the Ion worker; settings saved as they
 //! change. Host programs (Ragtime, Pat, Winlink Express) do the talking.
 
@@ -12,7 +13,7 @@ use ion::link::State;
 use crate::config::{Clipper, Config};
 use crate::engine::{Msg, Status, UiEvent};
 use crate::history::History;
-use crate::ion_engine::{IonCmd, IonEvent, IonHandle, IonStatus};
+use crate::ion_engine::{IonCmd, IonEvent, IonHandle, IonStatus, NetStatus};
 use crate::logbook::{Kind, Logbook};
 use crate::plot::Plots;
 use crate::radio::{LoopCmd, RadioInfo, RadioThread};
@@ -54,6 +55,9 @@ pub struct App {
     pub host_client: bool,
     /// The level of our last broadcast burst.
     pub bcast_level: Option<usize>,
+    /// The last net burst's level, and whether it was ours.
+    pub net_level: Option<usize>,
+    pub net_tx: bool,
     /// The Log fills the window below the panel.
     pub log_view: bool,
     /// The Call box while it is being edited.
@@ -64,6 +68,16 @@ pub struct App {
     pub waterfall: Waterfall,
     /// Setup is showing.
     pub setup: bool,
+    /// The Net is showing (unless Setup is).
+    pub net_view: bool,
+    pub net_log: Vec<NetLine>,
+    /// The Net's send box, and whom it goes to (net control; empty: all).
+    pub net_text: String,
+    pub net_to: String,
+    /// What we announce at check-in.
+    pub net_caps: ion::link::net::Caps,
+    /// The Net section: profile, check-in form, the net log.
+    pub nets: crate::net_app::NetApp,
     host: Option<crate::host::HostHandle>,
     last_state: State,
     dirty: bool,
@@ -86,6 +100,18 @@ pub struct App {
     next_shot: f64,
     /// Seconds between `--shots` screenshots.
     pub shot_every: f64,
+}
+
+/// Lines the Net keeps.
+const NET_LOG_MAX: usize = 2000;
+
+/// A line of the Net's traffic: a message, or (`note`) what happened.
+pub struct NetLine {
+    pub time: String,
+    pub from: String,
+    pub to: String,
+    pub text: String,
+    pub note: bool,
 }
 
 /// A tone answer's lamp stays lit this long.
@@ -119,12 +145,15 @@ impl App {
         threads: Threads,
     ) -> Self {
         let _ = engine.send(Msg::Ion(Some(threads.ion.audio.clone())));
+        let _ = engine.send(Msg::Spectrum(cfg.waterfall));
         let cmds = &threads.ion.cmds;
         let _ = cmds.send(IonCmd::SetCall(cfg.call.clone()));
         let _ = cmds.send(IonCmd::SetOfdmDb(cfg.ofdm_db));
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         let _ = cmds.send(IonCmd::SetStream(cfg.stream));
+        let _ = cmds.send(IonCmd::SetCwId(cfg.cw_id));
+        let _ = cmds.send(IonCmd::NetStore(Some(Config::dir().join("nets").join("objects"))));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
             // The simulated station "LOOP" answers calls and echoes text.
             let _ = lb.send(LoopCmd::IonPeer(true));
@@ -145,12 +174,20 @@ impl App {
             lit_until: Flash::default(),
             host_client: false,
             bcast_level: None,
+            net_level: None,
+            net_tx: false,
             log_view: false,
             call_draft: None,
             audio_devices: None,
             audio_scan: None,
             waterfall: Waterfall::new(),
             setup: false,
+            net_view: false,
+            net_log: Vec::new(),
+            net_text: String::new(),
+            net_to: String::new(),
+            net_caps: ion::link::net::Caps::default(),
+            nets: crate::net_app::NetApp::new(Config::dir().join("nets")),
             host: None,
             last_state: State::Idle,
             dirty: false,
@@ -228,6 +265,170 @@ impl App {
         )
     }
 
+    /// The net we are in, if any.
+    pub fn net(&self) -> Option<&NetStatus> {
+        self.link.as_ref()?.net.as_deref()
+    }
+
+    pub fn cmds(&self, cmds: Vec<IonCmd>) {
+        for c in cmds {
+            self.cmd(c);
+        }
+    }
+
+    /// Runs the profile's net as net control.
+    pub fn net_open(&mut self) {
+        let cmds = self.nets.open(&self.cfg);
+        self.net_note(format!(
+            "Open {}",
+            self.cfg.net_profile.name.trim().to_ascii_uppercase()
+        ));
+        self.cmds(cmds);
+    }
+
+    /// Joins the net named in the Member box, with the check-in form.
+    pub fn net_join(&mut self) {
+        match self.nets.join(&self.cfg) {
+            Ok(cmds) => {
+                let name = self.cfg.net.trim().to_ascii_uppercase();
+                self.net_note(format!("Join {}", if name.is_empty() { "any" } else { &name }));
+                self.cmds(cmds);
+            }
+            Err(e) => self.note(format!("! {e}")),
+        }
+    }
+
+    /// Net control: the summary to all, then the close.
+    pub fn net_close(&mut self) {
+        let cmds = self.nets.close(self.now());
+        self.net_note("Summary offered; closing".into());
+        self.cmds(cmds);
+    }
+
+    /// The check-in form's traffic: to the net once joined, queued before.
+    pub fn net_send_form(&mut self) {
+        let call = self.cfg.call.clone();
+        match self.nets.send_form(&call) {
+            Ok(cmds) => self.cmds(cmds),
+            Err(e) => self.note(format!("! {e}")),
+        }
+    }
+
+    /// The Net's send box: a bulletin, a message for one member, or traffic
+    /// for net control.
+    pub fn net_send(&mut self) {
+        let ncs = self.net().is_some_and(|n| n.ncs);
+        let to = self.net_to.trim().to_ascii_uppercase();
+        let direct = ncs && !to.is_empty() && to != "ALL";
+        let shown_to = match (direct, ncs) {
+            (true, _) => to.clone(),
+            (false, true) => "all".into(),
+            (false, false) => self.net().and_then(|n| n.ncs_call.clone()).unwrap_or_default(),
+        };
+        if ncs && !self.nets.form.file.trim().is_empty() {
+            let call = self.cfg.call.clone();
+            match self.nets.ncs_file(&call, if direct { &to } else { "" }) {
+                Ok((text, cmds)) => {
+                    self.net_push(NetLine {
+                        time: utc_now(),
+                        from: call,
+                        to: shown_to,
+                        text,
+                        note: false,
+                    });
+                    self.cmds(cmds);
+                }
+                Err(e) => self.note(format!("! {e}")),
+            }
+            return;
+        }
+        let text = std::mem::take(&mut self.net_text);
+        if text.trim().is_empty() {
+            return;
+        }
+        self.net_push(NetLine {
+            time: utc_now(),
+            from: self.cfg.call.clone(),
+            to: shown_to,
+            text: text.clone(),
+            note: false,
+        });
+        let call = self.cfg.call.clone();
+        let cmds = if ncs {
+            self.nets.bulletin(&call, if direct { &to } else { "" }, &text)
+        } else {
+            self.nets.send_text(&call, &text)
+        };
+        self.cmds(cmds);
+    }
+
+    fn net_push(&mut self, l: NetLine) {
+        if self.net_log.len() >= NET_LOG_MAX {
+            self.net_log.drain(..NET_LOG_MAX / 10);
+        }
+        self.net_log.push(l);
+    }
+
+    fn net_note(&mut self, text: String) {
+        self.net_push(NetLine {
+            time: utc_now(),
+            from: String::new(),
+            to: String::new(),
+            text,
+            note: true,
+        });
+    }
+
+    fn net_event(&mut self, e: ion::link::net::NetEvent) {
+        use ion::link::net::NetEvent;
+        let call = self.cfg.call.clone();
+        let cmds = self.nets.event(&e, &call);
+        self.cmds(cmds);
+        match e {
+            NetEvent::Message {
+                from,
+                to,
+                data,
+                overheard,
+            } => {
+                let text = crate::net_app::shown(&data);
+                self.net_push(NetLine {
+                    time: utc_now(),
+                    from,
+                    to: to.unwrap_or_else(|| "all".into()),
+                    text,
+                    note: overheard,
+                });
+            }
+            NetEvent::CheckedIn { call, slot, via } => {
+                let via = via.map(|v| format!(" via {v}")).unwrap_or_default();
+                self.net_note(format!("{call} in, slot {slot}{via}"));
+            }
+            NetEvent::Joined { ncs, net, slot } => self.net_note(format!("In {net} as slot {slot}, NCS {ncs}")),
+            NetEvent::Missed { call } => self.net_note(format!("{call} missed")),
+            NetEvent::Relayed { source, via } => self.net_note(format!("{source} relayed by {via}")),
+            NetEvent::Routed { call, via } => match via {
+                Some(v) => self.net_note(format!("{call} via {v}")),
+                None => self.net_note(format!("{call} direct")),
+            },
+            NetEvent::Line { call, line } => self.net_note(format!("{call}: {line}")),
+            NetEvent::Traffic { call, traffic } => {
+                self.net_note(format!("{call} traffic {}", crate::ion_engine::traffic_words(traffic)))
+            }
+            NetEvent::Object { id, data, cached } => {
+                let held = if cached { ", held" } else { "" };
+                let what = crate::net_app::shown(&data);
+                let what = match crate::net_doc::Record::decode(&data) {
+                    crate::net_doc::Record::Text(_) => format!("Object {id}"),
+                    _ => what,
+                };
+                self.net_note(format!("{what}, {}{held}", theme::bytes(data.len() as u64)));
+            }
+            NetEvent::Closed => self.net_note("Closed".into()),
+            NetEvent::Lost => self.net_note("Lost".into()),
+        }
+    }
+
     /// Calls a station (`--connect`, for tests: host programs do this).
     pub fn connect(&mut self, call: &str) {
         let call = call.trim().to_ascii_uppercase();
@@ -286,6 +487,19 @@ impl App {
         self.mark_dirty();
     }
 
+    pub fn set_cw_id(&mut self, on: bool) {
+        self.cfg.cw_id = on;
+        self.cmd(IonCmd::SetCwId(on));
+        self.mark_dirty();
+    }
+
+    pub fn set_waterfall(&mut self, on: bool) {
+        self.cfg.waterfall = on;
+        let _ = self.engine.send(Msg::Spectrum(on));
+        self.waterfall.clear();
+        self.mark_dirty();
+    }
+
     pub fn set_clipper(&mut self, c: Clipper) {
         self.cfg.clipper = c;
         self.cmd(IonCmd::SetBurstClip(c == Clipper::Burst));
@@ -332,7 +546,9 @@ impl App {
         while let Ok(ev) = self.events.try_recv() {
             match ev {
                 UiEvent::Spectrum(row) => {
-                    self.waterfall.push_row(&row);
+                    if self.cfg.waterfall {
+                        self.waterfall.push_row(&row);
+                    }
                     let _ = self.spectrum_return.try_send(row);
                 }
                 UiEvent::Status(s) => self.status = s,
@@ -385,12 +601,17 @@ impl App {
                 if s.state == State::Connected {
                     self.hist.heard_peer(&s.peer.clone(), self.hist.last_here);
                 }
-                self.link = Some(s);
+                self.link = Some(*s);
+                let now = self.now();
+                let net = self.link.as_ref().and_then(|s| s.net.as_deref());
+                let cmds = self.nets.status(net, now, &self.cfg);
+                self.cmds(cmds);
             }
             // With no host program attached, what a link brings has nowhere
             // to go: say how much.
             IonEvent::Received(bytes) => self.note(format!("{} received, no host", theme::bytes(bytes.len() as u64))),
             IonEvent::Plot(p) => self.plots.push(p),
+            IonEvent::Net(e) => self.net_event(e),
             IonEvent::Note(text) => {
                 let text = text.strip_prefix("Ion: ").unwrap_or(&text).to_string();
                 // The state pill already says so.
@@ -424,6 +645,14 @@ impl App {
                 self.lit_until.tone[m.code() as usize] = (now + TONE_FLASH_S, ours);
             }
         }
+        for b in s
+            .bursts
+            .iter()
+            .filter(|b| b.level.is_some() && b.what.starts_with("NET"))
+        {
+            self.net_level = b.level;
+            self.net_tx = b.tx;
+        }
         for b in s.bursts.iter().filter(|b| b.tx) {
             // A mid-link CW ID goes out ahead of a burst.
             if b.what == "CW ID" {
@@ -455,14 +684,13 @@ impl App {
             ui.label(RichText::new(&self.cfg.call).monospace().color(theme::MUTED));
             let (color, text, detail) = self.state_pill();
             theme::pill(ui, color, &text, &detail);
-            if self.linked() {
-                // Abort (Esc) drops the link without transmitting.
-                if ui.button("Disconnect").clicked() {
-                    self.cmd(IonCmd::Disconnect);
-                }
-                if ui.button(RichText::new("Abort").color(theme::BAD)).clicked() {
-                    self.abort();
-                }
+            if self.linked() && ui.button("Disconnect").clicked() {
+                self.cmd(IonCmd::Disconnect);
+            }
+            // Abort (Esc) drops the link or the net without transmitting.
+            if (self.linked() || self.net().is_some()) && ui.button(RichText::new("Abort").color(theme::BAD)).clicked()
+            {
+                self.abort();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -470,8 +698,21 @@ impl App {
                 if ui.selectable_label(self.setup, label).clicked() {
                     self.setup = !self.setup;
                 }
-                if ui.selectable_label(self.log_view && !self.setup, "Log").clicked() {
-                    self.log_view = !(self.log_view && !self.setup);
+                let log = self.log_view && !self.setup && !self.net_view;
+                if ui.selectable_label(log, "Log").clicked() {
+                    self.log_view = true;
+                    self.setup = false;
+                    self.net_view = false;
+                }
+                let net = self.net_view && !self.setup;
+                if ui.selectable_label(net, "Net").clicked() {
+                    self.net_view = true;
+                    self.setup = false;
+                }
+                let modem = !self.log_view && !self.net_view && !self.setup;
+                if ui.selectable_label(modem, "Modem").clicked() {
+                    self.log_view = false;
+                    self.net_view = false;
                     self.setup = false;
                 }
             });
@@ -483,6 +724,14 @@ impl App {
         let s = self.link.as_ref();
         let peer = s.map_or(String::new(), |s| s.peer.clone());
         let groups = s.map_or(Vec::new(), |s| s.groups.clone());
+        if let Some(n) = self.net().filter(|_| !self.linked()) {
+            let role = match n.slot {
+                _ if n.ncs => "NCS".to_string(),
+                Some(slot) => format!("slot {slot}"),
+                None => "joining".to_string(),
+            };
+            return (theme::NET, "Net".into(), format!("{} {role}", n.net).trim().to_string());
+        }
         match self.state() {
             State::Idle | State::Listening | State::Disconnected | State::Failed if !groups.is_empty() => {
                 (theme::NET, "Group".into(), groups.join(" "))
@@ -550,6 +799,16 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(px[0], px[1]) / native));
     }
 
+    /// Pins the slice to a third (`None`: the meter's pick).
+    pub fn set_slice(&mut self, k: Option<u8>) {
+        self.cmd(IonCmd::SetSlice(k));
+    }
+
+    /// Keeps the link to the slice levels, both ways.
+    pub fn set_narrow(&mut self, on: bool) {
+        self.cmd(IonCmd::SetNarrow(on));
+    }
+
     /// What the link has on the air: on a slice level, the third the
     /// slice is in (ours as sender, the peer's pick; the peer's as
     /// receiver, ours, which its next burst follows); else the whole band.
@@ -610,6 +869,11 @@ impl App {
     }
 }
 
+/// "19:38:53", UTC.
+fn utc_now() -> String {
+    chrono::Utc::now().format("%H:%M:%S").to_string()
+}
+
 fn shoot(ctx: &egui::Context, path: std::path::PathBuf) {
     ctx.request_screenshot(move |img| {
         let [w, h] = img.size;
@@ -650,6 +914,18 @@ impl eframe::App for App {
         }
         if self.setup {
             views::setup::show(self, ui);
+        } else if self.net_view {
+            egui::Panel::bottom("log")
+                .resizable(true)
+                .default_size(160.0)
+                .min_size(100.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG)
+                        .inner_margin(Margin::symmetric(12, 8)),
+                )
+                .show(ui, |ui| self.logbook.show(ui));
+            views::net::show(self, ui);
         } else {
             if !self.log_view {
                 egui::Panel::bottom("log")

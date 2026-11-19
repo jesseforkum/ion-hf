@@ -171,9 +171,15 @@ fn harq_increments_recover_frames_between_nodes() {
 /// A link with a CW ID every 20 s from each side (the app's is 9.5 min):
 /// bytes delivered, polls the sender made, and IDs each side sent.
 fn id_run(sigma: f32, every: Option<f64>) -> (u64, u32, [usize; 2]) {
+    id_run_of(sigma, every, [true; 2])
+}
+
+/// [`id_run`], each side keying its own ID or not.
+fn id_run_of(sigma: f32, every: Option<f64>, own: [bool; 2]) -> (u64, u32, [usize; 2]) {
     let mut air = Air::new(Profile::Awgn, sigma, "N0JLF", "N0JLF/P", 0.2);
-    for s in &mut air.sides {
+    for (s, own) in air.sides.iter_mut().zip(own) {
         s.node.set_id_every(every);
+        s.node.set_own_id(own);
     }
     air.sides[1].node.station_mut().listen();
     air.sides[0].node.station_mut().connect("N0JLF/P", 0.0);
@@ -212,5 +218,71 @@ fn cw_id_breaks_do_not_cost_polls() {
         let per_id = lost_s / (ids[0] + ids[1]) as f64;
         eprintln!("  each ID {cw_s:.1} s of CW, costs {per_id:.1} s");
         assert!(per_id < cw_s + 3.0, "each ID costs {per_id:.1} s, {cw_s:.1} s of it CW");
+    }
+}
+
+#[test]
+fn a_side_without_its_cw_id_costs_the_other_nothing() {
+    // The side that keys none still waits out the other's; the other's
+    // allowance for an ID that never comes costs it no poll.
+    let (both, _, _) = id_run(0.01, Some(20.0));
+    for own in [[false, true], [true, false]] {
+        let (got, polls, ids) = id_run_of(0.01, Some(20.0), own);
+        eprintln!("own IDs {own:?}: {got} B, IDs {ids:?}, {polls} polls ({both} B with both)");
+        for k in 0..2 {
+            assert_eq!(ids[k] >= 3, own[k], "{own:?}: IDs sent {ids:?}");
+            assert!(own[k] || ids[k] == 0, "{own:?}: IDs sent {ids:?}");
+        }
+        assert!(polls <= 1, "{own:?}: {polls} polls");
+        assert!(got >= both, "{own:?}: {got} B, {both} B with both IDs");
+    }
+}
+
+/// Noise for `secs` through all the receivers: how often
+/// `Receivers::control_in` came up.
+fn control_in_on_noise(sigma: f32, secs: usize, seed: u64) -> usize {
+    let mut rx = ion::link::audio::Receivers::new();
+    let mut g = NoiseGen::new(seed);
+    let mut out = Vec::new();
+    let mut ups = 0;
+    let mut was = false;
+    for _ in 0..secs * 10 {
+        let chunk: Vec<f32> = (0..CHUNK).map(|_| sigma * g.gaussian()).collect();
+        rx.process(&chunk, &mut out);
+        let now = rx.control_in();
+        ups += usize::from(now && !was);
+        was = now;
+    }
+    ups
+}
+
+/// `Node::call_in`, what a host's PENDING goes by: not on noise; up while
+/// a call's burst comes in, whoever it is for, and down at its end, the
+/// link up by then if it was for us.
+#[test]
+fn a_call_coming_in_shows_before_it_is_read() {
+    assert_eq!(control_in_on_noise(0.06, 60, 3), 0);
+    for (to, state) in [("K9ZZZ", State::Listening), ("W1AW", State::Connected)] {
+        let mut air = Air::new(Profile::Awgn, 0.06, "N0JLF", "W1AW", 0.2);
+        air.sides[1].node.station_mut().listen();
+        assert!(!air.run_until(5.0, |a| a.sides[1].node.call_in()), "before any call");
+        air.sides[0].node.station_mut().connect(to, air.t);
+        assert!(air.run_until(30.0, |a| a.sides[1].node.call_in()), "{to}: never up");
+        let up = air.t;
+        assert!(air.run_until(30.0, |a| !a.sides[1].node.call_in()), "{to}: never down");
+        eprintln!("{to}: up at {up:.1} s, down at {:.1} s", air.t);
+        assert_eq!(air.sides[1].node.station().state(), state, "{to}");
+        assert!(!air.sides[0].node.call_in(), "the caller is not listening");
+    }
+}
+
+/// Twenty minutes of noise at each of three levels.
+#[test]
+#[ignore]
+fn no_call_shows_on_noise() {
+    for (sigma, seed) in [(0.01, 1), (0.06, 2), (0.3, 3)] {
+        let ups = control_in_on_noise(sigma, 1200, seed);
+        eprintln!("sigma {sigma}: {ups} in 20 min");
+        assert_eq!(ups, 0, "sigma {sigma}");
     }
 }

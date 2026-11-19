@@ -190,6 +190,7 @@ fn a_slice_burst_is_heard_once_in_its_slot() {
             extra: slot,
             frames: frames.clone(),
             spans: Vec::new(),
+            slot: None,
         };
         assert_eq!(
             audio::center_of(&out),
@@ -250,6 +251,7 @@ fn control_tiny_and_data_bursts_survive_the_ofdm_path() {
             extra,
             frames: frames.clone(),
             spans: Vec::new(),
+            slot: None,
         };
         let audio = audio::transmit(&out);
         let mut padded = vec![0.0; 4800];
@@ -1626,6 +1628,7 @@ fn air_power_db_seed(l: usize, seed: u32) -> (f32, f32, f32) {
         extra: 0,
         frames: vec![f.encode(lv.frame_bytes()); n],
         spans: Vec::new(),
+        slot: None,
     };
     let one = audio::transmit(&burst(1)).len() as f32 / AUDIO_RATE;
     let a = audio::transmit_with(
@@ -1726,6 +1729,7 @@ fn occupied_bandwidth_table() {
             extra: 0,
             frames: vec![f.encode(lv.frame_bytes()); k],
             spans: Vec::new(),
+            slot: None,
         };
         let one = audio::transmit(&burst(1)).len() as f32 / AUDIO_RATE;
         let a = audio::transmit_with(

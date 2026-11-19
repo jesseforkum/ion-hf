@@ -7,12 +7,14 @@ mod bulletin;
 mod member;
 mod ncs;
 mod node;
+mod object;
 mod prime;
 mod relay;
 mod stream;
 mod wire;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ion_dsp::dsp::NoiseGen;
@@ -27,6 +29,7 @@ use crate::phy_mfsk::ExpectedHeader;
 use bulletin::{BulRx, BulTx, bul_frames, lacking, pieces_per_frame};
 use member::{Applicant, Piece, Sent};
 use ncs::{Member, Wait};
+use object::{OBJ_BLOCK, Offer, obj_block, offer_frames};
 use prime::chorus_slot_s;
 use relay::{Kid, Stage, Turn};
 use stream::{Held, Inbox, MsgIn, Outbox, msg_field};
@@ -34,11 +37,13 @@ use wire::*;
 
 pub use ncs::MAX_MEMBERS;
 pub use node::NetNode;
+pub use object::{MAX_OFFERS, ObjectId};
 pub use prime::{CHORUS_FMT, ChorusPlan, NetExpect, PrimeStats};
 pub use stream::MAX_MSG;
 pub use wire::{
-    ALL, CAPS_COMPRESS, Caps, MAX_CALL, PROTOCOL, checkin_call, checkin_frame_bytes, checkin_user, floor_reply_headers,
-    idle_header, net_id, pack_call, report_frame_bytes, software_version, unpack_call, version_string,
+    ALL, CAPS_COMPRESS, Caps, MAX_CALL, MAX_LINE, PROTOCOL, Precedence, REPORT_LEN, Traffic, checkin_call,
+    checkin_frame_bytes, checkin_user, floor_reply_headers, idle_header, net_id, pack_call, report_frame_bytes,
+    software_version, unpack_call, version_string,
 };
 
 #[derive(Clone, Debug)]
@@ -81,6 +86,9 @@ pub struct NetConfig {
     pub seek_every_s: f64,
     /// ...once the channel has been quiet this long.
     pub seek_quiet_s: f64,
+    /// Member: with nothing heard from NCS (a leaf: from its relay) for
+    /// this long, the net is lost ([`NetEvent::Lost`]); 0: never.
+    pub lost_after_s: f64,
     pub caps: Caps,
     /// Compressed direct messages ([`super::compress`]): a member
     /// announces it at check-in ([`CAPS_COMPRESS`]); NCS with this on
@@ -113,6 +121,14 @@ pub struct NetConfig {
     /// once, each in a sub-band it picks at random; others use the
     /// ordinary slots. Over audio only ([`NetNode`]).
     pub chorus_slots: u8,
+    /// Member: the check-in line ("Trousdale County ARES"), at most
+    /// [`MAX_LINE`] bytes, sent in the first turn and whenever it changes.
+    pub line: String,
+    /// Member: traffic listed, sent at check-in and in reports.
+    pub traffic: Traffic,
+    /// Member: where received objects are kept, one file per object named
+    /// by its id; offered objects found there cost no airtime.
+    pub store: Option<PathBuf>,
 }
 
 impl NetConfig {
@@ -137,6 +153,7 @@ impl NetConfig {
             seek_after_s: 360.0,
             seek_every_s: 90.0,
             seek_quiet_s: 5.0,
+            lost_after_s: 750.0,
             caps: Caps::default(),
             compress: false,
             version: software_version(),
@@ -146,6 +163,9 @@ impl NetConfig {
             rx_latency_s: 0.0,
             regulars: Vec::new(),
             chorus_slots: 0,
+            line: String::new(),
+            traffic: Traffic::default(),
+            store: None,
         }
     }
 }
@@ -187,7 +207,28 @@ pub enum NetEvent {
         call: String,
         via: Option<String>,
     },
+    /// NCS: a member's check-in line, new or changed.
+    Line {
+        call: String,
+        line: String,
+    },
+    /// NCS: the traffic a member lists changed.
+    Traffic {
+        call: String,
+        traffic: Traffic,
+    },
+    /// Member: an object NCS offers, received (`cached`: it was already
+    /// held, in the store or given with [`NetStation::offer`]).
+    Object {
+        id: ObjectId,
+        data: Vec<u8>,
+        cached: bool,
+    },
     Closed,
+    /// Member: nothing heard from NCS (or our relay) for
+    /// [`NetConfig::lost_after_s`]. Over for us, as with
+    /// [`NetEvent::Closed`].
+    Lost,
 }
 
 /// NCS's view of one member.
@@ -214,6 +255,11 @@ pub struct RosterEntry {
     pub version: Option<u8>,
     /// Stations NCS reaches through it.
     pub children: Vec<String>,
+    /// Its check-in line (empty: none).
+    pub line: String,
+    pub traffic: Traffic,
+    /// Which of the offers it holds (bit i: offer i).
+    pub holds: u8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -234,6 +280,12 @@ pub struct NetStats {
     pub rounds: u32,
     /// NCS: answers heard from the member it polled.
     pub replies: u32,
+    /// Object pieces sent (NCS, or a relay to its leaves), and how many of
+    /// them were repairs.
+    pub obj_pieces: u32,
+    pub obj_repairs: u32,
+    /// Member: objects received that did not match their id.
+    pub obj_rejected: u32,
 }
 
 pub struct NetStation {
@@ -271,8 +323,12 @@ pub struct NetStation {
     /// The bulletin cut into coded blocks as it goes out.
     bul_tx: Vec<BulTx>,
     bul_sent_round: Option<u32>,
-    /// Close messages still to send (repeated: one may collide).
+    /// NCS: close once the turn under way is over.
+    close_asked: bool,
+    /// Close messages still to send (repeated: one may collide), and when
+    /// the next goes (a relay, to its leaves).
     close_left: u32,
+    close_at: f64,
     /// Something happened in the last check-in window (a check-in, or a
     /// busy channel that may have been a collision): beacon again soon.
     window_activity: bool,
@@ -286,6 +342,14 @@ pub struct NetStation {
     bul_told: u16,
     /// Leaves whose relay changed, to announce.
     tree_news: BTreeSet<u8>,
+    /// NCS: the objects on offer, by index.
+    offers: [Option<Offer>; MAX_OFFERS],
+    offer_seq: u64,
+    /// When each index last took an offer (`offer_seq`; 0: never).
+    offer_used: [u64; MAX_OFFERS],
+    /// The offer list is to go out (it changed, or a beacon went).
+    offers_due: bool,
+    offer_round: Option<u32>,
     /// Silence before each of our bursts (the host's PTT lead), s.
     lead_s: f64,
     /// Where the burst being handled sat on our clock (start of its
@@ -326,7 +390,7 @@ pub struct NetStation {
     bul_known: u16,
     bul_next: u16,
     dir_in: Inbox,
-    acked_report: Option<[u8; 7]>,
+    acked_report: Option<[u8; 9]>,
     snr_ncs: Option<f32>,
     heard: BTreeMap<u8, (f32, f64)>,
     acked_hears: BTreeMap<u8, f32>,
@@ -354,17 +418,31 @@ pub struct NetStation {
     started_at: Option<f64>,
     last_beacon_at: Option<f64>,
     last_rx_at: f64,
+    /// When we last heard NCS (a leaf: its relay).
+    ncs_heard_at: f64,
     next_seek_at: f64,
     /// The id of a net we hear traffic of (no beacon), to seek it.
     heard_net: Option<u8>,
+    /// Parts of our line not yet acknowledged (bit per part).
+    line_left: u8,
+    /// Member: the offer list as heard, and how often it changed.
+    known_offers: [Option<ObjectId>; MAX_OFFERS],
+    offer_ver: u32,
+    /// Objects we hold, and the blocks of offered ones coming in.
+    objects: BTreeMap<ObjectId, Vec<u8>>,
+    obj_rx: BTreeMap<u16, BulRx>,
+    /// Objects already handed to the host.
+    obj_given: BTreeSet<ObjectId>,
 }
 
 impl NetStation {
-    pub fn new(cfg: NetConfig, air: Arc<dyn Air>) -> Self {
+    pub fn new(mut cfg: NetConfig, air: Arc<dyn Air>) -> Self {
+        cfg.line = clip_line(cfg.line.trim());
         let id = net_id(&cfg.net);
         let rng = NoiseGen::new(cfg.seed);
         let open = cfg.ncs;
         let net_name = cfg.net.clone();
+        let line_left = if cfg.line.is_empty() { 0 } else { line_mask(&cfg.line) };
         Self {
             cfg,
             air,
@@ -394,13 +472,20 @@ impl NetStation {
             bulletin: Vec::new(),
             bul_tx: Vec::new(),
             bul_sent_round: None,
+            close_asked: false,
             close_left: 0,
+            close_at: 0.0,
             window_activity: false,
             last_now: 0.0,
             rx_sent_round: None,
             rx_dirty: false,
             bul_told: 0,
             tree_news: BTreeSet::new(),
+            offers: Default::default(),
+            offer_seq: 0,
+            offer_used: [0; MAX_OFFERS],
+            offers_due: false,
+            offer_round: None,
             lead_s: 0.0,
             rx_air: None,
             slots: None,
@@ -444,8 +529,15 @@ impl NetStation {
             started_at: None,
             last_beacon_at: None,
             last_rx_at: f64::NEG_INFINITY,
+            ncs_heard_at: f64::NEG_INFINITY,
             next_seek_at: 0.0,
             heard_net: None,
+            line_left,
+            known_offers: [None; MAX_OFFERS],
+            offer_ver: 0,
+            objects: BTreeMap::new(),
+            obj_rx: BTreeMap::new(),
+            obj_given: BTreeSet::new(),
         }
     }
 
@@ -488,6 +580,12 @@ impl NetStation {
         self.closed
     }
 
+    /// Closed, with Close bursts still to send (NCS, or a relay to its
+    /// leaves).
+    pub fn close_pending(&self) -> bool {
+        self.closed && self.close_left > 0
+    }
+
     /// Everything that happened since the last call.
     pub fn take_events(&mut self) -> Vec<NetEvent> {
         std::mem::take(&mut self.events)
@@ -524,6 +622,93 @@ impl NetStation {
         true
     }
 
+    /// Member: the check-in line (cut to [`MAX_LINE`] bytes). Sent again
+    /// when it changes.
+    pub fn set_line(&mut self, line: &str) {
+        let line = clip_line(line.trim());
+        if line != self.cfg.line {
+            self.line_left = line_mask(&line);
+            self.cfg.line = line;
+        }
+    }
+
+    pub fn line(&self) -> &str {
+        &self.cfg.line
+    }
+
+    /// Member: the traffic we list (in our next report; at check-in if not
+    /// in yet).
+    pub fn set_traffic(&mut self, traffic: Traffic) {
+        self.cfg.traffic = Traffic {
+            items: traffic.items.min(7),
+            ..traffic
+        };
+    }
+
+    pub fn traffic(&self) -> Traffic {
+        self.cfg.traffic
+    }
+
+    /// NCS: offer an object (at most [`MAX_MSG`] bytes; longer is cut) to
+    /// every member; it goes on the air only while a member lacks it. With
+    /// [`MAX_OFFERS`] already on offer, the oldest is withdrawn. Member:
+    /// hold it as if received, so it costs no airtime when offered.
+    pub fn offer(&mut self, data: &[u8]) -> ObjectId {
+        let data = &data[..data.len().min(MAX_MSG)];
+        let id = ObjectId::of(data);
+        if !self.cfg.ncs {
+            if let Some(dir) = &self.cfg.store {
+                object::save(dir, id, data);
+            }
+            self.objects.insert(id, data.to_vec());
+            return id;
+        }
+        if self.offers.iter().flatten().any(|o| o.id == id) {
+            return id;
+        }
+        // The free index taken longest ago, so a new object rarely lands
+        // where members may still hold an old one under the same index.
+        let i = (0..MAX_OFFERS)
+            .filter(|&i| self.offers[i].is_none())
+            .min_by_key(|&i| self.offer_used[i])
+            .unwrap_or_else(|| {
+                (0..MAX_OFFERS)
+                    .min_by_key(|&i| self.offers[i].as_ref().map_or(0, |o| o.seq))
+                    .unwrap()
+            });
+        self.offer_seq += 1;
+        self.offer_used[i] = self.offer_seq;
+        self.offers[i] = Some(Offer {
+            id,
+            data: data.to_vec(),
+            sent: vec![0; id.blocks()],
+            seq: self.offer_seq,
+        });
+        self.offer_changed(i);
+        id
+    }
+
+    /// NCS: stop offering `id`. Member: forget it (the store keeps it).
+    pub fn withdraw(&mut self, id: ObjectId) {
+        if !self.cfg.ncs {
+            self.objects.remove(&id);
+            return;
+        }
+        if let Some(i) = self.offers.iter().position(|o| o.as_ref().is_some_and(|o| o.id == id)) {
+            self.offers[i] = None;
+            self.offer_changed(i);
+        }
+    }
+
+    /// The objects on offer, by index (member: as last heard).
+    pub fn offers(&self) -> [Option<ObjectId>; MAX_OFFERS] {
+        if self.cfg.ncs {
+            std::array::from_fn(|i| self.offers[i].as_ref().map(|o| o.id))
+        } else {
+            self.known_offers
+        }
+    }
+
     /// NCS: allow check-ins (beacons) or stop them.
     pub fn set_open(&mut self, open: bool) {
         self.open = open;
@@ -533,14 +718,21 @@ impl NetStation {
         self.open
     }
 
-    /// NCS: end the net.
+    /// NCS: the next beacon as soon as the turn under way allows.
+    pub fn beacon_now(&mut self) {
+        self.next_beacon_at = 0.0;
+    }
+
+    /// NCS: seconds to the next beacon; none with check-ins closed.
+    pub fn beacon_in(&self, now: f64) -> Option<f64> {
+        (self.cfg.ncs && self.open).then(|| (self.next_beacon_at - now).max(0.0))
+    }
+
+    /// NCS: end the net, once the turn under way is over (its answer in,
+    /// or given up on): then [`NetEvent::Closed`] and the Close bursts.
     pub fn close(&mut self) {
-        if self.cfg.ncs && !self.closed {
-            self.closed = true;
-            self.wait = None;
-            self.deadline = None;
-            self.close_left = 3;
-            self.events.push(NetEvent::Closed);
+        if self.cfg.ncs {
+            self.close_asked = true;
         }
     }
 
@@ -581,6 +773,9 @@ impl NetStation {
             return None;
         }
         self.started_at.get_or_insert(now);
+        if !self.cfg.ncs {
+            self.check_lost(now);
+        }
         if self.busy {
             if let Some(d) = self.deadline.as_mut() {
                 *d = d.max(now + self.cfg.reply_slack_s);
@@ -704,6 +899,7 @@ impl NetStation {
             extra,
             frames: Vec::new(),
             spans: Vec::new(),
+            slot: None,
         }
     }
 
@@ -722,6 +918,7 @@ impl NetStation {
             extra: 0,
             frames: frames.iter().map(|f| f.encode(size)).collect(),
             spans: Vec::new(),
+            slot: None,
         }
     }
 
@@ -772,5 +969,112 @@ fn smooth(old: Option<f32>, new: f32) -> f32 {
     match old {
         Some(o) => 0.5 * o + 0.5 * new,
         None => new,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::net_sim::NetSim;
+    use crate::link::sim::ModelAir;
+
+    fn heard(b: &Outgoing) -> Incoming {
+        Incoming {
+            wave: b.wave,
+            code: b.code,
+            user: b.user,
+            extra: b.extra,
+            frames: b.frames.iter().map(|f| Some(f.clone())).collect(),
+            soft: None,
+            snr_db: 10.0,
+            chan: crate::chan::ChannelMeas::of_snr(10.0),
+            slot: 0,
+            thirds: [f32::NAN; 3],
+            qrm_db: [f32::NAN; 3],
+            third: None,
+            grid: None,
+        }
+    }
+
+    /// A member takes the offer list from NCS, a leaf from its relay, and
+    /// neither from another member's relay (whose list may be stale).
+    #[test]
+    fn the_offer_list_counts_only_from_ncs_or_our_relay() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air.clone());
+        let relay = NetStation::new(NetConfig::new("W1AW", "EMCOMM", false), air.clone());
+        let mut m = NetStation::new(NetConfig::new("K1ABC", "EMCOMM", false), air);
+        let wave = LADDER[FLOOR].wave;
+        let list = |id: ObjectId| {
+            let mut l = [None; MAX_OFFERS];
+            l[0] = Some(id);
+            l
+        };
+        let (a, b, c) = (ObjectId::of(b"a"), ObjectId::of(b"b"), ObjectId::of(b"c"));
+        let from_ncs = heard(&ncs.ctrl(offer_frames(&list(a), ALL), wave));
+        let from_5 = heard(&relay.ctrl_hi(offer_frames(&list(b), 5), wave, ASIDE));
+        let from_6 = heard(&relay.ctrl_hi(offer_frames(&list(c), 6), wave, ASIDE));
+        m.on_rx(&from_5, 1.0);
+        assert_eq!(m.known_offers[0], None, "a relay's list, heard by a direct member");
+        m.on_rx(&from_ncs, 2.0);
+        assert_eq!(m.known_offers[0], Some(a));
+        m.parent = Some(5);
+        m.on_rx(&from_6, 3.0);
+        assert_eq!(m.known_offers[0], Some(a), "another relay's list, heard by a leaf");
+        m.on_rx(&from_5, 4.0);
+        assert_eq!(m.known_offers[0], Some(b));
+        m.on_rx(&from_ncs, 5.0);
+        assert_eq!(m.known_offers[0], Some(b), "NCS's list, heard by a leaf");
+    }
+
+    /// A withdrawn object's index is the last one taken again.
+    #[test]
+    fn a_new_offer_takes_the_index_free_longest() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        let a = ncs.offer(b"profile v1");
+        ncs.withdraw(a);
+        let b = ncs.offer(b"profile v2");
+        let at = |n: &NetStation, id| n.offers().iter().position(|o| *o == Some(id));
+        assert_eq!(at(&ncs, b), Some(1));
+        ncs.withdraw(b);
+        let ids: Vec<ObjectId> = (0..MAX_OFFERS as u8).map(|k| ncs.offer(&[k])).collect();
+        assert_eq!(at(&ncs, ids[0]), Some(2));
+        assert_eq!(at(&ncs, ids[MAX_OFFERS - 1]), Some(1));
+    }
+
+    #[test]
+    fn a_beacon_on_demand_does_not_wait_for_the_interval() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut ncs = NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air);
+        ncs.next_beacon_at = 300.0;
+        assert_eq!(ncs.beacon_in(100.0), Some(200.0));
+        ncs.beacon_now();
+        assert_eq!(ncs.beacon_in(100.0), Some(0.0));
+        ncs.set_open(false);
+        assert_eq!(ncs.beacon_in(100.0), None);
+    }
+
+    #[test]
+    fn an_object_that_does_not_match_its_id_is_rejected() {
+        let air: Arc<dyn Air> = Arc::new(ModelAir::default());
+        let mut stations = vec![NetStation::new(NetConfig::new("N0NCS", "EMCOMM", true), air.clone())];
+        for (i, c) in ["K1ABC", "W1AW"].iter().enumerate() {
+            let mut cfg = NetConfig::new(c, "EMCOMM", false);
+            cfg.seed = 50 + i as u64;
+            stations.push(NetStation::new(cfg, air.clone()));
+        }
+        let mut sim = NetSim::new(stations, 10.0, air, 20);
+        let data: Vec<u8> = (0..3000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let id = sim.stations[0].offer(&data);
+        // What goes on the air is not what the id names.
+        sim.stations[0].offers[0].as_mut().unwrap().data[1234] ^= 0x40;
+        let ok = sim.run_until(1800.0, |s| s.stations[1..].iter().all(|m| m.stats.obj_rejected >= 2));
+        assert!(ok, "after {:.0} s", sim.t);
+        for m in &mut sim.stations[1..] {
+            assert!(!m.take_events().iter().any(|e| matches!(e, NetEvent::Object { .. })));
+            assert!(!m.objects.contains_key(&id));
+            assert_eq!(m.holds(), 0);
+        }
     }
 }
