@@ -25,6 +25,19 @@ const PDP_FRAC: f64 = 0.9;
 const ISI_EXCESS_DB: f32 = 2.0;
 /// The delay reported for such an echo, ms: past the guard.
 const ISI_DELAY_MS: f32 = 6.0;
+/// A carrier whose decision-directed noise is this many times the
+/// median carrier's has a signal of its own on it (a birdie, a
+/// neighbour's carrier): its noise is its own, and stays out of the
+/// neighbouring carriers' windows, the per-symbol noise and the echo's
+/// excess. The SNR report keeps it (left out, the report promised what
+/// the band did not carry behind a narrow filter). `ION_JAM=0` in the
+/// environment: off (tests).
+const JAM_RATIO: f64 = 8.0;
+/// Data cells a carrier needs to be judged so.
+const JAM_MIN_CELLS: f32 = 8.0;
+/// More carriers than one in this many over the line are no carriers in
+/// the band but a filter's edge or the channel: none is judged so.
+const JAM_MOST: usize = 12;
 
 impl PhyRx {
     /// The single-path delay span through the taper.
@@ -342,12 +355,32 @@ impl PhyRx {
         // sender's own clipping distortion, known from the constellation
         // and mode, so that it measures the channel.
         let kappa = 10f32.powf(-tx_distortion_db(cons, mode, self.num) / 10.0);
+        let mut jam = [false; NC_MAX];
+        if self.jam_watch {
+            let own: Vec<f64> = (0..nc)
+                .filter(|&c| ddn[c] >= JAM_MIN_CELLS)
+                .map(|c| (dd[c] / ddn[c]) as f64)
+                .collect();
+            if own.len() > nc / 2 {
+                let pre: Vec<f64> = self.sigma2[..nc].iter().map(|&v| v as f64).collect();
+                let over = JAM_RATIO * chan::quantile(&own, 0.5).max(chan::quantile(&pre, 0.5));
+                for c in 0..nc {
+                    jam[c] = ddn[c] >= JAM_MIN_CELLS && (dd[c] / ddn[c]) as f64 > over;
+                }
+                if jam[..nc].iter().filter(|j| **j).count() > nc / JAM_MOST {
+                    jam = [false; NC_MAX];
+                }
+            }
+        }
         let mut sig2 = self.sigma2;
         let mut sig2_rep = self.sigma2;
         let (mut band_a, mut band_h) = (0f32, 0f32);
         for c in 0..nc {
             let (mut a, mut n, mut h) = (0f32, 0f32, 0f32);
             for k in c.saturating_sub(l.dd_half)..(c + l.dd_half + 1).min(nc) {
+                if k != c && (jam[k] || jam[c]) {
+                    continue;
+                }
                 a += dd[k];
                 n += ddn[k];
                 h += hp[k];
@@ -355,8 +388,10 @@ impl PhyRx {
             if n > 0.0 {
                 sig2[c] = sig2[c].max(a / n);
                 sig2_rep[c] = sig2_rep[c].max((a - kappa * h) / n);
-                band_a += a / n;
-                band_h += h / n;
+                if !jam[c] {
+                    band_a += a / n;
+                    band_h += h / n;
+                }
             }
         }
 
@@ -371,7 +406,7 @@ impl PhyRx {
         let ts = LOCAL_CELLS.div_ceil(dc) / 2;
         let mut sym = vec![(0f32, 0f32); nsym];
         for (k, row) in res.chunks_exact(nc).enumerate() {
-            for &r in row.iter().filter(|r| !r.is_nan()) {
+            for (_, &r) in row.iter().enumerate().filter(|(c, r)| !r.is_nan() && !jam[*c]) {
                 sym[k].0 += r;
                 sym[k].1 += 1.0;
             }
@@ -391,7 +426,7 @@ impl PhyRx {
             for kk in k.saturating_sub(tc)..(k + tc + 1).min(nsym) {
                 for cc in c.saturating_sub(f)..(c + f + 1).min(nc) {
                     let r = res[kk * nc + cc];
-                    if !r.is_nan() {
+                    if !r.is_nan() && (cc == c || !(jam[cc] || jam[c])) {
                         a += r;
                         n += 1.0;
                     }
@@ -503,14 +538,15 @@ impl PhyRx {
 
         let snr_db = self.snr_db(pre, ng, &sig2_rep[..nc]);
         let excess_db = {
-            let pre_n: f32 = self.sigma2[..nc].iter().sum();
+            let clear = |v: &[f32]| -> f32 { v.iter().zip(&jam).filter(|(_, j)| !**j).map(|(v, _)| *v).sum() };
+            let pre_n = clear(&self.sigma2[..nc]);
             if td_clipped(cons, mode) {
                 // The whole-burst clipper's distortion is uneven over the
                 // carriers: the band's total against the preamble's noise
                 // and the expected distortion, not carrier by carrier.
                 10.0 * (band_a / (pre_n + kappa * band_h).max(1e-30)).max(1e-6).log10()
             } else {
-                let dd: f32 = sig2_rep[..nc].iter().sum();
+                let dd = clear(&sig2_rep[..nc]);
                 10.0 * (dd / pre_n.max(1e-30)).max(1e-6).log10()
             }
         };

@@ -327,6 +327,48 @@ table prints as on `main`):
   16QAM 3/4 bursts lost at +22 to +28 dB reported, and every burst of
   half a second at 64QAM lost and read 6 to 10 dB under the long ones.
 
+**Carriers in the band** (2026-11-22; `phy::rx::demod::JAM_RATIO`). Three
+steady carriers in the passband (`rig_table`'s `bird30`, `bird20`,
+`bird10`: each 30, 20 or 10 dB under a tone at the bursts' peak; by the
+levels' air means the first is within a few dB of one OFDM carrier, not
+measured) cost the same 25 dB path more than half: the per-symbol noise
+(for wideband bursts of noise) averaged them over every carrier, and the
+excess of the decision-directed noise over the preamble's read as an
+echo past the guard. A carrier whose decision-directed noise is 8 times
+the median carrier's now keeps its noise to itself: out of its
+neighbours' windows, the per-symbol noise and the echo's excess; when
+more than one carrier in 12 is over the line, none (a filter's edge is
+not a carrier). The SNR report keeps them in: left out, the report
+promised 64QAM behind a narrow filter and the bursts were lost.
+
+`rig_table`, 4 seeds, bit/s without (`ION_JAM=0`) and with:
+
+| Rig | Without | With |
+|---|---:|---:|
+| none | 6124 | 6124 |
+| SSB 300–2700 Hz, order 4 | 6076 | 6076 |
+| SSB 300–2700 Hz, order 8 | 4356 | 5473 |
+| SSB 400–2600 Hz, order 8 | 5059 | 4404 |
+| Carriers, −30 dB | 2786 | 5326 |
+| Carriers, −20 dB | 3270 | 3971 |
+| Carriers, −10 dB | 1277 | 1785 |
+
+The narrow filter's loss is three 64QAM bursts tried and lost where the
+echo it used to read (its edge carriers' noise) had kept the link a
+level lower. No carrier is judged so in `link_throughput_table`,
+`horrid_table` or `ionos_table`: all three print as before.
+
+Open: at −10 dB the SNR reported is +4 dB and the tone's leakage over
+the neighbouring carriers costs two thirds: a notch for steady carriers,
+learned while nothing is being received. And a sound card that drops
+1 ms every 3 s (`slip1`) leaves 1722 bit/s of 6124 (where in a burst
+the frames are lost was not traced).
+
+The waterfall spikes of the session were at the SunSDR, the side that
+read +11 to +16 dB where the other read +22 to +28: carriers in the
+band are a candidate for that reading, not for the far side's flags and
+losses. Not on the air yet.
+
 ## Channel report
 
 The receiving side measures every burst (`chan.rs`):
