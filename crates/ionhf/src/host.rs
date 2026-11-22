@@ -55,8 +55,9 @@
 //! `BW500` makes Ion a 500 Hz station until `BW2300` or `BW2750`, or
 //! until the client goes: calls go out and are answered in the narrow
 //! OFDM wave only, and every link is a 500 Hz one (`docs/link.md`, 500 Hz
-//! links). A link already up keeps its width. Nets and broadcasts are
-//! 2.45 kHz wide: `NET` and `BCAST OPEN` are `WRONG` meanwhile.
+//! links). A link already up keeps its width. Broadcasts go on the
+//! 500 Hz ladder too, to 500 Hz stations; a net is 2.45 kHz wide, and
+//! `NET` is `WRONG` meanwhile.
 //!
 //! `CLEANTXBUFFER` drops what has never been on air, as VARA's; what is
 //! on air unacknowledged (the limbo) still goes, and a VARA client's
@@ -863,7 +864,7 @@ impl Host {
                 None => self.say("WRONG"),
             },
             ["VERSION"] => self.say(&format!("VERSION IonHF {}", env!("CARGO_PKG_VERSION"))),
-            ["BCAST", "OPEN", ..] | ["NET", ..] if self.narrow_only => self.say("WRONG"),
+            ["NET", ..] if self.narrow_only => self.say("WRONG"),
             ["BCAST", "OPEN", rest @ ..] => {
                 self.bcast_client = true;
                 let name: Vec<&str> = rest.iter().take_while(|w| **w != "FROM").copied().collect();
@@ -1778,7 +1779,7 @@ mod tests {
     }
 
     /// BW500 makes Ion a 500 Hz station until a wide mode is asked for or
-    /// the client goes; nets and broadcasts are refused meanwhile.
+    /// the client goes; nets are refused meanwhile.
     #[test]
     fn bw500_makes_a_500_hz_station() {
         fn widths(rx: &Receiver<IonCmd>) -> Vec<bool> {
@@ -1796,8 +1797,8 @@ mod tests {
         );
         assert_eq!(widths(&rx), [true]);
         assert_eq!(
-            lines(&mut h, &["NET OPEN TNARES", "BCAST OPEN RAGTIME", "CONNECT N0ABC LOOP"]),
-            ["WRONG", "WRONG", "OK"]
+            lines(&mut h, &["NET OPEN TNARES", "CONNECT N0ABC LOOP"]),
+            ["WRONG", "OK"]
         );
         assert_eq!(lines(&mut h, &["ABORT", "BW2750", "BW500"]), ["OK"; 3]);
         assert_eq!(widths(&rx), [false, true]);

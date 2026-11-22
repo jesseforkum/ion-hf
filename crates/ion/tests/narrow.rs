@@ -41,6 +41,13 @@ fn link(profile: Profile, snr: f32, steps: &[(f64, f32)], bw500: [bool; 2], seed
     let mk = |call: &str, narrow: bool| {
         let mut c = Config::new(call);
         c.bw500 = narrow;
+        // ION_NEWGEAR=0: without the gear rules of 2026-11-21, to compare.
+        if std::env::var("ION_NEWGEAR").is_ok_and(|v| v == "0") {
+            c.doubt_db = None;
+            c.aim_fall_db = None;
+            c.loss_step_db = None;
+            c.class_soft = false;
+        }
         Station::new(c, air.clone())
     };
     let a = mk("N0ABC", bw500[0]);
@@ -185,9 +192,14 @@ fn narrow_throughput_table() {
     let narrow = env("ION_WIDE", 0) == 0;
     println!("| SNR | AWGN bit/s | CCIR poor bit/s | levels (first seed, poor) |");
     println!("|---:|---:|---:|---|");
-    for snr in [
-        -18.0f32, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0, 15.0, 20.0, 25.0,
-    ] {
+    // `ION_SNRS` (e.g. `-6,-3,0`) picks the rows.
+    let snrs: Vec<f32> = match std::env::var("ION_SNRS") {
+        Ok(v) => v.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
+        Err(_) => vec![
+            -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0, 15.0, 20.0, 25.0,
+        ],
+    };
+    for snr in snrs {
         let mut cells = Vec::new();
         let mut lv = String::new();
         for profile in [Profile::Awgn, Profile::CcirPoor] {

@@ -36,15 +36,22 @@ impl Station {
                     self.clear_wait();
                     self.agree(self.cfg.compress && compress);
                     self.caps = self.own_caps() & caps;
-                    self.aim_db = Some(snr_db - self.air_db(self.floor()));
+                    // The peer measured our call: in the floor waveform, or
+                    // a 500 Hz call's OFDM.
+                    let called = if self.last_tx_wave == crate::level::NARROW_WAVE {
+                        crate::level::NARROW_OFDM
+                    } else {
+                        self.floor()
+                    };
+                    self.aim_db = Some(snr_db - self.air_db(called));
                     self.peer_class = class;
                     self.peer_slot = slot;
-                    self.target = self.level_for(snr_db - self.air_db(self.floor()));
+                    self.target = self.level_for(snr_db - self.air_db(called));
                     // Start where the report allows, less a margin, and
                     // step down on a loss (`Config::start_margin_db`).
                     self.level = match self.cfg.start_margin_db {
                         Some(m) => self.usable_below(
-                            self.level_for(snr_db - self.air_db(self.floor()) - m)
+                            self.level_for(snr_db - self.air_db(called) - m)
                                 .min(self.target)
                                 .min(self.level_cap()),
                             now,

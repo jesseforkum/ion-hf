@@ -27,6 +27,11 @@ const GOODPUT_REACH_DB: f32 = 2.0;
 
 /// Echo a waveform takes in its stride, ms (MFSK: its long symbols; only
 /// OFDM channel failures compare guards).
+/// Longest data burst in the 500 Hz link's MFSK, seconds: 5 times
+/// `max_burst_s`, as the waveform is 5 times slower (a burst's fixed part
+/// alone is 6.7 s, and its ACK 5.6 s).
+const MFSK500_BURST_S: f64 = 40.0;
+
 fn guard_ms(w: Wave) -> f32 {
     match w {
         Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => 0.0,
@@ -37,7 +42,15 @@ fn guard_ms(w: Wave) -> f32 {
 
 impl Station {
     pub(super) fn on_ack(&mut self, burst: u8, bitmap: u64, stored: bool, snr_db: f32, now: f64) {
-        let aim = self.aim_snr(snr_db - self.air_db(self.level));
+        if self.class_passed != Some(self.peer_class) {
+            self.class_passed = None;
+        }
+        let mut aim = self.aim_snr(snr_db - self.air_db(self.level));
+        // One report does not take the link from the top to the floor:
+        // the aim falls by so much an ACK at most (`Config::aim_fall_db`).
+        if let (Some(fall), Some(before)) = (self.cfg.aim_fall_db, self.aim_db) {
+            aim = aim.max(before - fall);
+        }
         self.aim_db = Some(aim);
         if aim >= super::qrm::SEARCH_AIM_DB {
             self.good_aim_at = now;
@@ -84,6 +97,7 @@ impl Station {
         self.success_at[at] = now;
         if self.cfg.gear == Gear::Goodput {
             if loss > 0.99 {
+                self.lost_run = self.lost_run.saturating_add(1);
                 self.fails[at] = self.fails[at].saturating_add(1);
                 self.stats.failed_bursts += 1;
                 if matches!(LADDER[at].wave, Wave::Ofdm(_)) {
@@ -92,10 +106,43 @@ impl Station {
                         self.channel_failed(at, now);
                     }
                 }
-            } else if loss == 0.0 {
-                self.fails[at] = 0;
+                if self.lost_run >= 2 {
+                    self.class_passed = None;
+                }
+            } else {
+                self.lost_run = 0;
+                if loss == 0.0 {
+                    self.fails[at] = 0;
+                    // `Config::class_soft`: this burst is the one the class
+                    // was read from.
+                    if self.class_against(at) {
+                        self.class_passed = Some(self.peer_class);
+                    }
+                }
             }
             self.level = self.pick_by_goodput(aim, now);
+            let step = self
+                .cfg
+                .loss_step_db
+                .filter(|_| loss > 0.99 && self.cfg.pin_level.is_none());
+            if let Some(step) = step {
+                if self.lost_run == 1 {
+                    // One burst lost: once more at its level, if the
+                    // report still allows it.
+                    if aim + self.air_db(at) >= self.threshold(at) + self.margin() && self.family_ok(at) {
+                        self.level = at;
+                    }
+                } else {
+                    // A ceiling under the level that failed, lower each
+                    // further loss.
+                    let ceiling = self.threshold(at) - step * (self.lost_run - 1) as f32;
+                    let top = (self.floor()..=at)
+                        .rev()
+                        .find(|&l| self.family_ok(l) && self.threshold(l) <= ceiling)
+                        .unwrap_or(self.floor());
+                    self.level = self.level.min(top);
+                }
+            }
             self.adapt_burst(at, loss, snr_db);
             self.last_burst.clear();
             return;
@@ -260,7 +307,12 @@ impl Station {
         let one = self.data_s(l, frame_bits(l, 1), cue);
         let frame = self.data_s(l, frame_bits(l, 2), cue) - one;
         let fixed = one - frame;
-        let frames = ((self.cfg.max_burst_s - fixed) / frame.max(1e-3)).floor().max(1.0);
+        let max_s = if lv.wave == Wave::Mfsk500 {
+            MFSK500_BURST_S
+        } else {
+            self.cfg.max_burst_s
+        };
+        let frames = ((max_s - fixed) / frame.max(1e-3)).floor().max(1.0);
         let burst = self.data_s(l, frame_bits(l, frames as usize), cue);
         frames * (lv.frame_bytes() * 8) as f64 / burst.max(1e-3)
     }
@@ -340,8 +392,12 @@ impl Station {
 
     /// Mean power of level `l` on the air against the carrier, dB, as
     /// the gear shift counts it (0 without `power_aware`).
+    ///
+    /// A 500 Hz link always counts it: its MFSK is at the carriers' level
+    /// and its OFDM 3 to 7 dB under, so a report from the one would aim
+    /// the other that much too high.
     pub(super) fn air_db(&self, l: usize) -> f32 {
-        if self.cfg.power_aware {
+        if self.cfg.power_aware || self.link500 {
             let table = if crate::phy::td_clip_on() {
                 &crate::level::AIR_MEAN_TD_DB
             } else {
@@ -419,11 +475,20 @@ impl Station {
         if !self.cfg.pick_family || self.link500 {
             return true;
         }
+        // `Config::class_soft`: not while a burst in a waveform the class
+        // rules out has come through whole under that same class (a
+        // filter's edge or a receiver's AGC reads as an echo or as fading
+        // on a path that has neither).
+        !self.class_against(l) || self.cfg.class_soft && self.class_passed == Some(self.peer_class)
+    }
+
+    /// The peer's channel class speaks against level `l`'s waveform.
+    fn class_against(&self, l: usize) -> bool {
         let c = self.peer_class;
         match LADDER[l].wave {
-            Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => true,
-            Wave::Ofdm(Guard::Long) => !c.doppler,
-            Wave::Ofdm(_) => !c.doppler && !c.echo,
+            Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => false,
+            Wave::Ofdm(Guard::Long) => c.doppler,
+            Wave::Ofdm(_) => c.doppler || c.echo,
         }
     }
 
@@ -431,6 +496,9 @@ impl Station {
     /// `burst_adapt` what the run of clean bursts has earned, up to
     /// [`Self::clean_burst_s`].
     pub(super) fn burst_len_s(&self, level: usize) -> f64 {
+        if LADDER[level].wave == Wave::Mfsk500 {
+            return MFSK500_BURST_S;
+        }
         let s = if self.cfg.burst_adapt {
             self.burst_s.min(self.clean_burst_s(level))
         } else {

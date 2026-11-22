@@ -41,23 +41,24 @@ pub(super) fn wiped_below_db(c: Constellation) -> f32 {
     }
 }
 
+/// `Config::class_soft`: a data burst shorter than this adds no delay or
+/// Doppler to the channel class, seconds.
+pub(super) const SHORT_CLASS_S: f64 = 1.0;
+
 /// Data bursts a poll turns `cheap_ack_margin_db` off for.
 pub(super) const CHEAP_ACK_OFF_BURSTS: u8 = 8;
 
 impl Station {
     pub(super) fn receiver_rx(&mut self, inc: &Incoming, tiny: Option<Tiny>, frames: &[Option<Frame>], now: f64) {
-        self.note_rx_channel(inc);
+        // A data burst's measurement waits until it is known what the
+        // burst delivered.
+        let before_snr = self.last_rx_snr;
         if inc.code >= LADDER.len() {
+            self.note_rx_channel(inc);
             self.qrm_watch(inc, None, tiny == Some(Tiny::Poll), now);
             self.rx_slot = self.wanted_slot(inc.slot);
         }
         if inc.code < LADDER.len() {
-            let c = inc.chan;
-            self.stats.heard.push((
-                inc.code,
-                [c.delay_ms, c.doppler_hz, c.eff_snr_db, inc.snr_db],
-                self.chan.class(),
-            ));
             self.rx_level = inc.code;
             self.last_progress = now;
             self.last_data = now;
@@ -132,6 +133,36 @@ impl Station {
             // Frames lost after HARQ: what the QRM watch counts.
             let n = frames.len().clamp(1, 64);
             let loss = 1.0 - (bitmap & (u64::MAX >> (64 - n))).count_ones() as f32 / n as f32;
+            // A burst that delivered nothing and reads far under the last
+            // one was cut short or wiped (a receiver not yet back from
+            // its own transmission, a static crash): the reading is of
+            // what was not there, and reported it sends the peer to the
+            // floor (and its Doppler, to MFSK). One such burst is passed
+            // over; a second in a row is believed.
+            let doubt =
+                loss >= 1.0 && !self.rx_doubted && self.cfg.doubt_db.is_some_and(|d| inc.snr_db < before_snr - d);
+            self.rx_doubted = doubt;
+            if doubt {
+                self.stats.doubted += 1;
+            } else if self.cfg.class_soft
+                && self
+                    .air
+                    .duration(inc.wave, inc.code, super::frame_bits(inc.code, frames.len()))
+                    < SHORT_CLASS_S
+            {
+                let mut short = inc.clone();
+                short.chan.delay_ms = f32::NAN;
+                short.chan.doppler_hz = f32::NAN;
+                self.note_rx_channel(&short);
+            } else {
+                self.note_rx_channel(inc);
+            }
+            let c = inc.chan;
+            self.stats.heard.push((
+                inc.code,
+                [c.delay_ms, c.doppler_hz, c.eff_snr_db, inc.snr_db],
+                self.chan.class(),
+            ));
             self.qrm_watch(inc, Some(loss), false, now);
             self.rx_slot = self.wanted_slot(inc.slot);
             self.last_ack = (user_hi(inc.user) & 3, bitmap, frames.len(), stored);

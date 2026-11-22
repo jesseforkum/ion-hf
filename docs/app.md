@@ -59,6 +59,11 @@ release build started without a terminal):
 **Portable:** with an `ionhf.toml` (even an empty one) next to the program,
 Ion keeps everything in that folder instead.
 
+`auto_narrow` (no screen of its own; `false` by default) lets a link
+narrow itself to a slice when part of the passband looks like QRM
+([link.md](link.md), Narrowing for QRM). Off for now: on real radios it
+narrowed clean links, whose slices then did worse than the full band.
+
 `gear` (no screen of its own) is how the sending side picks each data
 burst's level: `"goodput"` (the default) by expected throughput,
 `"ladder"` up and down the ladder as Ion HF 0.1.0-alpha.4 did, for an A/B
@@ -291,9 +296,11 @@ bursts in that waveform raise it as well; noise does not
 `BW2750`, or until the client goes: its calls go out in the narrow OFDM
 wave, only such calls are answered, and every burst of the link is in
 that wave or the lifeline ([link.md](link.md), 500 Hz links). A link
-already up keeps its width. Nets and broadcasts are 2.45 kHz wide, so
-`NET` and `BCAST OPEN` are `WRONG` meanwhile, and `BW500` is `WRONG`
-while a net is up.
+already up keeps its width. Broadcasts go on the 500 Hz ladder as well
+(from its first OFDM level until a station is heard), and only 500 Hz
+stations hear them. A net is 2.45 kHz wide, so `NET` is `WRONG`
+meanwhile, and `BW500` is `WRONG` while a net is up. Ragtime's **500 Hz**
+switch sends `BW500` and `BW2300`.
 
 Where Ion differs from Data2G, and why:
 

@@ -33,6 +33,10 @@ pub struct Config {
     pub clipper: Clipper,
     /// Offer the stream gear (`ion::link::frame::caps::STREAM`); off: plain ARQ.
     pub stream: bool,
+    /// Narrow the link to a slice by itself when part of the passband
+    /// looks like QRM (`ion::link::Config::qrm_narrow`). Off for now: on
+    /// real radios it has narrowed clean links (2026-11-21).
+    pub auto_narrow: bool,
     /// Key a CW ID at the end of every link and every 9.5 minutes of one.
     pub cw_id: bool,
     /// Draw the waterfall.
@@ -63,6 +67,7 @@ impl Default for Config {
             gear: Gear::Goodput,
             clipper: Clipper::Classic,
             stream: true,
+            auto_narrow: false,
             cw_id: true,
             waterfall: true,
             host_enabled: false,

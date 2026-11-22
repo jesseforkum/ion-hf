@@ -181,6 +181,9 @@ pub fn cobs_decode(data: &[u8]) -> Option<Vec<u8>> {
 
 pub struct BcastStation {
     cfg: BcastConfig,
+    /// A 500 Hz station's broadcasts go at the 500 Hz ladder's levels
+    /// ([`BcastStation::set_bw500`]).
+    bw500: bool,
     air: Arc<dyn Air>,
     rng: NoiseGen,
     harq: HarqRx,
@@ -222,11 +225,26 @@ impl BcastStation {
             slot_at: 0.0,
             events: Vec::new(),
             stats: BcastStats::default(),
+            bw500: false,
         }
     }
 
     pub fn set_call(&mut self, call: &str) {
         self.cfg.call = call.trim().to_ascii_uppercase();
+    }
+
+    /// Nothing goes out before `t`, and what waits then takes its slot by
+    /// persistence, as after a busy channel: for the end of a link, when
+    /// both stations are free at the same moment.
+    pub fn hold_until(&mut self, t: f64) {
+        self.tx_at = self.tx_at.max(t);
+        self.waited = true;
+    }
+
+    /// A 500 Hz station: its broadcasts use the 500 Hz ladder, and only
+    /// 500 Hz stations hear them.
+    pub fn set_bw500(&mut self, on: bool) {
+        self.bw500 = on;
     }
 
     /// Opens a group; returns its number for [`BcastStation::send`] and the
@@ -330,13 +348,23 @@ impl BcastStation {
             .iter()
             .filter(|(k, h)| k.0 == group && now - h.1 <= self.cfg.heard_s)
             .map(|(_, h)| {
-                (0..self.cfg.thresholds_db.len().min(crate::level::WIDE_LEVELS))
+                let (from, to) = if self.bw500 {
+                    (crate::level::NARROW_FLOOR, LADDER.len())
+                } else {
+                    (0, crate::level::WIDE_LEVELS)
+                };
+                (from..self.cfg.thresholds_db.len().min(to))
                     .rev()
                     .find(|&l| h.0 >= self.cfg.thresholds_db[l] + self.cfg.margin_db)
-                    .unwrap_or(0)
+                    .unwrap_or(from)
             })
             .min()
-            .unwrap_or(self.cfg.fallback_level)
+            // (The 500 Hz ladder's: its first OFDM level.)
+            .unwrap_or(if self.bw500 {
+                crate::level::NARROW_OFDM
+            } else {
+                self.cfg.fallback_level
+            })
     }
 
     /// The burst's byte stream: header, then each frame COBS-encoded and
@@ -606,6 +634,28 @@ mod tests {
             assert!(!e.contains(&0), "{d:?}");
             assert_eq!(cobs_decode(&e), Some(d.clone()));
         }
+    }
+
+    /// After a link nothing goes before the hold is over, and a 500 Hz
+    /// station's burst is on the 500 Hz ladder.
+    #[test]
+    fn held_bursts_wait_and_a_500_hz_station_sends_narrow() {
+        let air: Arc<dyn Air> = Arc::new(crate::link::audio::PhyAir);
+        let mut cfg = BcastConfig::new("N0ABC");
+        cfg.persistence = 255;
+        let mut b = BcastStation::new(cfg, air);
+        let g = b.open("RAGTIME");
+        assert!(b.send(g, b"hello", None));
+        b.hold_until(10.0);
+        assert!(b.poll_tx(5.0).is_none() && b.poll_tx(9.9).is_none());
+        let wide = b.poll_tx(10.0).expect("a burst once the hold is over");
+        assert!(!crate::level::is_narrow(wide.code));
+        b.on_tx_done(12.0);
+        b.set_bw500(true);
+        assert!(b.send(g, b"hello again", None));
+        let narrow = b.poll_tx(20.0).expect("a burst");
+        assert_eq!(narrow.code, crate::level::NARROW_OFDM);
+        assert_eq!(narrow.wave, crate::level::NARROW_WAVE);
     }
 
     fn chunked(s: &[u8], chunk: usize) -> BTreeMap<u32, Vec<u8>> {

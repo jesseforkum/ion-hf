@@ -109,6 +109,26 @@ fn audio_pair_with(profile: Profile, snr_db: f32, seed: u64, edit: impl Fn(&mut 
     let air: Arc<dyn Air> = Arc::new(PhyAir);
     let tune = |mut c: ion::link::Config| {
         edit(&mut c);
+        // ION_NEWGEAR=0: without the rules of 2026-11-21 (`doubt_db`,
+        // `aim_fall_db`, `loss_step_db`, `class_soft`), to compare.
+        if std::env::var("ION_NEWGEAR").is_ok_and(|v| v == "0") {
+            c.doubt_db = None;
+            c.aim_fall_db = None;
+            c.loss_step_db = None;
+            c.class_soft = false;
+        }
+        // ION_GEAR_OFF=doubt,fall,step,class: without those of the rules.
+        if let Ok(v) = std::env::var("ION_GEAR_OFF") {
+            for k in v.split(',') {
+                match k {
+                    "doubt" => c.doubt_db = None,
+                    "fall" => c.aim_fall_db = None,
+                    "step" => c.loss_step_db = None,
+                    "class" => c.class_soft = false,
+                    _ => panic!("ION_GEAR_OFF: {k}"),
+                }
+            }
+        }
         // Tuning knobs for the throughput table.
         if let Ok(v) = std::env::var("ION_BURST") {
             c.max_burst_s = v.parse().unwrap();

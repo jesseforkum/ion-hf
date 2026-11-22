@@ -152,6 +152,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         let _ = cmds.send(IonCmd::SetStream(cfg.stream));
+        let _ = cmds.send(IonCmd::SetAutoNarrow(cfg.auto_narrow));
         let _ = cmds.send(IonCmd::SetCwId(cfg.cw_id));
         let _ = cmds.send(IonCmd::NetStore(Some(Config::dir().join("nets").join("objects"))));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {

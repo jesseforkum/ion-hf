@@ -1387,7 +1387,14 @@ pub struct AudioMedium {
     sent_to: [f64; 2],
     /// QRM each side hears, dB over a steady tone at our peak.
     qrm: [Vec<(Qrm, f32)>; 2],
+    /// What each station's transmitter does to its audio (filter, ALC).
+    pub tx_rig: [Option<Rig>; 2],
+    /// What each station's receiver does to what it hears (filter, AGC).
+    pub rx_rig: [Option<Rig>; 2],
 }
+
+/// A radio's part in the audio path, in place.
+pub type Rig = Box<dyn FnMut(&mut [f32])>;
 
 /// With QRM, the receivers also hear up to this much of the silence
 /// before each burst (noise and the QRM), so the slot meter sees it.
@@ -1410,6 +1417,8 @@ impl AudioMedium {
             heard_to: [0.0; 2],
             sent_to: [0.0; 2],
             qrm: [Vec::new(), Vec::new()],
+            tx_rig: [None, None],
+            rx_rig: [None, None],
         }
     }
 
@@ -1445,6 +1454,8 @@ impl AudioMedium {
             heard_to: [0.0; 2],
             sent_to: [0.0; 2],
             qrm: [Vec::new(), Vec::new()],
+            tx_rig: [None, None],
+            rx_rig: [None, None],
         }
     }
 
@@ -1514,13 +1525,16 @@ impl Medium for AudioMedium {
             return self.carry_tones(from, burst, snr_db);
         }
         let on_air = matches!(self.paths, Paths::Ionos(_, ionos::Reference::Peak));
-        let tx = if on_air {
+        let mut tx = if on_air {
             transmit_with(burst, ofdm_gain(OFDM_AIR_GAIN_DB))
         } else {
             transmit(burst)
         };
         if tx.is_empty() {
             return None;
+        }
+        if let Some(rig) = &mut self.tx_rig[from] {
+            rig(&mut tx);
         }
         // S:N is the burst's own: a cue in front of it does not move the
         // reference.
@@ -1603,6 +1617,9 @@ impl Medium for AudioMedium {
         let clock = self.receivers[to].clock();
         for (q, db) in &mut self.qrm[to] {
             q.add(&mut out, clock, peak * 10f32.powf(*db / 10.0));
+        }
+        if let Some(rig) = &mut self.rx_rig[to] {
+            rig(&mut out);
         }
         self.heard.clear();
         self.receivers[1 - from].process(&out, &mut self.heard);

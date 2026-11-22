@@ -401,6 +401,9 @@ pub struct Stats {
     /// width guard (`Station::keep_width`).
     pub width_fixed: u32,
     pub width_dropped: u32,
+    /// Data bursts whose measurement the receiving side passed over: they
+    /// delivered nothing and read far under the burst before.
+    pub doubted: u32,
 }
 
 /// One slot of a data burst sent.
@@ -534,6 +537,12 @@ pub struct Station {
     /// than its own (see [`Station::usable`]).
     blocked_until: [f64; LADDER.len()],
     hold_all: [bool; LADDER.len()],
+    /// Data bursts lost whole in a row (`Config::loss_step_db`).
+    lost_run: u8,
+    /// `Config::class_soft`: the peer's channel class under which a burst
+    /// came through whole in a waveform that class speaks against, until
+    /// two bursts in a row are lost.
+    class_passed: Option<ChanClass>,
     burst_id: u8,
     /// The burst number the peer last showed it heard. A new burst never
     /// takes it: numbers are 2 bits, and a poll is answered with the ACK of
@@ -609,6 +618,9 @@ pub struct Station {
     chan: ChanTrack,
     /// Effective SNR of the last burst heard.
     last_rx_eff: f32,
+    /// The last data burst's measurement was passed over
+    /// (`Config::doubt_db`).
+    rx_doubted: bool,
     delivered: u32,
     rx_pending: BTreeMap<u32, Vec<u8>>,
     inbox: Vec<u8>,
@@ -704,6 +716,8 @@ impl Station {
             aim_db: None,
             blocked_until: [f64::NEG_INFINITY; LADDER.len()],
             hold_all: [true; LADDER.len()],
+            lost_run: 0,
+            class_passed: None,
             burst_id: 0,
             peer_heard: None,
             burst_s,
@@ -737,6 +751,7 @@ impl Station {
             narrow_repeat: std::cell::Cell::new(0),
             chan: ChanTrack::default(),
             last_rx_eff: 0.0,
+            rx_doubted: false,
             delivered: 0,
             rx_pending: BTreeMap::new(),
             inbox: Vec::new(),
@@ -1375,6 +1390,12 @@ impl Station {
         }
     }
 
+    /// Whether the receiving side narrows the link by itself for QRM
+    /// ([`Config::qrm_narrow`]); for a station with no link up.
+    pub fn set_qrm_narrow(&mut self, on: bool) {
+        self.cfg.qrm_narrow = on;
+    }
+
     /// Keep the link to the slice levels, both ways ([`Config::narrow`]),
     /// from the next burst and ACK on.
     pub fn set_narrow(&mut self, on: bool) {
@@ -1645,6 +1666,8 @@ impl Station {
         self.blocked_until = [f64::NEG_INFINITY; LADDER.len()];
         self.hold_all = [true; LADDER.len()];
         self.rx_level = self.floor();
+        self.lost_run = 0;
+        self.class_passed = None;
         self.burst_id = 0;
         self.peer_heard = None;
         // Compression is agreed afresh on each connection; data queued

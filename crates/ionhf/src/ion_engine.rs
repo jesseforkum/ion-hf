@@ -28,6 +28,10 @@ const ID_EVERY_S: f64 = 570.0;
 const BCAST_ID_HOLD_S: f64 = 10.0;
 /// From the end of the closing station's CW ID to the start of ours.
 const ID_GAP_S: f64 = 1.5;
+/// After a link the station that did not close it holds its broadcasts
+/// this much longer than the one that did, seconds: long enough to hear
+/// the other's burst begin.
+const BCAST_AFTER_LINK_S: f64 = 4.0;
 /// In a net, past [`ID_EVERY_S`]: how long net control waits for a burst
 /// of its own that nobody answers before it takes any gap for its ID.
 const NET_ID_GRACE_S: f64 = 20.0;
@@ -80,6 +84,8 @@ pub enum IonCmd {
     /// Offer the stream gear, from the next link on (at once while none
     /// is up).
     SetStream(bool),
+    /// Whether a link narrows itself for QRM (`Config::auto_narrow`).
+    SetAutoNarrow(bool),
     /// A Winlink host interface takes the link's received bytes and status
     /// (`None`: it has gone).
     AttachHost(Option<Sender<crate::host::HostIn>>),
@@ -425,6 +431,7 @@ struct Worker {
     plot: bool,
     slice_pick: Option<u8>,
     narrow: bool,
+    auto_narrow: bool,
     bw500: bool,
     /// The stream was on at the last look (for the log).
     streaming: bool,
@@ -485,6 +492,7 @@ impl Worker {
             plot: false,
             slice_pick: None,
             narrow: false,
+            auto_narrow: false,
             bw500: false,
             streaming: false,
             bcast_sent: Vec::new(),
@@ -559,7 +567,18 @@ impl Worker {
 
     /// The link has ended: our CW ID, now if we closed it (or it failed),
     /// else once the peer's own ID is over.
+    ///
+    /// Broadcasts wait for both IDs (a station sending its ID does not hear
+    /// the other's broadcast, and would start its own on top of it), and
+    /// the two stations do not start together: the one that closed the
+    /// link goes first, the other [`BCAST_AFTER_LINK_S`] later, by when it
+    /// hears the first.
     fn schedule_id(&mut self, now: f64, peer: &str) {
+        if !peer.is_empty() {
+            let ids = id_secs(&self.call) + id_secs(peer) + 2.0 * ID_GAP_S + 2.0 * DEFAULT_LEAD_S;
+            let turn = if self.closing { 0.0 } else { BCAST_AFTER_LINK_S };
+            self.bcast.hold_until(now + ids + turn);
+        }
         if !self.keyed_since_id || self.id_due.is_some() {
             return;
         }
@@ -600,6 +619,7 @@ impl Worker {
         self.node.set_own_id(self.cw_id);
         self.node.station_mut().set_slot_pick(self.slice_pick);
         self.node.station_mut().set_narrow(self.narrow);
+        self.node.station_mut().set_qrm_narrow(self.auto_narrow);
         self.node.set_bw500(self.bw500);
         self.connected_at = None;
         self.closing = false;
@@ -1038,6 +1058,10 @@ impl Worker {
                 self.stream = on;
                 self.refresh_idle();
             }
+            IonCmd::SetAutoNarrow(on) => {
+                self.auto_narrow = on;
+                self.refresh_idle();
+            }
             net => self.net_command(net),
         }
     }
@@ -1252,10 +1276,12 @@ impl Worker {
             let hold_tx = self.id_on_air || id_waiting;
             // Broadcast only between sessions, as Data2G's host, and
             // never in a net.
-            // (Nor from a 500 Hz station: a broadcast is 2.45 kHz wide.)
+            // A 500 Hz station broadcasts on its own ladder, once its
+            // receivers are the 500 Hz ones.
+            self.bcast.set_bw500(self.bw500);
             if !hold_tx
                 && link_idle
-                && !self.bw500
+                && self.node.bw500() == self.bw500
                 && self.net.is_none()
                 && !self.bcast_on_air
                 && !self.node.on_air()
