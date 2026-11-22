@@ -147,6 +147,33 @@ pub struct Config {
     /// Keep the link to the slice levels both ways: ours, and the peer's
     /// through our ACKs ([`crate::link::report::ChanReport::narrow`]).
     pub narrow: bool,
+    /// The most the SNR aimed by falls from one ACK to the next, dB: a
+    /// path that has really gone takes a burst or two more to follow down,
+    /// and one wild report (a burst cut short, a static crash) costs a few
+    /// levels, not the whole ladder. `None`: the report as it comes.
+    pub aim_fall_db: Option<f32>,
+    /// Receiving side: a data burst that delivered nothing and read this
+    /// far under the last burst heard is passed over once (its SNR and
+    /// its class are of what was not there), dB. `None`: every burst
+    /// counts.
+    pub doubt_db: Option<f32>,
+    /// [`super::Gear::Goodput`], after Data2G's ladder rule: a data burst
+    /// lost whole is sent once more at its level if the report still
+    /// allows it, and from the second loss in a row the level is at most
+    /// this many dB (in thresholds) under the one that failed, a step more
+    /// each further loss. `None`: the pick as it comes.
+    pub loss_step_db: Option<f32>,
+    /// The peer's channel class (echo, fast fading) does not rule a
+    /// waveform out once a burst in such a waveform has come through whole
+    /// under that class, until two in a row are lost; and the
+    /// receiving side takes no delay or Doppler from a data burst shorter
+    /// than `station::receiver::SHORT_CLASS_S` (filters and a receiver's
+    /// AGC read as both on a burst that short).
+    pub class_soft: bool,
+    /// A 500 Hz station (FCC §97.221(c)): calls go out in the narrow OFDM
+    /// wave and only such calls are answered, so every link is a 500 Hz
+    /// one.
+    pub bw500: bool,
     /// Narrow the link by itself when QRM over part of the passband stops
     /// it (`station::qrm`).
     pub qrm_narrow: bool,
@@ -278,7 +305,7 @@ impl Config {
             max_burst_s: 8.0,
             thresholds_db: crate::level::thresholds_db(),
             margin_db: -1.0,
-            max_level: LADDER.len() - 1,
+            max_level: crate::level::WIDE_LEVELS - 1,
             retries: 6,
             call_tries: CALL_TRIES,
             disc_retries: 3,
@@ -312,6 +339,11 @@ impl Config {
             slice_slots: true,
             slot_pick: None,
             narrow: false,
+            aim_fall_db: Some(12.0),
+            doubt_db: Some(10.0),
+            loss_step_db: Some(3.0),
+            class_soft: true,
+            bw500: false,
             qrm_narrow: true,
             qrm_clear_s: super::qrm::CLEAR_S,
             narrow_burst_s: None,

@@ -221,6 +221,8 @@ pub struct PhyRx {
     /// The burst under way was taken on its cue alone (its preamble
     /// check failed): its delay and Doppler measurements are not reported.
     weak_sync: bool,
+    /// `demod::JAM_RATIO`'s rule is in force.
+    jam_watch: bool,
     /// Headers the link expects, and each one's header and code sequence
     /// (±1 per coded bit).
     expected: Vec<ExpectedHeader>,
@@ -387,6 +389,7 @@ impl PhyRx {
             cue: None,
             cue_n_pk: 0,
             weak_sync: false,
+            jam_watch: std::env::var_os("ION_JAM").is_none_or(|v| v != "0"),
             expected: Vec::new(),
             hyps: Vec::new(),
             hyp_margin: HYP_MARGIN,

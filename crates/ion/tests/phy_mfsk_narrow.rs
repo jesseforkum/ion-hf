@@ -159,6 +159,8 @@ fn wave_by_name(name: &str) -> Option<Wave> {
         "r0" => mfsk(1, R0, 1, false, 1500.0),
         "r1" => mfsk(1, R1, 1, false, 1500.0),
         "sixth" => Wave::Sixth,
+        "r1k5" => mfsk(5, R1, 1, false, 1500.0),
+        "r0k5" => mfsk(5, R0, 1, false, 1500.0),
         "r1k6" => mfsk(6, R1, 1, false, 1300.0),
         "r1k7" => mfsk(7, R1, 1, false, 1300.0),
         "r1k8" => mfsk(8, R1, 1, false, 1300.0),
@@ -560,7 +562,7 @@ fn diag_full_band_hash() {
 fn narrow_numbers() {
     let carrier = TX_LEVEL * TX_LEVEL / 2.0;
     for name in [
-        "r0", "r1", "r1k6", "r1k7", "r1k8", "r0k8", "r0k2", "r1k2", "r0x2", "r0x4e",
+        "r0", "r1", "r1k5", "r0k5", "r1k6", "r1k7", "r1k8", "r0k8", "r0k2", "r1k2", "r0x2", "r0x4e",
     ] {
         let Some(Wave::Mfsk { layout, mode, rep, .. }) = wave_by_name(name) else {
             continue;

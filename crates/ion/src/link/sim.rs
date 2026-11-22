@@ -82,11 +82,12 @@ impl Air for ModelAir {
                 let i = (m != MfskMode::R0) as usize;
                 self.mfsk_overhead_s[i] + coded_bits as f64 / self.mfsk_bps[i]
             }
+            Wave::Mfsk500 => 5.0 * (self.mfsk_overhead_s[1] + coded_bits as f64 / self.mfsk_bps[1]),
             Wave::Ofdm(g) => {
                 let f = match g {
                     Guard::Normal => 1.0,
                     Guard::Long => self.long_guard_factor,
-                    Guard::Slice => self.slice_factor,
+                    Guard::Slice | Guard::Narrow => self.slice_factor,
                 };
                 let symbols = (coded_bits as f64 / (self.ofdm_carriers * bits_per_sym) as f64).ceil();
                 f * (self.ofdm_overhead_s + symbols * self.ofdm_symbol_s)
@@ -102,11 +103,12 @@ pub fn control_threshold_db(wave: Wave) -> f32 {
     match wave {
         Wave::Mfsk(MfskMode::R0) => -12.0,
         Wave::Mfsk(MfskMode::R1) => -8.0,
-        Wave::Ofdm(Guard::Slice) => -6.0,
+        Wave::Ofdm(Guard::Slice | Guard::Narrow) => -6.0,
         Wave::Ofdm(Guard::Long) => -4.0,
         Wave::Ofdm(Guard::Normal) => -3.0,
         // Header-only R1/7 at 90% from -20 dB on AWGN, -18 on CCIR poor.
         Wave::Lifeline => -18.0,
+        Wave::Mfsk500 => -15.0,
     }
 }
 
@@ -458,9 +460,11 @@ pub fn level_name(l: usize) -> String {
         Wave::Mfsk(m) if lv.rate == Rate::R1_4 => format!("{m:?}"),
         Wave::Mfsk(m) => format!("{m:?} {r}"),
         Wave::Ofdm(Guard::Slice) => format!("slice {r}"),
+        Wave::Ofdm(Guard::Narrow) => format!("500 {:?} {r}", lv.constellation),
         Wave::Ofdm(Guard::Long) => format!("long {r}"),
         Wave::Ofdm(Guard::Normal) => format!("{:?} {r}", lv.constellation),
         Wave::Lifeline => "R1/7".into(),
+        Wave::Mfsk500 => format!("500 R1/5 {r}"),
     }
 }
 

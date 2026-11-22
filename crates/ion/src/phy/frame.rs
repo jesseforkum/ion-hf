@@ -473,6 +473,27 @@ pub const QUARTER: Layout = Layout {
     ..SLICE
 };
 
+/// Narrow: 475 Hz for 500 Hz channels, Sixth's spacing and CP on 19
+/// carriers (bins −9..9). Pilots as Sixth's (75 Hz × 100 ms); sparse
+/// 75 Hz × 150 ms. Constants derived from Sixth's, not tuned.
+pub const NARROW: Layout = Layout {
+    nc: 19,
+    robust: SLICE.robust,
+    sparse: Pattern {
+        step: 9,
+        shift: 3,
+        period: 3,
+    },
+    a_len: 1760,
+    hdr_syms: 12,
+    crc_data: 0x2E94,
+    crc_ho: 0x9B3D,
+    filter_cutoff: 272.0,
+    min_center_hz: 400.0,
+    sc_win: 1760 - 80 - RAMP - 80,
+    ..SIXTH
+};
+
 impl Layout {
     /// Whole OFDM symbol, samples.
     pub const fn sym(&self) -> usize {
@@ -922,7 +943,8 @@ pub fn qam64() -> Points {
 }
 
 /// Every layout, for the checks below and the tests.
-pub const LAYOUTS: [&Layout; 9] = [
+pub const LAYOUTS: [&Layout; 10] = [
+    &NARROW,
     &NORMAL,
     &LONG,
     &NORMAL_WIDE,

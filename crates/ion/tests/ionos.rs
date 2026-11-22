@@ -61,6 +61,14 @@ fn session(mode: Mode, paths: usize, reference: Reference, snr_db: f32, secs: f6
     let air: Arc<dyn Air> = Arc::new(PhyAir);
     let cfg = |call: &str| {
         let mut c = audio::config(call);
+        // ION_NEWGEAR=0: without the rules of 2026-11-21 (`doubt_db`,
+        // `aim_fall_db`, `loss_step_db`, `class_soft`), to compare.
+        if std::env::var("ION_NEWGEAR").is_ok_and(|v| v == "0") {
+            c.doubt_db = None;
+            c.aim_fall_db = None;
+            c.loss_step_db = None;
+            c.class_soft = false;
+        }
         if std::env::var("ION_SMOOTH").is_ok_and(|v| v == "0") {
             c.smooth_target = false;
         }

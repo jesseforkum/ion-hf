@@ -12,7 +12,10 @@ use super::harq::{self, HarqRx, Soft};
 use super::report::{ChanClass, ChanTrack};
 use crate::chan::ChannelMeas;
 use crate::fec;
-use crate::level::{FLOOR, FLOOR_WAVE, Guard, LADDER, Wave};
+use crate::level::{
+    FLOOR, FLOOR_WAVE, Guard, LADDER, NARROW_FLOOR, NARROW_MFSK_WAVE, NARROW_OFDM, NARROW_WAVE, WIDE_LEVELS, Wave,
+    is_narrow,
+};
 use crate::phy_mfsk::MfskMode;
 
 mod clean;
@@ -105,9 +108,9 @@ const SPEAK_UP_AGAIN_S: f64 = 10.0;
 fn wave_rank(w: Wave) -> usize {
     match w {
         Wave::Lifeline => 0,
-        Wave::Mfsk(MfskMode::R0) => 1,
+        Wave::Mfsk(MfskMode::R0) | Wave::Mfsk500 => 1,
         Wave::Mfsk(MfskMode::R1) => 2,
-        Wave::Ofdm(Guard::Slice) => 3,
+        Wave::Ofdm(Guard::Slice | Guard::Narrow) => 3,
         Wave::Ofdm(Guard::Long) => 4,
         Wave::Ofdm(Guard::Normal) => 5,
     }
@@ -118,6 +121,8 @@ fn wave_rank(w: Wave) -> usize {
 /// lifeline, whose messages are its own: only a hold sends in it.
 fn wave_down(w: Wave) -> Wave {
     match w {
+        // A 500 Hz link has its own MFSK below its OFDM.
+        NARROW_WAVE | NARROW_MFSK_WAVE => NARROW_MFSK_WAVE,
         Wave::Ofdm(Guard::Normal) => Wave::Ofdm(Guard::Long),
         Wave::Ofdm(_) => Wave::Mfsk(MfskMode::R1),
         _ => FLOOR_WAVE,
@@ -130,7 +135,7 @@ fn more_robust(a: Wave, b: Wave) -> Wave {
 
 /// The highest level whose waveform is no faster than `w`.
 fn top_level_in(w: Wave) -> usize {
-    (FLOOR..LADDER.len())
+    (FLOOR..WIDE_LEVELS)
         .rev()
         .find(|&l| wave_rank(LADDER[l].wave) <= wave_rank(w))
         .unwrap_or(FLOOR)
@@ -294,6 +299,8 @@ pub fn air_code(code: usize) -> u16 {
     match code {
         TINY => 14,
         CONTROL => 15,
+        l if is_narrow(l) && l < NARROW_OFDM => (l - NARROW_FLOOR) as u16,
+        l if is_narrow(l) => (l - NARROW_OFDM + 2) as u16,
         l if l < mfsk_levels() => l as u16,
         l => (l - mfsk_levels() + 2) as u16,
     }
@@ -306,6 +313,8 @@ pub fn user_code(wave: Wave, user: u16) -> usize {
         14 => TINY,
         15 => CONTROL,
         c => match wave {
+            NARROW_WAVE if c >= 2 => (NARROW_OFDM + c - 2).min(LADDER.len() - 1),
+            NARROW_MFSK_WAVE => (NARROW_FLOOR + c).min(NARROW_OFDM - 1),
             Wave::Ofdm(_) if c >= 2 => c + mfsk_levels() - 2,
             _ => c,
         },
@@ -388,6 +397,13 @@ pub struct Stats {
     pub hold_s: f64,
     pub probes: u32,
     pub knocks: u32,
+    /// 500 Hz link: bursts moved into its waveform, and not sent, by the
+    /// width guard (`Station::keep_width`).
+    pub width_fixed: u32,
+    pub width_dropped: u32,
+    /// Data bursts whose measurement the receiving side passed over: they
+    /// delivered nothing and read far under the burst before.
+    pub doubted: u32,
 }
 
 /// One slot of a data burst sent.
@@ -501,6 +517,10 @@ pub struct Station {
     level: usize,
     /// Highest level the peer's SNR report allows.
     target: usize,
+    /// This link is a 500 Hz one: its levels are the narrow ladder's and
+    /// everything it sends is in [`NARROW_WAVE`] or the lifeline. Set by
+    /// the call: ours with [`Config::bw500`], or the wave one came in.
+    link500: bool,
     /// Whole bursts lost at each level since it last got one through.
     fails: [u8; LADDER.len()],
     /// Each level's recent share of fresh frames delivered (EWMA, newest
@@ -517,6 +537,12 @@ pub struct Station {
     /// than its own (see [`Station::usable`]).
     blocked_until: [f64; LADDER.len()],
     hold_all: [bool; LADDER.len()],
+    /// Data bursts lost whole in a row (`Config::loss_step_db`).
+    lost_run: u8,
+    /// `Config::class_soft`: the peer's channel class under which a burst
+    /// came through whole in a waveform that class speaks against, until
+    /// two bursts in a row are lost.
+    class_passed: Option<ChanClass>,
     burst_id: u8,
     /// The burst number the peer last showed it heard. A new burst never
     /// takes it: numbers are 2 bits, and a poll is answered with the ACK of
@@ -592,6 +618,9 @@ pub struct Station {
     chan: ChanTrack,
     /// Effective SNR of the last burst heard.
     last_rx_eff: f32,
+    /// The last data burst's measurement was passed over
+    /// (`Config::doubt_db`).
+    rx_doubted: bool,
     delivered: u32,
     rx_pending: BTreeMap<u32, Vec<u8>>,
     inbox: Vec<u8>,
@@ -679,6 +708,7 @@ impl Station {
             inflight: BTreeMap::new(),
             level: FLOOR,
             target: FLOOR,
+            link500: false,
             fails: [0; LADDER.len()],
             success: [None; LADDER.len()],
             success_at: [f64::NEG_INFINITY; LADDER.len()],
@@ -686,6 +716,8 @@ impl Station {
             aim_db: None,
             blocked_until: [f64::NEG_INFINITY; LADDER.len()],
             hold_all: [true; LADDER.len()],
+            lost_run: 0,
+            class_passed: None,
             burst_id: 0,
             peer_heard: None,
             burst_s,
@@ -719,6 +751,7 @@ impl Station {
             narrow_repeat: std::cell::Cell::new(0),
             chan: ChanTrack::default(),
             last_rx_eff: 0.0,
+            rx_doubted: false,
             delivered: 0,
             rx_pending: BTreeMap::new(),
             inbox: Vec::new(),
@@ -765,7 +798,70 @@ impl Station {
         if self.cfg.qrm_narrow || self.cfg.narrow {
             c |= caps::NARROW;
         }
+        // Cues, the stream gear and the slices are all wider than 500 Hz.
+        if self.cfg.bw500 || self.link500 {
+            c &= caps::LIFELINE;
+        }
         c
+    }
+
+    /// A 500 Hz station: its calls go out in the narrow wave and only
+    /// such calls are answered.
+    pub fn set_bw500(&mut self, on: bool) {
+        self.cfg.bw500 = on;
+    }
+
+    /// Whether the link (or the call under way) is a 500 Hz one.
+    pub fn link500(&self) -> bool {
+        self.link500
+    }
+
+    /// Where this link's ladder starts.
+    pub(super) fn floor(&self) -> usize {
+        if self.link500 { NARROW_FLOOR } else { FLOOR }
+    }
+
+    /// The waveform its control falls back to.
+    pub(super) fn floor_wave(&self) -> Wave {
+        if self.link500 { NARROW_MFSK_WAVE } else { FLOOR_WAVE }
+    }
+
+    /// A 500 Hz link whose MFSK is in use, by us or by the peer: its
+    /// receiver's word on whether a burst is coming in counts then (it
+    /// starts on the link's OFDM bursts now and then, as the lifeline's).
+    pub fn in_mfsk500(&self) -> bool {
+        let m = NARROW_MFSK_WAVE;
+        self.link500
+            && (LADDER[self.level].wave == m
+                || LADDER[self.rx_level].wave == m
+                || self.peer_wave == m
+                || self.last_tx_wave == m)
+    }
+
+    /// A 500 Hz link sends nothing wider. Control that picked another
+    /// waveform goes in the link's MFSK; anything else is not sent.
+    fn keep_width(&mut self, mut b: Outgoing) -> Option<Outgoing> {
+        if !self.link500 || b.wave == Wave::Lifeline {
+            return Some(b);
+        }
+        let ours = b.code == TINY || b.code == CONTROL || is_narrow(b.code);
+        if !ours || b.cue {
+            self.stats.width_dropped += 1;
+            return None;
+        }
+        let want = match b.wave {
+            _ if is_narrow(b.code) => LADDER[b.code].wave,
+            NARROW_WAVE | NARROW_MFSK_WAVE => b.wave,
+            _ => NARROW_MFSK_WAVE,
+        };
+        if b.wave != want {
+            debug_assert!(!is_narrow(b.code), "500 Hz data in {:?}", b.wave);
+            self.stats.width_fixed += 1;
+            b.wave = want;
+            self.last_tx_wave = want;
+        }
+        b.slot = None;
+        Some(b)
     }
 
     // -- application side -----------------------------------------------------
@@ -843,6 +939,7 @@ impl Station {
 
     /// Call `peer`. The call goes out in the floor waveform.
     pub fn connect(&mut self, peer: &str, now: f64) {
+        self.link500 = self.cfg.bw500;
         self.reset_link();
         self.peer = peer.to_ascii_uppercase();
         self.sessions = self.sessions.wrapping_add(97);
@@ -861,7 +958,10 @@ impl Station {
         }
         f.flags |= self.own_caps() << flags::CAPS_SHIFT;
         // Armed as an expired wait: the next poll sends it as the first try.
-        self.retry = Some(self.control(f, FLOOR_WAVE));
+        // A 500 Hz call: the first tries in its OFDM (2.7 s), then in its
+        // MFSK (`retry_wave`).
+        let wave = if self.link500 { NARROW_WAVE } else { FLOOR_WAVE };
+        self.retry = Some(self.control(f, wave));
         self.awaiting = Awaiting::ConnAck;
         self.tries = 0;
         self.deadline = Some(now);
@@ -1028,6 +1128,11 @@ impl Station {
     /// What to transmit now, if anything. The caller must not call it while
     /// the other side is on the air (carrier sense).
     pub fn poll_tx(&mut self, now: f64) -> Option<Outgoing> {
+        let b = self.poll_tx_any(now)?;
+        self.keep_width(b)
+    }
+
+    fn poll_tx_any(&mut self, now: f64) -> Option<Outgoing> {
         if now < self.tx_at {
             return None;
         }
@@ -1285,6 +1390,12 @@ impl Station {
         }
     }
 
+    /// Whether the receiving side narrows the link by itself for QRM
+    /// ([`Config::qrm_narrow`]); for a station with no link up.
+    pub fn set_qrm_narrow(&mut self, on: bool) {
+        self.cfg.qrm_narrow = on;
+    }
+
     /// Keep the link to the slice levels, both ways ([`Config::narrow`]),
     /// from the next burst and ACK on.
     pub fn set_narrow(&mut self, on: bool) {
@@ -1406,6 +1517,13 @@ impl Station {
             if !to.eq_ignore_ascii_case(&self.cfg.call) {
                 continue;
             }
+            // The call's waveform is the link's width; a 500 Hz station
+            // answers no other.
+            let narrow = inc.wave == NARROW_WAVE || inc.wave == NARROW_MFSK_WAVE;
+            if self.cfg.bw500 && !narrow {
+                continue;
+            }
+            self.link500 = narrow;
             self.peer = from.to_ascii_uppercase();
             self.session = user_session(inc.user);
             self.state = State::Connected;
@@ -1435,13 +1553,18 @@ impl Station {
         if w == Wave::Lifeline {
             return w;
         }
+        // A 500 Hz call: three tries in its OFDM (2.7 s each), the rest in
+        // its MFSK (21 s, and heard some 10 dB lower).
+        if self.state == State::Connecting && w == NARROW_WAVE {
+            return if self.tries <= 3 { w } else { NARROW_MFSK_WAVE };
+        }
         if now - self.last_progress > STALL_S {
-            return FLOOR_WAVE;
+            return self.floor_wave();
         }
         match self.tries {
             0 | 1 => w,
             2 => wave_down(w),
-            _ => FLOOR_WAVE,
+            _ => self.floor_wave(),
         }
     }
 
@@ -1535,14 +1658,16 @@ impl Station {
         self.peer_wants_disc = false;
         self.want_disc = false;
         self.disc_by = None;
-        self.level = FLOOR;
-        self.target = FLOOR;
+        self.level = self.floor();
+        self.target = self.floor();
         self.fails = [0; LADDER.len()];
         self.success = [None; LADDER.len()];
         self.success_at = [f64::NEG_INFINITY; LADDER.len()];
         self.blocked_until = [f64::NEG_INFINITY; LADDER.len()];
         self.hold_all = [true; LADDER.len()];
-        self.rx_level = FLOOR;
+        self.rx_level = self.floor();
+        self.lost_run = 0;
+        self.class_passed = None;
         self.burst_id = 0;
         self.peer_heard = None;
         // Compression is agreed afresh on each connection; data queued

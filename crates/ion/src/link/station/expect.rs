@@ -101,6 +101,7 @@ impl Station {
         let stored_wave = LADDER[self.rx_level].wave;
         for (level, &lv) in LADDER.iter().enumerate() {
             if lv.frame != FrameSize::Long
+                || crate::level::is_narrow(level) != self.link500
                 || !matches!(lv.wave, Wave::Ofdm(_))
                 || self.cfg.eff_thresholds_db.get(level).is_none_or(|&t| t > EXPECT_MAX_DB)
             {

@@ -109,6 +109,26 @@ fn audio_pair_with(profile: Profile, snr_db: f32, seed: u64, edit: impl Fn(&mut 
     let air: Arc<dyn Air> = Arc::new(PhyAir);
     let tune = |mut c: ion::link::Config| {
         edit(&mut c);
+        // ION_NEWGEAR=0: without the rules of 2026-11-21 (`doubt_db`,
+        // `aim_fall_db`, `loss_step_db`, `class_soft`), to compare.
+        if std::env::var("ION_NEWGEAR").is_ok_and(|v| v == "0") {
+            c.doubt_db = None;
+            c.aim_fall_db = None;
+            c.loss_step_db = None;
+            c.class_soft = false;
+        }
+        // ION_GEAR_OFF=doubt,fall,step,class: without those of the rules.
+        if let Ok(v) = std::env::var("ION_GEAR_OFF") {
+            for k in v.split(',') {
+                match k {
+                    "doubt" => c.doubt_db = None,
+                    "fall" => c.aim_fall_db = None,
+                    "step" => c.loss_step_db = None,
+                    "class" => c.class_soft = false,
+                    _ => panic!("ION_GEAR_OFF: {k}"),
+                }
+            }
+        }
         // Tuning knobs for the throughput table.
         if let Ok(v) = std::env::var("ION_BURST") {
             c.max_burst_s = v.parse().unwrap();
@@ -299,6 +319,10 @@ fn adapted_bursts_fit_the_phys() {
                 assert!(syms <= phy::MAX_DATA_SYMBOLS, "level {l}: {n} frames, {syms} symbols");
             }
             Wave::Mfsk(m) => assert!(bits <= ion::phy_mfsk::max_bits(m), "level {l}: {n} frames"),
+            Wave::Mfsk500 => assert!(
+                bits <= ion::phy_mfsk::max_bits(ion::level::NARROW_MFSK_MODE),
+                "level {l}: {n} frames"
+            ),
             Wave::Lifeline => unreachable!("not a level"),
         }
         assert!(bits <= air.max_bits(lv.wave, l), "level {l}");
@@ -895,6 +919,7 @@ fn threshold_table() {
     let guard = match std::env::var("ION_GUARD").as_deref() {
         Ok("slice") => Guard::Slice,
         Ok("long") => Guard::Long,
+        Ok("narrow") => Guard::Narrow,
         _ => Guard::Normal,
     };
     let set = Setup {
@@ -913,6 +938,10 @@ fn threshold_table() {
     let start = |c: Constellation, prof: Profile| -> i32 {
         let base = match c {
             Constellation::Qpsk if guard == Guard::Slice => -9,
+            Constellation::Qpsk if guard == Guard::Narrow => -12,
+            Constellation::Psk8 if guard == Guard::Narrow => -3,
+            Constellation::Qam16 if guard == Guard::Narrow => 0,
+            Constellation::Qam64 if guard == Guard::Narrow => 5,
             Constellation::Qpsk => -2,
             Constellation::Psk8 => 3,
             Constellation::Qam16 => 8,
@@ -1436,7 +1465,7 @@ fn compression_table() {
                 let mut waves = [0u32; 4];
                 for &l in &sim.stations[0].stats().levels {
                     waves[match LADDER[l].wave {
-                        Wave::Mfsk(_) | Wave::Lifeline => 0,
+                        Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => 0,
                         Wave::Ofdm(Guard::Slice) => 1,
                         Wave::Ofdm(Guard::Long) => 2,
                         Wave::Ofdm(_) => 3,

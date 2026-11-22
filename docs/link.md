@@ -33,7 +33,8 @@ and `link.rs` measure throughput and the overhead options.
 Links open at the MFSK floor and climb. Between the floor and full-band
 OFDM sit the faster MFSK R1 rates and two slice levels: QPSK on 13 carriers
 (650 Hz, [phy.md](phy.md), Slice numerology), the same power on a quarter
-of the carriers.
+of the carriers. A 500 Hz link has a ladder of its own, levels 17 to 28
+(500 Hz links).
 
 | # | Waveform | Modulation | Code rate | Frames | Low-PAPR | Threshold (dB) | Effective-SNR threshold (dB) | Air mean (dB) |
 |---:|---|---|---|---|:---:|---:|---:|---:|
@@ -243,6 +244,130 @@ WGN +3 dB 3638 → 7140 B/min, MPG +3 528 → 1348, MPG +6 5115 → 7004, MPP +3
   2.4–2.8 dB better than the OFDM levels it sends the link to (QPSK
   2.6–4.8 dB better than QAM); on IONOS SIM with it on the link lost
   10–17% at 0 dB, and the margins would need retuning with it.
+
+**Not moved by one burst** (2026-11-21, after a session between two
+real radios on a short strong path, and Data2G's `policy.py`). On that
+path one data burst of 0.4 s lost whole read −24 dB and fast fading at
+the receiving side (most likely a receiver not yet back from its own
+transmission), and the link went from 64QAM to the floor; an echo
+reported now and then moved it between 16QAM 3/4 and the long guard,
+which was delivering nothing better. Four rules, each a `Config` field
+and each off with `ION_NEWGEAR=0` in `tests/ladder.rs` and `ionos.rs`:
+
+- `doubt_db` (10): the receiving side passes over the measurement of a
+  data burst that delivered nothing and read that far under the burst
+  before: its SNR and class are of what was not there. Once; a second
+  such burst in a row is believed.
+- `aim_fall_db` (12): the SNR aimed by falls at most that much from one
+  ACK to the next.
+- `loss_step_db` (3; Data2G's `LADDER_AFTER` = 2 and `LADDER_STEP_DB`):
+  a burst lost whole is sent once more at its level if the report still
+  allows it; from the second loss in a row the level is at most 3 dB (in
+  thresholds) under the one that failed, a step more each further loss.
+- `class_soft`: the channel class is believed until a burst in a
+  waveform it rules out has come through whole under that same class;
+  from then it does not rule that waveform out, until two bursts in a
+  row are lost or the class changes (`Station::class_passed`). And a
+  data burst shorter than 1 s adds no delay or Doppler to the class
+  (Data2G's `SPREAD_CARRY`: on AWGN 20–50% of its short bursts read as
+  fast fading). A class there from the first burst on is believed as
+  before: the link starts in the long guard or the MFSK and stays.
+
+  The first form of this rule (the class ruled nothing out until two
+  bursts in a row were lost with SNR to spare) cost the disturbed
+  channels of `horrid_table` up to nine tenths of their throughput (NVIS
+  disturbed at +2 dB: 367 → 43 bit/s, three times the bursts lost): a
+  class that is real has to be believed before anything is lost to it.
+
+`tests/doubt.rs`: at 26 dB on AWGN a wiped burst (−24 dB, 30 Hz) leaves
+the link on 64QAM 5/6; two in a row take it to 16QAM 3/4, not to MFSK;
+one burst lost is resent at its level, two step down one level and it
+climbs back; a 6 ms echo that starts to be reported on a link at 64QAM
+leaves it there, also through one lost burst, and two lost in a row
+take it to the long guard; reported from the first burst, the long
+guard from the start.
+
+Old against new in the same binary (`ION_NEWGEAR=0`; with it the wide
+table prints as on `main`):
+
+- `link_throughput_table` (4 seeds, 8 SNRs, AWGN and CCIR good,
+  moderate, poor): the same within the seeds' spread.
+- `horrid_table` (2 seeds, +2, +6, +10 dB; flutter, low-latitude, NVIS
+  and high-latitude disturbed): the same bursts lost and the same
+  throughput within a burst or two.
+- `ionos_table` (6 seeds, 5 minutes, bit/s old → new): MPG 30 dB 6335 →
+  6335, 25: 4174 → 3864, 20: 3507 → 3488, 15: 2297 → 2140; MPD 30:
+  1532 → 1675, 25: 3617 → 3420, 20: 2737 → 2901, 15: 1834 → 1661: about
+  2% less over the eight cells (in a real fade the level's second try
+  fails too).
+- `rig_table` (`tests/rig.rs`: 52.6 kB one way at 25 dB on AWGN through
+  a model of two radios: Butterworth SSB filters of order 4 or 8 each
+  end, a receiver's AGC, a transmitter pressed into its ALC by 3 to
+  15 dB). These read as echoes on a path with none, and the old rules
+  went to the long guard on each report:
+
+  | Rig | Old (bit/s) | New (bit/s) |
+  |---|---:|---:|
+  | none | 6124 | 6124 |
+  | SSB 300–2700 Hz, order 8 | 3774 | 5343 |
+  | SSB 400–2600 Hz, order 8 | 3485 | 4845 |
+  | AGC, 0.5 ms up, 20 ms back | 4369 | 6124 |
+  | ALC 6 dB | 3872 | 5636 |
+  | ALC 10 dB | 2923 | 4109 |
+  | ALC 15 dB | 2541 | 3225 |
+  | SSB order 8 and that AGC | 2593 | 3709 |
+
+  One seed, and the gear rules only (before the carrier rule below).
+  In the session's log the echo flags and the frame counts are the far
+  station's (the FT-891 and its sound card) of this station's bursts:
+  of its six flagged 16QAM 3/4 bursts three came whole and would now
+  hold; the two that came in part, and the half-second bursts lost,
+  would still go to the long guard. The model does not show what the
+  session did besides: whole
+  16QAM 3/4 bursts lost at +22 to +28 dB reported, and every burst of
+  half a second at 64QAM lost and read 6 to 10 dB under the long ones.
+
+**Carriers in the band** (2026-11-22; `phy::rx::demod::JAM_RATIO`). Three
+steady carriers in the passband (`rig_table`'s `bird30`, `bird20`,
+`bird10`: each 30, 20 or 10 dB under a tone at the bursts' peak; by the
+levels' air means the first is within a few dB of one OFDM carrier, not
+measured) cost the same 25 dB path more than half: the per-symbol noise
+(for wideband bursts of noise) averaged them over every carrier, and the
+excess of the decision-directed noise over the preamble's read as an
+echo past the guard. A carrier whose decision-directed noise is 8 times
+the median carrier's now keeps its noise to itself: out of its
+neighbours' windows, the per-symbol noise and the echo's excess; when
+more than one carrier in 12 is over the line, none (a filter's edge is
+not a carrier). The SNR report keeps them in: left out, the report
+promised 64QAM behind a narrow filter and the bursts were lost.
+
+`rig_table`, 4 seeds, bit/s without (`ION_JAM=0`) and with:
+
+| Rig | Without | With |
+|---|---:|---:|
+| none | 6124 | 6124 |
+| SSB 300–2700 Hz, order 4 | 6076 | 6076 |
+| SSB 300–2700 Hz, order 8 | 4356 | 5473 |
+| SSB 400–2600 Hz, order 8 | 5059 | 4404 |
+| Carriers, −30 dB | 2786 | 5326 |
+| Carriers, −20 dB | 3270 | 3971 |
+| Carriers, −10 dB | 1277 | 1785 |
+
+The narrow filter's loss is three 64QAM bursts tried and lost where the
+echo it used to read (its edge carriers' noise) had kept the link a
+level lower. No carrier is judged so in `link_throughput_table`,
+`horrid_table` or `ionos_table`: all three print as before.
+
+Open: at −10 dB the SNR reported is +4 dB and the tone's leakage over
+the neighbouring carriers costs two thirds: a notch for steady carriers,
+learned while nothing is being received. And a sound card that drops
+1 ms every 3 s (`slip1`) leaves 1722 bit/s of 6124 (where in a burst
+the frames are lost was not traced).
+
+The waterfall spikes of the session were at the SunSDR, the side that
+read +11 to +16 dB where the other read +22 to +28: carriers in the
+band are a candidate for that reading, not for the far side's flags and
+losses. Not on the air yet.
 
 ## Channel report
 
@@ -984,6 +1109,142 @@ QRM from 60 to 80 s at low S/N, 4 seeds:
   over 24 seeds, 4 runs ahead and 11 behind), the modes recording
   (−60 ± 20) and steady noise at S/N +25 dB (−105 ± 32); and steady noise
   at 0 dB on MPD (−11 ± 3, 8 seeds).
+
+## 500 Hz links
+
+For channels where an automatically controlled station may occupy no
+more than 500 Hz (FCC §97.221(c)): a second ladder, in an MFSK and an
+OFDM wave of its own, and a link that sends nothing else but the lifeline
+(337 Hz). Simulated only; nothing of it has been on the air.
+
+- **The waves.** `Wave::Mfsk500`: MFSK R1 stretched 5 times
+  (`NARROW_MFSK_LAYOUT`, 32 tones in 471 Hz, preamble 490 Hz;
+  [mfsk.md](mfsk.md), Time-scaled layouts), a constant envelope at the
+  carriers' level. `Wave::Ofdm(Guard::Narrow)`: `Numerology::Narrow`, 19
+  carriers 25 Hz apart with the long 10 ms guard, 475 Hz
+  ([phy.md](phy.md)).
+- **A station is one or the other.** `Config::bw500` (the host's `BW500`,
+  the Modem screen's **500 Hz**) makes it a 500 Hz station: its calls go
+  out in the narrow waves, and of all the receivers only theirs and the
+  lifeline's run (`Receivers::set_bw500`), so it hears and answers no
+  2.45 kHz call. A 2.45 kHz station does not run them and hears no
+  500 Hz call. The width changes between links: the engine starts a new
+  node, whose receivers begin together.
+- **The call fixes the width.** The ConnReq is the same control frame:
+  three tries in the narrow OFDM (2.7 s on the air, 7.6 s apart), then in
+  the MFSK (21 s, about 44 s apart, heard some 10 dB lower); with the
+  default tries the call gives up after 156 s. The ConnAck is the same
+  tiny, in the wave the call came in. A link whose call came in either
+  narrow wave is a 500 Hz link (`Station::link500`). No bit of the
+  handshake says so, and an older build is not affected: it never hears
+  the call.
+- **Levels** (`LADDER[NARROW_FLOOR..]`; on the air the MFSK's codes 0–3
+  and the OFDM's 2–9, each in its own wave):
+
+  | # | Waveform | Modulation | Code rate | Frames | Low-PAPR | AWGN (dB) | CCIR poor (dB) | Threshold (dB) | Air mean (dB) |
+  |---:|---|---|---|---|:---:|---:|---:|---:|---:|
+  | 17 | MFSK R1/5 | 1 of 32 | 1/4 | short | | −18 | −16 | −16.0 | 0.0 |
+  | 18 | MFSK R1/5 | 1 of 32 | 1/3 | short | | | | −15.0 | 0.0 |
+  | 19 | MFSK R1/5 | 1 of 32 | 1/2 | short | | | | −13.5 | 0.0 |
+  | 20 | MFSK R1/5 | 1 of 32 | 2/3 | short | | | | −11.5 | 0.0 |
+  | 21 | OFDM narrow | QPSK | 1/4 | long | yes | −8 | −3 | −5.5 | −3.2 |
+  | 22 | OFDM narrow | QPSK | 1/2 | long | yes | −4 | 0 | −2.0 | −3.2 |
+  | 23 | OFDM narrow | QPSK | 2/3 | long | yes | −2 | +3 | +0.5 | −3.2 |
+  | 24 | OFDM narrow | 8PSK | 2/3 | long | yes | +1 | +7 | +4.0 | −3.8 |
+  | 25 | OFDM narrow | 16QAM | 2/3 | long | | +4 | +9 | +6.5 | −5.6 |
+  | 26 | OFDM narrow | 16QAM | 3/4 | long | | +5 | +11 | +8.0 | −5.4 |
+  | 27 | OFDM narrow | 64QAM | 3/4 | long | | +10 | +16 | +13.0 | −7.3 |
+  | 28 | OFDM narrow | 64QAM | 5/6 | long | | +12 | +20 | +16.0 | −7.1 |
+
+  The OFDM thresholds from `threshold_table` with `ION_GUARD=narrow
+  ION_LOWPAPR=ladder` (40 bursts, 1 dB grid). The MFSK's are R1's less
+  7 dB (10·log10(5)); measured only at rate 1/4 (`narrow_table` with
+  `r1k5`: also −14 dB on CCIR flutter and −15 on NVIS disturbed, where
+  the narrow OFDM does not work or only its QPSK). Air means and widths
+  from `air_power_table` and `occupied_bandwidth_table`: every OFDM level
+  occupies 1250–1750 Hz by §97.3(a)(8) (500 Hz; 99% of the power in
+  480 Hz) and peaks 1.2 dB over the steady carriers.
+- **Control** (polls, ACKs, idle, turn, disconnect) goes in the wave of
+  the level in use and falls back to the MFSK where a 2.45 kHz link
+  falls back to the MFSK floor (`Station::floor_wave`, `wave_down`); the
+  lifeline's knock likewise. A header-only burst is 1.5 s in the OFDM
+  and 5.6 s in the MFSK. Cues, the stream gear, the slices and narrowing
+  for QRM are not offered (the capabilities are masked to the
+  lifeline's), and nets are refused while the station is a 500 Hz one.
+  Broadcasts go on this ladder (`BcastStation::set_bw500`).
+- **The guard.** `Station::keep_width` sees every burst `poll_tx` hands
+  out: on a 500 Hz link a tiny or control burst in another waveform goes
+  in the link's MFSK, and anything else is not sent
+  (`Stats::width_fixed`, `width_dropped`; both 0 in every run so far,
+  asserted in `tests/narrow.rs`).
+- **Scanners.** `PENDING` goes out when the narrow OFDM receiver has
+  synchronised to a burst (its header is not shown before the burst's
+  end, so any narrow OFDM burst holds a scanning client, not only a
+  call), or when the MFSK receiver has read a control burst's header.
+  600 s of noise raised it never (`narrow_call_timing_and_noise`).
+- **Gear.** `family_ok` passes a level only on its own ladder; the
+  channel class rules no narrow level out.
+- **Receivers.** The MFSK's is kept as the lifeline's is (it follows the
+  offset last heard; its pull-in is ±45 Hz, so a call must come within
+  that). Like the lifeline's it starts on other signals in its width now
+  and then, so its word that a burst is coming in counts only while the
+  link is using the MFSK (`Station::in_mfsk500`).
+
+Link throughput (`narrow_throughput_table` in `tests/narrow.rs`: one way,
+300 s from the call, 3 seeds, bit/s; the 2.45 kHz link in the same
+harness with `ION_WIDE=1`). Against a steady tone at the bursts' common
+peak (`ION_PEP=1`), as a transmitter limited by its peak power sends
+them:
+
+| SNR (dB) | 500 Hz, AWGN | 500 Hz, CCIR poor | 2.45 kHz, AWGN | 2.45 kHz, CCIR poor |
+|---:|---:|---:|---:|---:|
+| −18 | 5 | 0 | | |
+| −15 | 11 | 5 | | |
+| −12 | 16 | 9 | | |
+| −9 | 18 | 17 | 14 | 5 |
+| −6 | 18 | 12 | 27 | 10 |
+| −3 | 22 | 8 | 28 | 29 |
+| 0 | 176 | 60 | 60 | 27 |
+| +3 | 299 | 128 | 614 | 44 |
+| +6 | 357 | 234 | 1265 | 650 |
+| +10 | 520 | 354 | 1896 | 1325 |
+| +15 | 709 | 561 | 2817 | 1999 |
+| +20 | 1064 | 639 | 4343 | 3052 |
+| +25 | 1070 | 804 | 6387 | 3929 |
+
+The 500 Hz rows from −12 to +3 dB are of 2 seeds, after two changes
+to the gear: an MFSK R1/5 burst may last 40 s (`MFSK500_BURST_S`; at
+16 s one frame and its header left 7 bit/s), and on a 500 Hz link the
+gear counts each level's mean power under the peak as `power_aware`
+does (OFDM was tried 3 dB early). The rows above and below, and the
+mean-referenced figures that follow, are from before them.
+
+Against each burst's own mean power the 500 Hz link reads −18 dB: 5 / 0,
+−15: 11 / 5, −12: 11 / 7, −9: 22 / 9, −6: 90 / 33, −3: 224 / 62,
+0: 299 / 210, +3: 542 / 252, +6: 703 / 408, +10: 917 / 627,
++15: 1161 / 663, +20: 1029 / 987, +25: 1133 / 1111 (AWGN / CCIR poor).
+
+- Peak-referenced, the 500 Hz link moves more than the 2.45 kHz one at
+  0 dB, and at +3 dB on CCIR poor; from +6 dB the full band is 3 to 6
+  times faster.
+- **The hole.** From −9 to −3 dB (peak-referenced) the link moves about
+  20 bit/s, the MFSK's top rate: nothing sits between MFSK R1/5
+  (71 bit/s raw) and QPSK 1/4.
+- The dip at +20 dB on AWGN (mean-referenced) is the step to 64QAM 3/4
+  taken a little early.
+
+Tests: `tests/narrow.rs` (a link in 500 Hz from call to data; turn-over
+and disconnect; a 500 Hz and a 2.45 kHz station do not answer each
+other; a fade held in the lifeline; data in the MFSK at −12 dB and on
+CCIR flutter), `pipeline_tests` (`BW500` through the host, the engine and
+its receivers, then `BW2300`, then `BW500` again). The 2.45 kHz ladder is
+unchanged: `link_throughput_table` (6 SNRs, 4 channels, 2 seeds) prints
+the same on `main` a2a2b77 and with this.
+
+Open: the hole above (a faster narrow MFSK); the narrow layout's receiver constants are derived from
+`Sixth`'s, not tuned; the MFSK rates above 1/4 not measured on their own;
+a link 500 Hz one way and wide the other; NVIS decodes the MFSK and QPSK
+only.
 
 ## Turn-over, idle and disconnect
 

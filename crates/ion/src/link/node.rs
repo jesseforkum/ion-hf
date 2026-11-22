@@ -305,6 +305,23 @@ impl Node {
         &mut self.station
     }
 
+    /// A 500 Hz station ([`Config::bw500`]): its calls and its receivers.
+    /// For a new node ([`Receivers::set_bw500`]).
+    pub fn set_bw500(&mut self, on: bool) {
+        self.station.set_bw500(on);
+        self.rx.set_bw500(on);
+    }
+
+    pub fn bw500(&self) -> bool {
+        self.station.config().bw500
+    }
+
+    /// A 2.45 kHz station that answers 500 Hz calls too
+    /// ([`Receivers::hear_narrow`]).
+    pub fn hear_narrow(&mut self, on: bool) {
+        self.rx.hear_narrow(on);
+    }
+
     /// Received audio, 48 kHz, ending at `now`. Not decoded while our own
     /// burst is out (so we never decode ourselves), but counted on the
     /// receivers' clock.
@@ -451,6 +468,7 @@ impl Node {
         self.on_air
             || (self.rx.busy() && !self.station.streaming())
             || self.station.holding() && self.rx.lifeline_busy()
+            || self.station.in_mfsk500() && self.rx.mfsk500_busy()
     }
 
     /// The slot meter: the third of the passband our receivers would have

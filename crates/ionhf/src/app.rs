@@ -152,6 +152,7 @@ impl App {
         let _ = cmds.send(IonCmd::SetGear(cfg.gear.link()));
         let _ = cmds.send(IonCmd::SetBurstClip(cfg.clipper == Clipper::Burst));
         let _ = cmds.send(IonCmd::SetStream(cfg.stream));
+        let _ = cmds.send(IonCmd::SetAutoNarrow(cfg.auto_narrow));
         let _ = cmds.send(IonCmd::SetCwId(cfg.cw_id));
         let _ = cmds.send(IonCmd::NetStore(Some(Config::dir().join("nets").join("objects"))));
         if loopback && let Some(lb) = threads.radio.ctl.loopback() {
@@ -809,6 +810,11 @@ impl App {
         self.cmd(IonCmd::SetNarrow(on));
     }
 
+    /// A 500 Hz station: calls and answers in the narrow wave only.
+    pub fn set_bw500(&mut self, on: bool) {
+        self.cmd(IonCmd::SetBw500(on));
+    }
+
     /// What the link has on the air: on a slice level, the third the
     /// slice is in (ours as sender, the peer's pick; the peer's as
     /// receiver, ours, which its next burst follows); else the whole band.
@@ -825,6 +831,9 @@ impl App {
         };
         if l.wave == Wave::Ofdm(Guard::Slice) {
             theme::BandUse::Third(if sending { s.slot_tx } else { s.slot_rx }.min(2))
+        } else if l.wave == Wave::Ofdm(Guard::Narrow) {
+            // A 500 Hz link sits in the middle third.
+            theme::BandUse::Third(0)
         } else {
             theme::BandUse::Full
         }
@@ -834,6 +843,10 @@ impl App {
     /// name, and whether we send it.
     pub fn link_band(&self) -> Option<(f32, f32, &'static str, bool)> {
         let sending = self.link.as_ref()?.role == ion::link::Role::Sender;
+        if self.link.as_ref()?.link500 && !matches!(self.band_use(), theme::BandUse::Idle(_)) {
+            let c = ion::link::audio::CENTER_HZ;
+            return Some((c - 237.5, c + 237.5, "500", sending));
+        }
         match self.band_use() {
             theme::BandUse::Third(slot) => {
                 let c = ion::link::audio::CENTER_HZ + ion::slots::OFFSETS_HZ[slot as usize];
