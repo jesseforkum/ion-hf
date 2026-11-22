@@ -3,7 +3,7 @@
 //! say goodbye there (`docs/link.md`, Lifeline).
 
 use super::{Awaiting, End, Incoming, Outgoing, Role, State, Station, TINY, user_bits};
-use crate::level::{FLOOR, FLOOR_WAVE, LADDER, Wave};
+use crate::level::{LADDER, Wave};
 use crate::link::frame::{AckInfo, Frame, Kind, Life, Tiny, caps};
 
 /// A link holding below the floor.
@@ -47,7 +47,7 @@ impl Station {
     /// The SNR both ways that resumes a hold: the floor's threshold plus
     /// `life_resume_db`, more after flaps.
     pub(super) fn resume_db(&self) -> f32 {
-        self.cfg.thresholds_db[FLOOR] + self.cfg.life_resume_db + FLAP_DB * self.flaps as f32
+        self.cfg.thresholds_db[self.floor()] + self.cfg.life_resume_db + FLAP_DB * self.flaps as f32
     }
 
     pub(super) fn life(&self, m: Life) -> Outgoing {
@@ -136,7 +136,7 @@ impl Station {
         self.arq_time = 0.0;
         self.arq_from = None;
         self.run_from = None;
-        let snr = snr - self.air_db(FLOOR);
+        let snr = snr - self.air_db(self.floor());
         self.aim_db = Some(snr);
         self.target = self.level_for(snr);
         let start = self.level_for(snr - self.cfg.start_margin_db.unwrap_or(0.0));
@@ -189,11 +189,11 @@ impl Station {
         };
         // The ACK's report is in the gear's units (effective SNR, or mean).
         let floor = if self.cfg.eff_snr {
-            self.cfg.eff_thresholds_db[FLOOR]
+            self.cfg.eff_thresholds_db[self.floor()]
         } else {
-            self.cfg.thresholds_db[FLOOR]
+            self.cfg.thresholds_db[self.floor()]
         };
-        let want = floor + self.resume_db() - self.cfg.thresholds_db[FLOOR];
+        let want = floor + self.resume_db() - self.cfg.thresholds_db[self.floor()];
         match reported {
             Some(r) if r >= want && inc.snr_db >= self.resume_db() => {
                 self.leave_hold(now, Some(r));
@@ -235,13 +235,13 @@ impl Station {
             // none after a flap (resumes then wait for the lifeline's
             // report, with its margin).
             let knock = self.cfg.life_knock_s.filter(|_| self.flaps == 0)?;
-            let answer = self.answer_s(FLOOR_WAVE) + self.cfg.turnaround_s + self.cfg.reply_slack_s;
+            let answer = self.answer_s(self.floor_wave()) + self.cfg.turnaround_s + self.cfg.reply_slack_s;
             if now < h.next_knock || h.next_probe - now < answer + 1.0 {
                 return None;
             }
             self.hold.as_mut()?.next_knock = now + knock;
             self.stats.knocks += 1;
-            let b = self.tiny(Tiny::Poll, FLOOR_WAVE);
+            let b = self.tiny(Tiny::Poll, self.floor_wave());
             return Some(self.note_tx(b));
         }
         let probe = self.life(Life::Probe { snr_db: h.heard_db });

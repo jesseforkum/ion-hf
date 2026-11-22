@@ -157,7 +157,7 @@ impl Station {
     /// frames that failed (`None`: not a data burst); `poll`: the peer
     /// polled us.
     pub(super) fn qrm_watch(&mut self, inc: &Incoming, loss: Option<f32>, poll: bool, now: f64) {
-        if !self.cfg.qrm_narrow && !self.cfg.narrow {
+        if !self.cfg.qrm_narrow && !self.cfg.narrow || self.link500 {
             return;
         }
         let reading = contrast(&inc.thirds);
@@ -405,7 +405,7 @@ impl Station {
         if !on && self.peer_narrow {
             // Back to the full band: what its levels lost was the QRM's
             // doing.
-            for k in SLICE_TOP + 1..LADDER.len() {
+            for k in SLICE_TOP + 1..crate::level::WIDE_LEVELS {
                 self.success[k] = None;
                 self.fails[k] = 0;
                 self.blocked_until[k] = 0.0;
@@ -449,6 +449,10 @@ impl Station {
     /// The highest level the sending side may use: the slice levels while
     /// the peer (or our own setting) has narrowed the link.
     pub(super) fn level_cap(&self) -> usize {
+        // A 500 Hz link has its own ladder, all of it.
+        if self.link500 {
+            return LADDER.len() - 1;
+        }
         if self.peer_narrow || self.cfg.narrow {
             self.cfg.max_level.min(SLICE_TOP)
         } else {

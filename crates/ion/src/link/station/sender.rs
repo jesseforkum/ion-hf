@@ -4,7 +4,7 @@ use super::{
     Awaiting, End, Incoming, MAX_FRAMES, Outgoing, Sent, State, Station, TINY, TINY_ALL, WINDOW_BYTES, top_level_in,
     user_bits,
 };
-use crate::level::{FLOOR, FrameSize, Guard, LADDER, Wave};
+use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::link::frame::{AckInfo, Frame, Kind, TINY_ACK_FRAMES, Tiny, flags};
 use crate::link::harq;
 
@@ -36,20 +36,20 @@ impl Station {
                     self.clear_wait();
                     self.agree(self.cfg.compress && compress);
                     self.caps = self.own_caps() & caps;
-                    self.aim_db = Some(snr_db - self.air_db(FLOOR));
+                    self.aim_db = Some(snr_db - self.air_db(self.floor()));
                     self.peer_class = class;
                     self.peer_slot = slot;
-                    self.target = self.level_for(snr_db - self.air_db(FLOOR));
+                    self.target = self.level_for(snr_db - self.air_db(self.floor()));
                     // Start where the report allows, less a margin, and
                     // step down on a loss (`Config::start_margin_db`).
                     self.level = match self.cfg.start_margin_db {
                         Some(m) => self.usable_below(
-                            self.level_for(snr_db - self.air_db(FLOOR) - m)
+                            self.level_for(snr_db - self.air_db(self.floor()) - m)
                                 .min(self.target)
                                 .min(self.level_cap()),
                             now,
                         ),
-                        None => FLOOR,
+                        None => self.floor(),
                     };
                 }
                 (

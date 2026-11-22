@@ -505,7 +505,7 @@ impl NetStation {
             level: FLOOR,
             cap: FLOOR,
             hold_until: f64::NEG_INFINITY,
-            hold_ceiling: LADDER.len() - 1,
+            hold_ceiling: crate::level::WIDE_LEVELS - 1,
             bul_in: Inbox::default(),
             bul_rx: BTreeMap::new(),
             bul_known: 0,
@@ -959,7 +959,7 @@ const SLOT_SLACK_S: f64 = 0.3;
 
 /// The fastest level whose frames get through at `snr`.
 fn level_of(cfg: &NetConfig, snr: f32) -> usize {
-    (0..cfg.thresholds_db.len().min(LADDER.len()))
+    (0..cfg.thresholds_db.len().min(crate::level::WIDE_LEVELS))
         .rev()
         .find(|&l| snr >= cfg.thresholds_db[l] + cfg.margin_db)
         .unwrap_or(FLOOR)

@@ -132,6 +132,9 @@ pub enum Numerology {
     /// slice's 13 carriers, for six slices 400 Hz apart. Not used by the
     /// link.
     Sixth,
+    /// 475 Hz, for 500 Hz channels: Long's 25 Hz spacing and 10 ms cyclic
+    /// prefix on 19 carriers. The link's 500 Hz levels.
+    Narrow,
 }
 
 impl Numerology {
@@ -154,6 +157,7 @@ impl Numerology {
             Numerology::Half => &HALF,
             Numerology::Quarter => &QUARTER,
             Numerology::Sixth => &SIXTH,
+            Numerology::Narrow => &NARROW,
         }
     }
 
@@ -171,7 +175,7 @@ impl Numerology {
     pub fn is_slice(self) -> bool {
         matches!(
             self,
-            Numerology::Slice | Numerology::Half | Numerology::Quarter | Numerology::Sixth
+            Numerology::Slice | Numerology::Half | Numerology::Quarter | Numerology::Sixth | Numerology::Narrow
         )
     }
 

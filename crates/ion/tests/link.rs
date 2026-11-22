@@ -286,7 +286,7 @@ fn transfers_and_climbs_to_the_top_level_on_a_clean_channel() {
     assert_eq!(a.state(), State::Connected);
     assert_eq!(
         *a.stats().levels.last().unwrap(),
-        ion::level::LADDER.len() - 1,
+        ion::level::WIDE_LEVELS - 1,
         "{:?}",
         a.stats().levels
     );
@@ -435,7 +435,7 @@ fn starts_where_the_report_allows_and_climbs_quickly() {
     let mut sim = pair(32.0, 9, |_| {});
     transfer(&mut sim, 20_000, 600.0);
     let levels = sim.stations[0].stats().levels.clone();
-    let top = ion::level::LADDER.len() - 1;
+    let top = ion::level::WIDE_LEVELS - 1;
     assert!(levels[0] >= top - 1, "{levels:?}");
     let reached = levels.iter().position(|&l| l == top).expect("never reached the top");
     assert!(reached <= 1, "took {reached} bursts to climb: {levels:?}");

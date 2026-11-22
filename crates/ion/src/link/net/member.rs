@@ -644,7 +644,7 @@ impl NetStation {
     pub(super) fn uplink_burst(&mut self, now: f64) -> Outgoing {
         let slot = self.my_slot.unwrap_or(ALL);
         if now >= self.hold_until {
-            self.hold_ceiling = LADDER.len() - 1;
+            self.hold_ceiling = crate::level::WIDE_LEVELS - 1;
         }
         let level = self.level.min(self.cap).min(self.hold_ceiling);
         self.level = level;

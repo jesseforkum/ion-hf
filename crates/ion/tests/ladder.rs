@@ -299,6 +299,10 @@ fn adapted_bursts_fit_the_phys() {
                 assert!(syms <= phy::MAX_DATA_SYMBOLS, "level {l}: {n} frames, {syms} symbols");
             }
             Wave::Mfsk(m) => assert!(bits <= ion::phy_mfsk::max_bits(m), "level {l}: {n} frames"),
+            Wave::Mfsk500 => assert!(
+                bits <= ion::phy_mfsk::max_bits(ion::level::NARROW_MFSK_MODE),
+                "level {l}: {n} frames"
+            ),
             Wave::Lifeline => unreachable!("not a level"),
         }
         assert!(bits <= air.max_bits(lv.wave, l), "level {l}");
@@ -895,6 +899,7 @@ fn threshold_table() {
     let guard = match std::env::var("ION_GUARD").as_deref() {
         Ok("slice") => Guard::Slice,
         Ok("long") => Guard::Long,
+        Ok("narrow") => Guard::Narrow,
         _ => Guard::Normal,
     };
     let set = Setup {
@@ -913,6 +918,10 @@ fn threshold_table() {
     let start = |c: Constellation, prof: Profile| -> i32 {
         let base = match c {
             Constellation::Qpsk if guard == Guard::Slice => -9,
+            Constellation::Qpsk if guard == Guard::Narrow => -12,
+            Constellation::Psk8 if guard == Guard::Narrow => -3,
+            Constellation::Qam16 if guard == Guard::Narrow => 0,
+            Constellation::Qam64 if guard == Guard::Narrow => 5,
             Constellation::Qpsk => -2,
             Constellation::Psk8 => 3,
             Constellation::Qam16 => 8,
@@ -1436,7 +1445,7 @@ fn compression_table() {
                 let mut waves = [0u32; 4];
                 for &l in &sim.stations[0].stats().levels {
                     waves[match LADDER[l].wave {
-                        Wave::Mfsk(_) | Wave::Lifeline => 0,
+                        Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => 0,
                         Wave::Ofdm(Guard::Slice) => 1,
                         Wave::Ofdm(Guard::Long) => 2,
                         Wave::Ofdm(_) => 3,

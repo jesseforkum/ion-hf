@@ -147,6 +147,10 @@ pub struct Config {
     /// Keep the link to the slice levels both ways: ours, and the peer's
     /// through our ACKs ([`crate::link::report::ChanReport::narrow`]).
     pub narrow: bool,
+    /// A 500 Hz station (FCC §97.221(c)): calls go out in the narrow OFDM
+    /// wave and only such calls are answered, so every link is a 500 Hz
+    /// one.
+    pub bw500: bool,
     /// Narrow the link by itself when QRM over part of the passband stops
     /// it (`station::qrm`).
     pub qrm_narrow: bool,
@@ -278,7 +282,7 @@ impl Config {
             max_burst_s: 8.0,
             thresholds_db: crate::level::thresholds_db(),
             margin_db: -1.0,
-            max_level: LADDER.len() - 1,
+            max_level: crate::level::WIDE_LEVELS - 1,
             retries: 6,
             call_tries: CALL_TRIES,
             disc_retries: 3,
@@ -312,6 +316,7 @@ impl Config {
             slice_slots: true,
             slot_pick: None,
             narrow: false,
+            bw500: false,
             qrm_narrow: true,
             qrm_clear_s: super::qrm::CLEAR_S,
             narrow_burst_s: None,

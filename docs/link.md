@@ -33,7 +33,8 @@ and `link.rs` measure throughput and the overhead options.
 Links open at the MFSK floor and climb. Between the floor and full-band
 OFDM sit the faster MFSK R1 rates and two slice levels: QPSK on 13 carriers
 (650 Hz, [phy.md](phy.md), Slice numerology), the same power on a quarter
-of the carriers.
+of the carriers. A 500 Hz link has a ladder of its own, levels 17 to 28
+(500 Hz links).
 
 | # | Waveform | Modulation | Code rate | Frames | Low-PAPR | Threshold (dB) | Effective-SNR threshold (dB) | Air mean (dB) |
 |---:|---|---|---|---|:---:|---:|---:|---:|
@@ -984,6 +985,139 @@ QRM from 60 to 80 s at low S/N, 4 seeds:
   over 24 seeds, 4 runs ahead and 11 behind), the modes recording
   (−60 ± 20) and steady noise at S/N +25 dB (−105 ± 32); and steady noise
   at 0 dB on MPD (−11 ± 3, 8 seeds).
+
+## 500 Hz links
+
+For channels where an automatically controlled station may occupy no
+more than 500 Hz (FCC §97.221(c)): a second ladder, in an MFSK and an
+OFDM wave of its own, and a link that sends nothing else but the lifeline
+(337 Hz). Simulated only; nothing of it has been on the air.
+
+- **The waves.** `Wave::Mfsk500`: MFSK R1 stretched 5 times
+  (`NARROW_MFSK_LAYOUT`, 32 tones in 471 Hz, preamble 490 Hz;
+  [mfsk.md](mfsk.md), Time-scaled layouts), a constant envelope at the
+  carriers' level. `Wave::Ofdm(Guard::Narrow)`: `Numerology::Narrow`, 19
+  carriers 25 Hz apart with the long 10 ms guard, 475 Hz
+  ([phy.md](phy.md)).
+- **A station is one or the other.** `Config::bw500` (the host's `BW500`,
+  the Modem screen's **500 Hz**) makes it a 500 Hz station: its calls go
+  out in the narrow waves, and of all the receivers only theirs and the
+  lifeline's run (`Receivers::set_bw500`), so it hears and answers no
+  2.45 kHz call. A 2.45 kHz station does not run them and hears no
+  500 Hz call. The width changes between links: the engine starts a new
+  node, whose receivers begin together.
+- **The call fixes the width.** The ConnReq is the same control frame:
+  three tries in the narrow OFDM (2.7 s on the air, 7.6 s apart), then in
+  the MFSK (21 s, about 44 s apart, heard some 10 dB lower); with the
+  default tries the call gives up after 156 s. The ConnAck is the same
+  tiny, in the wave the call came in. A link whose call came in either
+  narrow wave is a 500 Hz link (`Station::link500`). No bit of the
+  handshake says so, and an older build is not affected: it never hears
+  the call.
+- **Levels** (`LADDER[NARROW_FLOOR..]`; on the air the MFSK's codes 0–3
+  and the OFDM's 2–9, each in its own wave):
+
+  | # | Waveform | Modulation | Code rate | Frames | Low-PAPR | AWGN (dB) | CCIR poor (dB) | Threshold (dB) | Air mean (dB) |
+  |---:|---|---|---|---|:---:|---:|---:|---:|---:|
+  | 17 | MFSK R1/5 | 1 of 32 | 1/4 | short | | −18 | −16 | −16.0 | 0.0 |
+  | 18 | MFSK R1/5 | 1 of 32 | 1/3 | short | | | | −15.0 | 0.0 |
+  | 19 | MFSK R1/5 | 1 of 32 | 1/2 | short | | | | −13.5 | 0.0 |
+  | 20 | MFSK R1/5 | 1 of 32 | 2/3 | short | | | | −11.5 | 0.0 |
+  | 21 | OFDM narrow | QPSK | 1/4 | long | yes | −8 | −3 | −5.5 | −3.2 |
+  | 22 | OFDM narrow | QPSK | 1/2 | long | yes | −4 | 0 | −2.0 | −3.2 |
+  | 23 | OFDM narrow | QPSK | 2/3 | long | yes | −2 | +3 | +0.5 | −3.2 |
+  | 24 | OFDM narrow | 8PSK | 2/3 | long | yes | +1 | +7 | +4.0 | −3.8 |
+  | 25 | OFDM narrow | 16QAM | 2/3 | long | | +4 | +9 | +6.5 | −5.6 |
+  | 26 | OFDM narrow | 16QAM | 3/4 | long | | +5 | +11 | +8.0 | −5.4 |
+  | 27 | OFDM narrow | 64QAM | 3/4 | long | | +10 | +16 | +13.0 | −7.3 |
+  | 28 | OFDM narrow | 64QAM | 5/6 | long | | +12 | +20 | +16.0 | −7.1 |
+
+  The OFDM thresholds from `threshold_table` with `ION_GUARD=narrow
+  ION_LOWPAPR=ladder` (40 bursts, 1 dB grid). The MFSK's are R1's less
+  7 dB (10·log10(5)); measured only at rate 1/4 (`narrow_table` with
+  `r1k5`: also −14 dB on CCIR flutter and −15 on NVIS disturbed, where
+  the narrow OFDM does not work or only its QPSK). Air means and widths
+  from `air_power_table` and `occupied_bandwidth_table`: every OFDM level
+  occupies 1250–1750 Hz by §97.3(a)(8) (500 Hz; 99% of the power in
+  480 Hz) and peaks 1.2 dB over the steady carriers.
+- **Control** (polls, ACKs, idle, turn, disconnect) goes in the wave of
+  the level in use and falls back to the MFSK where a 2.45 kHz link
+  falls back to the MFSK floor (`Station::floor_wave`, `wave_down`); the
+  lifeline's knock likewise. A header-only burst is 1.5 s in the OFDM
+  and 5.6 s in the MFSK. Cues, the stream gear, the slices and narrowing
+  for QRM are not offered (the capabilities are masked to the
+  lifeline's), and nets and broadcasts are refused while the station is
+  a 500 Hz one.
+- **The guard.** `Station::keep_width` sees every burst `poll_tx` hands
+  out: on a 500 Hz link a tiny or control burst in another waveform goes
+  in the link's MFSK, and anything else is not sent
+  (`Stats::width_fixed`, `width_dropped`; both 0 in every run so far,
+  asserted in `tests/narrow.rs`).
+- **Scanners.** `PENDING` goes out when the narrow OFDM receiver has
+  synchronised to a burst (its header is not shown before the burst's
+  end, so any narrow OFDM burst holds a scanning client, not only a
+  call), or when the MFSK receiver has read a control burst's header.
+  600 s of noise raised it never (`narrow_call_timing_and_noise`).
+- **Gear.** `family_ok` passes a level only on its own ladder; the
+  channel class rules no narrow level out.
+- **Receivers.** The MFSK's is kept as the lifeline's is (it follows the
+  offset last heard; its pull-in is ±45 Hz, so a call must come within
+  that). Like the lifeline's it starts on other signals in its width now
+  and then, so its word that a burst is coming in counts only while the
+  link is using the MFSK (`Station::in_mfsk500`).
+
+Link throughput (`narrow_throughput_table` in `tests/narrow.rs`: one way,
+300 s from the call, 3 seeds, bit/s; the 2.45 kHz link in the same
+harness with `ION_WIDE=1`). Against a steady tone at the bursts' common
+peak (`ION_PEP=1`), as a transmitter limited by its peak power sends
+them:
+
+| SNR (dB) | 500 Hz, AWGN | 500 Hz, CCIR poor | 2.45 kHz, AWGN | 2.45 kHz, CCIR poor |
+|---:|---:|---:|---:|---:|
+| −18 | 5 | 0 | | |
+| −15 | 11 | 5 | | |
+| −12 | 11 | 7 | | |
+| −9 | 11 | 8 | 14 | 5 |
+| −6 | 7 | 7 | 27 | 10 |
+| −3 | 71 | 5 | 28 | 29 |
+| 0 | 204 | 63 | 60 | 27 |
+| +3 | 299 | 144 | 614 | 44 |
+| +6 | 357 | 234 | 1265 | 650 |
+| +10 | 520 | 354 | 1896 | 1325 |
+| +15 | 709 | 561 | 2817 | 1999 |
+| +20 | 1064 | 639 | 4343 | 3052 |
+| +25 | 1070 | 804 | 6387 | 3929 |
+
+Against each burst's own mean power the 500 Hz link reads −18 dB: 5 / 0,
+−15: 11 / 5, −12: 11 / 7, −9: 22 / 9, −6: 90 / 33, −3: 224 / 62,
+0: 299 / 210, +3: 542 / 252, +6: 703 / 408, +10: 917 / 627,
++15: 1161 / 663, +20: 1029 / 987, +25: 1133 / 1111 (AWGN / CCIR poor).
+
+- Peak-referenced, the 500 Hz link moves more than the 2.45 kHz one at
+  0 dB, and at +3 dB on CCIR poor; from +6 dB the full band is 3 to 6
+  times faster.
+- **The hole.** From −9 to −3 dB (peak-referenced) the link moves about
+  10 bit/s: the MFSK's top rate, and OFDM tried too early (at −6 dB it
+  moves less than at −9). The thresholds are in mean-power terms and the
+  OFDM levels average 3 dB under their peak, which `Config::power_aware`
+  would count; and nothing sits between MFSK R1/5 (71 bit/s raw) and
+  QPSK 1/4.
+- The dip at +20 dB on AWGN (mean-referenced) is the step to 64QAM 3/4
+  taken a little early.
+
+Tests: `tests/narrow.rs` (a link in 500 Hz from call to data; turn-over
+and disconnect; a 500 Hz and a 2.45 kHz station do not answer each
+other; a fade held in the lifeline; data in the MFSK at −12 dB and on
+CCIR flutter), `pipeline_tests` (`BW500` through the host, the engine and
+its receivers, then `BW2300`, then `BW500` again). The 2.45 kHz ladder is
+unchanged: `link_throughput_table` (6 SNRs, 4 channels, 2 seeds) prints
+the same on `main` a2a2b77 and with this.
+
+Open: the hole above (a faster narrow MFSK, or the gear's power
+accounting); the narrow layout's receiver constants are derived from
+`Sixth`'s, not tuned; the MFSK rates above 1/4 not measured on their own;
+a link 500 Hz one way and wide the other; NVIS decodes the MFSK and QPSK
+only.
 
 ## Turn-over, idle and disconnect
 

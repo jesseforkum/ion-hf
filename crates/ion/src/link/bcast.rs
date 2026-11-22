@@ -330,7 +330,7 @@ impl BcastStation {
             .iter()
             .filter(|(k, h)| k.0 == group && now - h.1 <= self.cfg.heard_s)
             .map(|(_, h)| {
-                (0..self.cfg.thresholds_db.len().min(LADDER.len()))
+                (0..self.cfg.thresholds_db.len().min(crate::level::WIDE_LEVELS))
                     .rev()
                     .find(|&l| h.0 >= self.cfg.thresholds_db[l] + self.cfg.margin_db)
                     .unwrap_or(0)

@@ -29,8 +29,8 @@ const GOODPUT_REACH_DB: f32 = 2.0;
 /// OFDM channel failures compare guards).
 fn guard_ms(w: Wave) -> f32 {
     match w {
-        Wave::Mfsk(_) | Wave::Lifeline => 0.0,
-        Wave::Ofdm(Guard::Long) => 10.0,
+        Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => 0.0,
+        Wave::Ofdm(Guard::Long | Guard::Narrow) => 10.0,
         Wave::Ofdm(_) => 4.0,
     }
 }
@@ -206,13 +206,13 @@ impl Station {
             };
             score(l) / bar
         };
-        (FLOOR..=top)
+        (self.floor()..=top)
             .filter(|&l| {
                 l == at
                     || self.family_ok(l) && aim + self.air_db(l) >= self.threshold(l) + self.margin() - GOODPUT_REACH_DB
             })
             .max_by(|&a, &b| worth(a).total_cmp(&worth(b)))
-            .map_or(FLOOR, |l| self.usable_below(l, f64::INFINITY))
+            .map_or(self.floor(), |l| self.usable_below(l, f64::INFINITY))
     }
 
     /// [`Gear::Goodput`]: a whole burst at OFDM level `at` lost with SNR to
@@ -285,7 +285,7 @@ impl Station {
     /// OFDM level above it.
     fn usable(&self, l: usize, now: f64) -> bool {
         self.family_ok(l)
-            && (FLOOR..=l).all(|k| {
+            && (self.floor()..=l).all(|k| {
                 now >= self.blocked_until[k]
                     || (k != l && !self.hold_all[k] && guard_ms(LADDER[l].wave) > guard_ms(LADDER[k].wave))
             })
@@ -296,7 +296,10 @@ impl Station {
         if let Some(p) = self.cfg.pin_level {
             return p;
         }
-        (FLOOR..=l).rev().find(|&k| self.usable(k, now)).unwrap_or(FLOOR)
+        (self.floor()..=l)
+            .rev()
+            .find(|&k| self.usable(k, now))
+            .unwrap_or(self.floor())
     }
 
     /// The `n`-th level to climb to above `at` (the last there is, or
@@ -363,7 +366,7 @@ impl Station {
         (0..=self.level_cap().min(th.len() - 1))
             .rev()
             .find(|&l| self.family_ok(l) && snr_db + self.air_db(l) >= th[l] + margin)
-            .unwrap_or(FLOOR)
+            .unwrap_or(self.floor())
     }
 
     /// `n` levels below `at`, counting only those whose waveform the
@@ -376,8 +379,8 @@ impl Station {
     /// the rest of the transfer (without the class, two steps down from
     /// the long guard land on a slice level, which keeps long frames).
     fn step_down(&self, at: usize, n: usize) -> usize {
-        let allowed = || (FLOOR..at).rev().filter(|&l| self.family_ok(l));
-        let to = allowed().nth(n - 1).unwrap_or(FLOOR);
+        let allowed = || (self.floor()..at).rev().filter(|&l| self.family_ok(l));
+        let to = allowed().nth(n - 1).unwrap_or(self.floor());
         let lowest_long = allowed().rfind(|&l| LADDER[l].frame == FrameSize::Long);
         match lowest_long {
             Some(l) if LADDER[at].frame == FrameSize::Long => to.max(l),
@@ -404,13 +407,21 @@ impl Station {
 
     /// Whether the channel class allows level `l`'s waveform: long echoes
     /// leave the MFSK floor and the long guard, fast fading the MFSK floor.
+    ///
+    /// And whether it is one of this link's ladder at all: a 500 Hz link
+    /// uses the narrow levels and no others, a 2.45 kHz link never those
+    /// (they have nothing below them to fall back to when they fail, so
+    /// the class does not rule them out).
     fn family_ok(&self, l: usize) -> bool {
-        if !self.cfg.pick_family {
+        if crate::level::is_narrow(l) != self.link500 {
+            return false;
+        }
+        if !self.cfg.pick_family || self.link500 {
             return true;
         }
         let c = self.peer_class;
         match LADDER[l].wave {
-            Wave::Mfsk(_) | Wave::Lifeline => true,
+            Wave::Mfsk(_) | Wave::Lifeline | Wave::Mfsk500 => true,
             Wave::Ofdm(Guard::Long) => !c.doppler,
             Wave::Ofdm(_) => !c.doppler && !c.echo,
         }

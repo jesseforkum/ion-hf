@@ -213,7 +213,8 @@ meter's pick), and `NARROW ON` keeps the link to the slice levels both
 ways (`NARROW OFF`: only when the QRM watch narrows it). The modem
 screen's band meter does the same: a click on a third pins it, a second
 click unpins it, and Narrow is the button beside it, lit whenever the
-link is narrowed, by either end.
+link is narrowed, by either end. **500 Hz** under it makes the station a
+500 Hz one, as the host's `BW500` does (below).
 
 `CLEANTXBUFFER` is VARA's: `CLEANTXBUFFER OK`, `CLEANTXBUFFER
 BUFFEREMPTY` with nothing unacknowledged, `CLEANTXBUFFER FAILED ` (with
@@ -285,6 +286,14 @@ scanning client stays on the frequency in between (BPQ32 holds its scan
 on `PENDING` and lets it go on `CANCELPENDING`). Other links' control
 bursts in that waveform raise it as well; noise does not
 (`no_call_shows_on_noise` in `crates/ion/tests/node.rs`).
+
+**Width.** `BW500` makes Ion a 500 Hz station until `BW2300` or
+`BW2750`, or until the client goes: its calls go out in the narrow OFDM
+wave, only such calls are answered, and every burst of the link is in
+that wave or the lifeline ([link.md](link.md), 500 Hz links). A link
+already up keeps its width. Nets and broadcasts are 2.45 kHz wide, so
+`NET` and `BCAST OPEN` are `WRONG` meanwhile, and `BW500` is `WRONG`
+while a net is up.
 
 Where Ion differs from Data2G, and why:
 

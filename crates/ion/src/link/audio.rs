@@ -16,7 +16,10 @@ use super::station::{
 };
 use super::stream;
 use crate::fec;
-use crate::level::{FLOOR_WAVE, FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, Wave};
+use crate::level::{
+    FLOOR_WAVE, FrameSize, Guard, LADDER, LIFELINE_LAYOUT, LIFELINE_MODE, NARROW_MFSK_LAYOUT, NARROW_MFSK_MODE,
+    NARROW_MFSK_WAVE, Wave,
+};
 use crate::phy::{self, Constellation, DataMode, Numerology, PhyRx, Pilots, TxOptions};
 use crate::phy_mfsk::{self, MfskBurst, MfskRx};
 use crate::slots::{OFFSETS_HZ, SLOTS, SlotMeter};
@@ -38,6 +41,7 @@ pub fn numerology(g: Guard) -> Numerology {
         Guard::Normal => Numerology::of(false, WIDE),
         Guard::Long => Numerology::of(true, WIDE),
         Guard::Slice => Numerology::Slice,
+        Guard::Narrow => Numerology::Narrow,
     }
 }
 
@@ -47,6 +51,7 @@ pub fn guard_of(num: Numerology) -> Guard {
         Numerology::Slice | Numerology::Slim | Numerology::Half | Numerology::Quarter | Numerology::Sixth => {
             Guard::Slice
         }
+        Numerology::Narrow => Guard::Narrow,
         Numerology::Long | Numerology::LongWide => Guard::Long,
         Numerology::Normal | Numerology::NormalWide => Guard::Normal,
     }
@@ -154,6 +159,9 @@ impl Air for PhyAir {
             Wave::Lifeline => {
                 phy_mfsk::burst_samples_with(LIFELINE_LAYOUT, LIFELINE_MODE, 5 * mfsk_symbols(code, bits))
             }
+            Wave::Mfsk500 => {
+                phy_mfsk::burst_samples_with(NARROW_MFSK_LAYOUT, NARROW_MFSK_MODE, 5 * mfsk_symbols(code, bits))
+            }
         };
         if samples == 0 {
             // A PHY not built yet: use the model's numbers.
@@ -168,6 +176,7 @@ impl Air for PhyAir {
             Wave::Ofdm(g) => phy::capacity_bits_with(numerology(g), p, c, phy::MAX_DATA_SYMBOLS),
             Wave::Mfsk(m) => phy_mfsk::max_bits(m),
             Wave::Lifeline => phy_mfsk::max_bits(LIFELINE_MODE),
+            Wave::Mfsk500 => phy_mfsk::max_bits(NARROW_MFSK_MODE),
         }
     }
 }
@@ -412,6 +421,11 @@ fn modulate(b: &Outgoing) -> Vec<f32> {
             let syms = encode_frames_nb(b);
             phy_mfsk::modulate_symbols_with(LIFELINE_LAYOUT, LIFELINE_MODE, b.user, b.extra, &syms, CENTER_HZ)
         }
+        Wave::Mfsk500 => {
+            debug_assert!(!is_long(b.code), "long frames on the 500 Hz MFSK");
+            let syms = encode_frames_nb(b);
+            phy_mfsk::modulate_symbols_with(NARROW_MFSK_LAYOUT, NARROW_MFSK_MODE, b.user, b.extra, &syms, CENTER_HZ)
+        }
         Wave::Ofdm(g) => {
             let (c, _) = shape(b.code);
             // A tiny message has no frames: a header-only burst. A data
@@ -519,7 +533,16 @@ pub fn decode(b: &phy::RxBurst) -> Incoming {
 
 /// A received MFSK burst as the link sees it.
 pub fn decode_mfsk(b: &MfskBurst) -> Incoming {
-    let code = user_code(Wave::Mfsk(b.mode), b.user);
+    decode_mfsk_as(b, Wave::Mfsk(b.mode))
+}
+
+/// A burst the 500 Hz MFSK's receiver heard, as the link sees it.
+pub fn decode_mfsk500(b: &MfskBurst) -> Incoming {
+    decode_mfsk_as(b, NARROW_MFSK_WAVE)
+}
+
+fn decode_mfsk_as(b: &MfskBurst, wave: Wave) -> Incoming {
+    let code = user_code(wave, b.user);
     let (frames, soft) = if code == TINY {
         (Vec::new(), None)
     } else if is_long(code) {
@@ -535,7 +558,7 @@ pub fn decode_mfsk(b: &MfskBurst) -> Incoming {
         (Vec::new(), None)
     };
     Incoming {
-        wave: Wave::Mfsk(b.mode),
+        wave,
         code,
         user: b.user,
         extra: b.extra,
@@ -582,6 +605,11 @@ fn lifeline_len(b: &MfskBurst) -> u64 {
     phy_mfsk::burst_samples_with(LIFELINE_LAYOUT, b.mode, b.llrs.len()) as u64
 }
 
+/// Audio samples of a burst the 500 Hz MFSK's receiver heard.
+fn mfsk500_len(b: &MfskBurst) -> u64 {
+    phy_mfsk::burst_samples_with(NARROW_MFSK_LAYOUT, b.mode, b.llrs.len()) as u64
+}
+
 /// The lifeline's receiver: R1/7 on the link's centre, moved to the
 /// frequency offset the peer's last bursts came in at, since its pull-in
 /// (±35 Hz) is half R0's. It tries R1's headers only, so a false start
@@ -603,6 +631,47 @@ fn lifeline_rx(offset_hz: f32) -> MfskRx {
     let mut rx = MfskRx::with_layout(LIFELINE_LAYOUT, CENTER_HZ + offset_hz);
     rx.set_modes(&[LIFELINE_MODE]);
     rx
+}
+
+/// The 500 Hz MFSK's receiver, kept as the lifeline's is.
+fn mfsk500_rx(offset_hz: f32) -> MfskRx {
+    let mut rx = MfskRx::with_layout(NARROW_MFSK_LAYOUT, CENTER_HZ + offset_hz);
+    rx.set_modes(&[NARROW_MFSK_MODE]);
+    rx
+}
+
+/// A stretched MFSK receiver over `samples` (the first is audio sample
+/// `from`), a block at a time: it moves to the offset last heard once that
+/// is [`LIFELINE_RETUNE_HZ`] from its own, and its own bursts move that
+/// offset.
+fn run_stretched(
+    l: &mut LifelineRx,
+    make: fn(f32) -> MfskRx,
+    out: &mut Vec<MfskBurst>,
+    offset_hz: &mut f32,
+    follow: Option<u8>,
+    samples: &[f32],
+    from: u64,
+) {
+    let mut at = from;
+    for block in samples.chunks(LIFELINE_BLOCK) {
+        if (*offset_hz - l.offset_hz).abs() > LIFELINE_RETUNE_HZ {
+            *l = LifelineRx {
+                rx: make(*offset_hz),
+                offset_hz: *offset_hz,
+                base: at,
+            };
+        }
+        let n = out.len();
+        l.rx.process(block, out);
+        for b in &mut out[n..] {
+            b.start_sample += l.base;
+            if follow.is_none_or(|s| s == user_session(b.user)) {
+                *offset_hz = l.offset_hz + b.freq_offset_hz;
+            }
+        }
+        at += block.len() as u64;
+    }
 }
 
 /// Audio samples the lifeline's receiver takes at a time (0.1 s), so it
@@ -699,6 +768,14 @@ pub struct Receivers {
     ofdm_long: PhyRx,
     ofdm_slice: [PhyRx; SLOTS],
     mfsk: MfskRx,
+    /// The narrow OFDM wave's receiver: a 500 Hz station's, in place of
+    /// the others ([`Receivers::set_bw500`], `narrow_only`), or beside
+    /// them ([`Receivers::hear_narrow`]).
+    narrow: Option<PhyRx>,
+    narrow_only: bool,
+    /// The 500 Hz MFSK's receiver, with the narrow OFDM one.
+    mfsk500: Option<LifelineRx>,
+    mfsk500_out: Vec<MfskBurst>,
     lifeline: Option<LifelineRx>,
     ofdm_out: Vec<phy::RxBurst>,
     /// Per entry of `ofdm_out`: the slot of the slice receiver that heard
@@ -748,6 +825,10 @@ impl Receivers {
                 PhyRx::with_numerology(numerology(Guard::Slice), CENTER_HZ + OFFSETS_HZ[k])
             }),
             mfsk: MfskRx::new(CENTER_HZ),
+            narrow: None,
+            narrow_only: false,
+            mfsk500: None,
+            mfsk500_out: Vec::new(),
             lifeline: Some(LifelineRx {
                 rx: lifeline_rx(0.0),
                 offset_hz: 0.0,
@@ -777,6 +858,37 @@ impl Receivers {
         Self {
             lifeline: None,
             ..Self::new()
+        }
+    }
+
+    /// A 500 Hz station: only the narrow OFDM receiver and the lifeline's
+    /// run, so nothing wider is heard or answered.
+    ///
+    /// For new receivers, before any audio: each receiver counts its own
+    /// samples, and one that sits out or starts late is out of step with
+    /// the rest.
+    pub fn set_bw500(&mut self, on: bool) {
+        if on != self.narrow_only {
+            self.narrow_only = on;
+            self.narrow_rx(on);
+        }
+    }
+
+    fn narrow_rx(&mut self, on: bool) {
+        self.narrow = on.then(|| PhyRx::with_numerology(numerology(Guard::Narrow), CENTER_HZ));
+        self.mfsk500 = on.then(|| LifelineRx {
+            rx: mfsk500_rx(0.0),
+            offset_hz: 0.0,
+            base: 0,
+        });
+    }
+
+    /// A 2.45 kHz station that hears 500 Hz calls as well (and answers
+    /// them in 500 Hz): the narrow receiver beside the others. For new
+    /// receivers, as [`Receivers::set_bw500`].
+    pub fn hear_narrow(&mut self, on: bool) {
+        if !self.narrow_only && on != self.narrow.is_some() {
+            self.narrow_rx(on);
         }
     }
 
@@ -839,12 +951,20 @@ impl Receivers {
         self.mfsk_out.clear();
         self.stream_out.clear();
         self.lifeline_out.clear();
+        self.mfsk500_out.clear();
         let from = self.meter.samples();
         self.meter.push(samples);
         let to = self.meter.samples();
         // In blocks, MFSK first: a cue reaches the OFDM receiver while the
         // burst it announces is still in that receiver's ring (2 s).
         for block in samples.chunks(RUN_BLOCK) {
+            if let Some(rx) = self.narrow.as_mut() {
+                rx.process(block, &mut self.ofdm_out);
+                self.ofdm_slot.resize(self.ofdm_out.len(), None);
+                if self.narrow_only {
+                    continue;
+                }
+            }
             let m0 = self.mfsk_out.len();
             if self.stream.active() {
                 self.stream_expect_mfsk();
@@ -921,6 +1041,10 @@ impl Receivers {
             self.meter
                 .mask(b.start_sample, b.start_sample + lifeline_len(b), Some(0));
         }
+        for b in &self.mfsk500_out {
+            self.meter
+                .mask(b.start_sample, b.start_sample + mfsk500_len(b), Some(0));
+        }
         // Bursts under way.
         if self.ofdm.busy() || self.ofdm_long.busy() || self.mfsk.busy() {
             self.meter.mask(from, to, None);
@@ -939,27 +1063,27 @@ impl Receivers {
     /// has just ended, so none of its is under way), and its own bursts
     /// move that offset (drift over a hold).
     fn run_lifeline(&mut self, samples: &[f32], from: u64) {
-        let Some(l) = self.lifeline.as_mut() else {
-            return;
-        };
-        let mut at = from;
-        for block in samples.chunks(LIFELINE_BLOCK) {
-            if (self.offset_hz - l.offset_hz).abs() > LIFELINE_RETUNE_HZ {
-                *l = LifelineRx {
-                    rx: lifeline_rx(self.offset_hz),
-                    offset_hz: self.offset_hz,
-                    base: at,
-                };
-            }
-            let n = self.lifeline_out.len();
-            l.rx.process(block, &mut self.lifeline_out);
-            for b in &mut self.lifeline_out[n..] {
-                b.start_sample += l.base;
-                if self.follow.is_none_or(|s| s == user_session(b.user)) {
-                    self.offset_hz = l.offset_hz + b.freq_offset_hz;
-                }
-            }
-            at += block.len() as u64;
+        if let Some(l) = self.lifeline.as_mut() {
+            run_stretched(
+                l,
+                lifeline_rx,
+                &mut self.lifeline_out,
+                &mut self.offset_hz,
+                self.follow,
+                samples,
+                from,
+            );
+        }
+        if let Some(l) = self.mfsk500.as_mut() {
+            run_stretched(
+                l,
+                mfsk500_rx,
+                &mut self.mfsk500_out,
+                &mut self.offset_hz,
+                self.follow,
+                samples,
+                from,
+            );
         }
     }
 
@@ -1001,6 +1125,11 @@ impl Receivers {
             slot,
             thirds,
             ..decode_lifeline(b)
+        }));
+        out.extend(self.mfsk500_out.iter().map(|b| Incoming {
+            slot,
+            thirds,
+            ..decode_mfsk500(b)
         }));
         self.plots.clear();
         if self.plot {
@@ -1060,6 +1189,15 @@ impl Receivers {
             end_sample: b.start_sample + lifeline_len(&b),
             mfsk: Some(b),
         }));
+        out.extend(self.mfsk500_out.drain(..).map(|b| Heard {
+            inc: Incoming {
+                slot,
+                ..decode_mfsk500(&b)
+            },
+            start_sample: b.start_sample,
+            end_sample: b.start_sample + mfsk500_len(&b),
+            mfsk: Some(b),
+        }));
     }
 
     /// A slice burst's measure of the QRM in the other thirds (`k`: the
@@ -1094,6 +1232,9 @@ impl Receivers {
         };
         self.ofdm.expect(&of(Guard::Normal));
         self.ofdm_long.expect(&of(Guard::Long));
+        if let Some(rx) = self.narrow.as_mut() {
+            rx.expect(&of(Guard::Narrow));
+        }
         let slice = of(Guard::Slice);
         for rx in &mut self.ofdm_slice {
             rx.expect(&slice);
@@ -1117,12 +1258,30 @@ impl Receivers {
 
     /// A burst of the ladder's waveforms is coming in.
     pub fn busy(&self) -> bool {
-        self.ofdm.busy() || self.ofdm_long.busy() || self.ofdm_slice.iter().any(PhyRx::busy) || self.mfsk.busy()
+        self.ofdm.busy()
+            || self.ofdm_long.busy()
+            || self.ofdm_slice.iter().any(PhyRx::busy)
+            || self.mfsk.busy()
+            || self.narrow.as_ref().is_some_and(PhyRx::busy)
     }
 
     /// A control burst in the floor waveform is coming in, its header
     /// read: what a call is (and other links' control bursts down there).
+    ///
+    /// A 500 Hz station's calls come in the narrow OFDM wave, whose
+    /// receiver does not show a header before the burst's end: any burst
+    /// it has synchronised to counts.
     pub fn control_in(&self) -> bool {
+        if self.narrow.as_ref().is_some_and(PhyRx::busy) {
+            return true;
+        }
+        if let Some(l) = &self.mfsk500
+            && l.rx
+                .receiving()
+                .any(|(_, user)| user_code(NARROW_MFSK_WAVE, user) == CONTROL)
+        {
+            return true;
+        }
         self.mfsk.receiving().any(|(mode, user)| {
             let wave = Wave::Mfsk(mode);
             wave == FLOOR_WAVE && user_code(wave, user) == CONTROL
@@ -1135,6 +1294,12 @@ impl Receivers {
     /// hold should wait for.
     pub fn lifeline_busy(&self) -> bool {
         self.lifeline.as_ref().is_some_and(|l| l.rx.busy())
+    }
+
+    /// A 500 Hz MFSK burst may be coming in; apart from [`Self::busy`] as
+    /// the lifeline's, and for a link that is using that MFSK.
+    pub fn mfsk500_busy(&self) -> bool {
+        self.mfsk500.as_ref().is_some_and(|l| l.rx.busy())
     }
 }
 
@@ -1245,6 +1410,13 @@ impl AudioMedium {
             heard_to: [0.0; 2],
             sent_to: [0.0; 2],
             qrm: [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// Both stations' receivers as 500 Hz stations' ([`Receivers::set_bw500`]).
+    pub fn set_bw500(&mut self, on: bool) {
+        for rx in &mut self.receivers {
+            rx.set_bw500(on);
         }
     }
 
@@ -1367,6 +1539,9 @@ impl Medium for AudioMedium {
             ((start - self.heard_to[to]).clamp(0.1, STREAM_LEAD_S), STREAM_LEAD_S)
         } else if burst.wave == Wave::Lifeline {
             let k = LIFELINE_LAYOUT.k as f64;
+            (0.5 * k, 0.6 * k)
+        } else if burst.wave == Wave::Mfsk500 {
+            let k = NARROW_MFSK_LAYOUT.k as f64;
             (0.5 * k, 0.6 * k)
         } else {
             (0.1, 0.1)

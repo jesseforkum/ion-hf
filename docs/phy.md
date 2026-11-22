@@ -38,6 +38,7 @@ measured on the air.
 | `NormalWide`, `LongWide` | as Normal, Long | 55, 109 | 2750, 2725 Hz | no (`link::audio::WIDE` = false) |
 | `Slim`, `Half`, `Quarter` | | 25, 7, 5 | 650, 350, 250 Hz | no |
 | `Sixth` | 25 Hz, 10 ms | 13 | 325 Hz | no: six slices 400 Hz apart (Six slices) |
+| `Narrow` | 25 Hz, 10 ms | 19 | 475 Hz | 500 Hz links ([link.md](link.md)): `Sixth`'s constants on 19 carriers, pilots 75 Hz × 100 ms (sparse × 150 ms), A 220 ms on 5 carriers, 12 header symbols, filter cutoff 272 Hz; not tuned |
 
 Any of them can send a **header-only** burst (32 bits, no data symbols)
 for the link's short messages. The link's centre is 1500 Hz

@@ -7,12 +7,14 @@ use crate::phy_mfsk::{MfskLayout, MfskMode};
 
 /// OFDM shape: guard interval and width. Normal (4 ms) and long (10 ms,
 /// NVIS-type echoes) fill the band; slice is Normal's spacing and guard on
-/// 650 Hz, the same power on a quarter of the carriers.
+/// 650 Hz, the same power on a quarter of the carriers; narrow is the long
+/// guard on 475 Hz, the waveform of a 500 Hz link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Guard {
     Normal,
     Long,
     Slice,
+    Narrow,
 }
 
 /// Which waveform a burst is sent in.
@@ -24,7 +26,17 @@ pub enum Wave {
     /// level, the link's lifeline below the floor (`docs/link.md`,
     /// Lifeline).
     Lifeline,
+    /// [`NARROW_MFSK_MODE`] in [`NARROW_MFSK_LAYOUT`] on the link's centre:
+    /// the MFSK of a 500 Hz link, its lowest levels and what its control
+    /// falls back to.
+    Mfsk500,
 }
+
+/// The 500 Hz link's MFSK: R1 stretched 5 times, 32 tones 14.3 Hz apart
+/// in 471 Hz (preamble 490 Hz), 7 dB under R1 at a fifth of its rate.
+pub const NARROW_MFSK_LAYOUT: MfskLayout = MfskLayout::scaled(5);
+pub const NARROW_MFSK_MODE: MfskMode = MfskMode::R1;
+pub const NARROW_MFSK_WAVE: Wave = Wave::Mfsk500;
 
 /// The lifeline's waveform: MFSK R1 stretched 7 times, 32 tones 10.2 Hz
 /// apart in 337 Hz, about 6 dB under R0 (`docs/mfsk.md`, Below the floor).
@@ -93,6 +105,14 @@ const fn mfsk_at(m: MfskMode, rate: Rate) -> Level {
     }
 }
 
+/// The 500 Hz link's MFSK with GF(32) short frames at `rate`.
+const fn mfsk500(rate: Rate) -> Level {
+    Level {
+        wave: Wave::Mfsk500,
+        ..mfsk_at(NARROW_MFSK_MODE, rate)
+    }
+}
+
 const fn ofdm(g: Guard, c: Constellation, r: Rate) -> Level {
     Level {
         wave: Wave::Ofdm(g),
@@ -111,7 +131,11 @@ const fn lp(l: Level) -> Level {
 
 /// Most robust first. The QPSK and 8PSK OFDM levels use the low-PAPR mode;
 /// 16QAM and 64QAM stay plain, where the spread receiver loses on fading.
-pub const LADDER: [Level; 17] = [
+///
+/// Two ladders in one table: the first [`WIDE_LEVELS`] are the 2.45 kHz
+/// link's; those from [`NARROW_FLOOR`] are a 500 Hz link's, which uses no
+/// others (FCC §97.221(c)). A link is one or the other from its call on.
+pub const LADDER: [Level; 29] = [
     mfsk(MfskMode::R0),
     mfsk(MfskMode::R1),
     // R1 at the faster GF(32) rates bridges the gap up to the slice.
@@ -130,7 +154,32 @@ pub const LADDER: [Level; 17] = [
     ofdm(Guard::Normal, Constellation::Qam16, Rate::R3_4),
     ofdm(Guard::Normal, Constellation::Qam64, Rate::R3_4),
     ofdm(Guard::Normal, Constellation::Qam64, Rate::R5_6),
+    mfsk500(Rate::R1_4),
+    mfsk500(Rate::R1_3),
+    mfsk500(Rate::R1_2),
+    mfsk500(Rate::R2_3),
+    lp(ofdm(Guard::Narrow, Constellation::Qpsk, Rate::R1_4)),
+    lp(ofdm(Guard::Narrow, Constellation::Qpsk, Rate::R1_2)),
+    lp(ofdm(Guard::Narrow, Constellation::Qpsk, Rate::R2_3)),
+    lp(ofdm(Guard::Narrow, Constellation::Psk8, Rate::R2_3)),
+    ofdm(Guard::Narrow, Constellation::Qam16, Rate::R2_3),
+    ofdm(Guard::Narrow, Constellation::Qam16, Rate::R3_4),
+    ofdm(Guard::Narrow, Constellation::Qam64, Rate::R3_4),
+    ofdm(Guard::Narrow, Constellation::Qam64, Rate::R5_6),
 ];
+
+/// Levels of the 2.45 kHz ladder (they come first).
+pub const WIDE_LEVELS: usize = 17;
+/// Where a 500 Hz link starts (its MFSK levels), its first OFDM level,
+/// and its OFDM waveform.
+pub const NARROW_FLOOR: usize = WIDE_LEVELS;
+pub const NARROW_OFDM: usize = NARROW_FLOOR + 4;
+pub const NARROW_WAVE: Wave = Wave::Ofdm(Guard::Narrow);
+
+/// Whether `level` is one of the 500 Hz ladder's.
+pub const fn is_narrow(level: usize) -> bool {
+    level >= NARROW_FLOOR && level < LADDER.len()
+}
 
 /// Where every link starts.
 pub const FLOOR: usize = 0;
@@ -139,14 +188,79 @@ pub const FLOOR_WAVE: Wave = Wave::Mfsk(MfskMode::R0);
 /// Gear-shift targets: SNR (dB in 2.4 kHz) at which each level loses about
 /// 10% of frames, midway between AWGN and CCIR poor. Used when
 /// `Config::eff_snr` is off, and by the model channel.
-pub const THRESHOLDS_DB: [f32; 17] = [
-    -12.0, -9.0, -8.0, -6.5, -4.5, -3.0, -0.5, 2.0, 6.5, 2.5, 5.5, 8.0, 12.0, 13.5, 15.5, 20.5, 23.5,
+pub const THRESHOLDS_DB: [f32; 29] = [
+    -12.0,
+    -9.0,
+    -8.0,
+    -6.5,
+    -4.5,
+    -3.0,
+    -0.5,
+    2.0,
+    6.5,
+    2.5,
+    5.5,
+    8.0,
+    12.0,
+    13.5,
+    15.5,
+    20.5,
+    23.5,
+    // The 500 Hz MFSK: R1's less 7 dB (10·log10(5); `narrow_table` with
+    // `r1k5` has rate 1/4 at −18 dB on AWGN and −16 on CCIR poor).
+    -16.0,
+    -15.0,
+    -13.5,
+    -11.5,
+    NARROW_TH[0],
+    NARROW_TH[1],
+    NARROW_TH[2],
+    NARROW_TH[3],
+    NARROW_TH[4],
+    NARROW_TH[5],
+    NARROW_TH[6],
+    NARROW_TH[7],
 ];
+
+/// The 500 Hz levels' thresholds, as the others': midway between AWGN
+/// and CCIR poor (`threshold_table` with `ION_GUARD=narrow`, the ladder's
+/// low-PAPR modes, 40 bursts on a 1 dB grid).
+const NARROW_TH: [f32; 8] = [-5.5, -2.0, 0.5, 4.0, 6.5, 8.0, 13.0, 16.0];
+/// Their AWGN thresholds, from the same table.
+const NARROW_EFF_TH: [f32; 8] = [-8.0, -4.0, -2.0, 1.0, 4.0, 5.0, 10.0, 12.0];
 
 /// Gear-shift targets against the effective SNR (EESM, `crate::chan`),
 /// which already holds what fading costs: each level's AWGN threshold.
-pub const EFF_THRESHOLDS_DB: [f32; 17] = [
-    -13.0, -11.0, -10.3, -8.9, -7.4, -5.0, -2.5, -0.5, 3.8, 0.0, 3.0, 5.0, 9.5, 11.0, 12.0, 17.0, 19.0,
+pub const EFF_THRESHOLDS_DB: [f32; 29] = [
+    -13.0,
+    -11.0,
+    -10.3,
+    -8.9,
+    -7.4,
+    -5.0,
+    -2.5,
+    -0.5,
+    3.8,
+    0.0,
+    3.0,
+    5.0,
+    9.5,
+    11.0,
+    12.0,
+    17.0,
+    19.0,
+    -18.0,
+    -17.3,
+    -15.9,
+    -14.4,
+    NARROW_EFF_TH[0],
+    NARROW_EFF_TH[1],
+    NARROW_EFF_TH[2],
+    NARROW_EFF_TH[3],
+    NARROW_EFF_TH[4],
+    NARROW_EFF_TH[5],
+    NARROW_EFF_TH[6],
+    NARROW_EFF_TH[7],
 ];
 
 /// Each level's mean power on the air against a steady carrier at
@@ -154,13 +268,17 @@ pub const EFF_THRESHOLDS_DB: [f32; 17] = [
 /// link's OFDM air gain (checked by
 /// `tests/ladder.rs::slice_levels_average_full_ofdm_power`). Used by
 /// `Config::power_aware` to move an SNR report from one level to another.
-pub const AIR_MEAN_DB: [f32; 17] = [
+pub const AIR_MEAN_DB: [f32; 29] = [
     0.0, 0.0, 0.0, 0.0, 0.0, -2.7, -2.5, -2.4, -2.4, -2.5, -2.5, -2.5, -3.4, -5.2, -5.1, -7.3, -7.3,
+    // The 500 Hz levels (`air_power_table`).
+    0.0, 0.0, 0.0, 0.0, -3.2, -3.2, -3.2, -3.8, -5.6, -5.4, -7.3, -7.1,
 ];
 
 /// [`AIR_MEAN_DB`] with the whole-burst clipper (`ION_TDCLIP=1`).
-pub const AIR_MEAN_TD_DB: [f32; 17] = [
+pub const AIR_MEAN_TD_DB: [f32; 29] = [
     0.0, 0.0, 0.0, 0.0, 0.0, -0.8, -0.8, -0.8, -1.1, -0.8, -0.8, -1.3, -1.6, -3.2, -3.5, -6.0, -5.1,
+    // The whole-burst clipper has no pick for the 500 Hz levels: as above.
+    0.0, 0.0, 0.0, 0.0, -3.2, -3.2, -3.2, -3.8, -5.6, -5.4, -7.3, -7.1,
 ];
 
 pub fn thresholds_db() -> Vec<f32> {

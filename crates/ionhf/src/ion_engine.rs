@@ -97,6 +97,9 @@ pub enum IonCmd {
     SetSlice(Option<u8>),
     /// Keep the link to the slice levels both ways, at once.
     SetNarrow(bool),
+    /// A 500 Hz station (the host's `BW500`): calls and answers in the
+    /// narrow wave only. Takes effect once no link is up.
+    SetBw500(bool),
     /// Run the net with this name, as net control (not while a link is up).
     NetStart(String),
     /// Join this net (empty: the first one heard).
@@ -292,6 +295,10 @@ pub struct IonStatus {
     pub slice_pick: Option<u8>,
     /// Narrow held by hand (ours).
     pub narrow_hand: bool,
+    /// A 500 Hz station ([`IonCmd::SetBw500`]), and whether the link (or
+    /// the call under way) is a 500 Hz one.
+    pub bw500: bool,
+    pub link500: bool,
     pub narrow: bool,
     pub peer_narrow: bool,
     /// Why the link ended, once it has.
@@ -418,6 +425,7 @@ struct Worker {
     plot: bool,
     slice_pick: Option<u8>,
     narrow: bool,
+    bw500: bool,
     /// The stream was on at the last look (for the log).
     streaming: bool,
     /// Broadcast bursts sent since the last status, for the log.
@@ -477,6 +485,7 @@ impl Worker {
             plot: false,
             slice_pick: None,
             narrow: false,
+            bw500: false,
             streaming: false,
             bcast_sent: Vec::new(),
             net: None,
@@ -591,6 +600,7 @@ impl Worker {
         self.node.set_own_id(self.cw_id);
         self.node.station_mut().set_slot_pick(self.slice_pick);
         self.node.station_mut().set_narrow(self.narrow);
+        self.node.set_bw500(self.bw500);
         self.connected_at = None;
         self.closing = false;
         // A link cut short still gets its ID, before anything new; one
@@ -622,6 +632,8 @@ impl Worker {
         let name = name.trim().to_ascii_uppercase();
         let why = if self.call.is_empty() || (ncs && name.is_empty()) {
             Some("! a net needs your call (Setup) and a net name")
+        } else if self.bw500 {
+            Some("! 500 Hz only: a net is 2.45 kHz wide")
         } else if self.linked() {
             Some("! a link is up: no net until it ends")
         } else if self.node.on_air() {
@@ -1000,6 +1012,16 @@ impl Worker {
                 self.narrow = on;
                 self.node.station_mut().set_narrow(on);
             }
+            IonCmd::SetBw500(on) => {
+                if on && self.net.is_some() {
+                    self.note("! a net is up: it is 2.45 kHz wide");
+                } else if on != self.bw500 {
+                    self.bw500 = on;
+                    self.note(if on { "500 Hz links only" } else { "2.45 kHz links" });
+                }
+                // A link that is up keeps its width: applied once it ends
+                // (`run`).
+            }
             IonCmd::SetOfdmDb(db) => {
                 self.ofdm_db = db;
                 self.node.set_ofdm_gain_db(db);
@@ -1063,6 +1085,8 @@ impl Worker {
         IonStatus {
             slice_pick: self.slice_pick,
             narrow_hand: self.narrow,
+            bw500: self.bw500,
+            link500: s.link500(),
             narrow,
             peer_narrow,
             slot_tx: s.slots().0,
@@ -1164,6 +1188,15 @@ impl Worker {
                 }
             }
             let now = self.now();
+            // The width changed and no link is up: a new node, whose
+            // receivers start together.
+            if self.node.bw500() != self.bw500 && !self.linked() && !self.node.on_air() {
+                let listening = self.node.station().state() == State::Listening;
+                self.reset();
+                if listening {
+                    self.node.station_mut().listen();
+                }
+            }
             // The groups' bursts, as the link's receivers decoded them.
             self.node.set_groups(&self.bcast.ids());
             for inc in self.node.take_group() {
@@ -1219,8 +1252,10 @@ impl Worker {
             let hold_tx = self.id_on_air || id_waiting;
             // Broadcast only between sessions, as Data2G's host, and
             // never in a net.
+            // (Nor from a 500 Hz station: a broadcast is 2.45 kHz wide.)
             if !hold_tx
                 && link_idle
+                && !self.bw500
                 && self.net.is_none()
                 && !self.bcast_on_air
                 && !self.node.on_air()
@@ -1356,6 +1391,7 @@ pub fn spawn_peer() -> PeerLink {
             let start = Instant::now();
             let fresh = || {
                 let mut n = Node::new(Node::config("LOOP"), DEFAULT_LEAD_S);
+                n.hear_narrow(true);
                 n.station_mut().listen();
                 n
             };

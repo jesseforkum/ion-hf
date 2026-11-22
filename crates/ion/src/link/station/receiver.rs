@@ -1,8 +1,6 @@
 //! Receiving side: data bursts in, ACKs out.
 
-use super::{
-    End, FLOOR_WAVE, Incoming, Outgoing, Role, STALL_S, Station, TINY, TINY_ALL, more_robust, user_hi, wave_down,
-};
+use super::{End, Incoming, Outgoing, Role, STALL_S, Station, TINY, TINY_ALL, more_robust, user_hi, wave_down};
 use crate::level::{FrameSize, Guard, LADDER, Wave};
 use crate::link::frame::{AckInfo, Frame, Kind, TINY_ACK_FRAMES, Tiny, caps, flags};
 use crate::link::harq;
@@ -347,7 +345,7 @@ impl Station {
     /// has stalled.
     pub(super) fn capped_ack_wave(&self, w: Wave, now: f64) -> Wave {
         if now - self.last_progress > STALL_S {
-            return FLOOR_WAVE;
+            return self.floor_wave();
         }
         match self.ack_cap.filter(|_| self.cheap_ack_off > 0) {
             Some(cap) => more_robust(w, cap),

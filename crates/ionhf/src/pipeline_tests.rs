@@ -392,6 +392,46 @@ fn winlink_host_drives_a_ion_link() {
     );
 }
 
+/// `BW500` from the host: the call, the link and its data all in the
+/// narrow wave, through the engine and its receivers; then `BW2300`, and
+/// the next link is a 2.45 kHz one again.
+#[test]
+fn bw500_host_gets_a_500_hz_link_and_a_wide_one_after() {
+    let mut rig = Rig::new();
+    let h = rig.ion();
+    let (_host, port) = host_on(&rig, &h);
+    let mut c = HostClient::connect(port);
+    for l in [&format!("MYCALL {CALL}"), "BW500", "LISTEN OFF"] {
+        c.send(l);
+    }
+    assert!(c.read_until(&mut rig, 5, |s| s.len() >= 3), "{:?}", c.said);
+    let up = |s: &[String]| s.last().is_some_and(|l| l.starts_with("CONNECTED"));
+    let down = |s: &[String]| last_is(s, "DISCONNECTED");
+    for (bw, width) in [("BW500", 500), ("BW2300", 2300), ("BW500", 500)] {
+        c.send(bw);
+        c.send(&format!("CONNECT {CALL} LOOP"));
+        assert!(c.read_until(&mut rig, 60, up), "{bw}: {:?}", c.said);
+        assert!(
+            c.said.contains(&format!("CONNECTED {CALL} LOOP {width}")),
+            "{bw}: {:?}",
+            c.said
+        );
+        let line = format!("hello in {width}\n");
+        c.data.write_all(line.as_bytes()).unwrap();
+        let want = format!("LOOP copies: {line}");
+        let got = c.data_until(&mut rig, 90, want.as_bytes());
+        assert!(
+            got.windows(want.len()).any(|x| x == want.as_bytes()),
+            "{bw}: data port got {:?}; said {:?}",
+            String::from_utf8_lossy(&got),
+            c.said
+        );
+        c.send("DISCONNECT");
+        assert!(c.read_until(&mut rig, 90, down), "{bw}: {:?}", c.said);
+        c.said.clear();
+    }
+}
+
 /// A client made for Data2G's host (Ragtime) comes up on Ion: it opens the
 /// KISS port beside the command and data ports, sends its start-up
 /// commands, gets its broadcast group and Ion's one mode, holds a session,

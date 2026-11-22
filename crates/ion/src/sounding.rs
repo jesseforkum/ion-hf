@@ -48,9 +48,11 @@ pub fn level_name(code: usize, wave: Wave) -> String {
         Wave::Mfsk(MfskMode::R0) => "MFSK R0",
         Wave::Mfsk(MfskMode::R1) => "MFSK R1",
         Wave::Ofdm(Guard::Slice) => "OFDM slice",
+        Wave::Ofdm(Guard::Narrow) => "OFDM 500",
         Wave::Ofdm(Guard::Long) => "OFDM long",
         Wave::Ofdm(Guard::Normal) => "OFDM",
         Wave::Lifeline => "MFSK R1/7",
+        Wave::Mfsk500 => "MFSK 500",
     };
     if code == TINY {
         return format!("{w} header-only");
@@ -170,7 +172,7 @@ pub fn sequence_with(call: &str, ofdm_db: f32) -> (Vec<f32>, Vec<Sent>) {
         push(&mut a, b, 0, &mut sent, &mut seq);
     }
     for _round in 0..2 {
-        for (level, lv) in LADDER.iter().enumerate() {
+        for (level, lv) in LADDER[..crate::level::WIDE_LEVELS].iter().enumerate() {
             let size = lv.frame_bytes();
             let max = Frame::max_payload(size);
             let mut n = 1;

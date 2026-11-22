@@ -226,11 +226,13 @@ fn level(app: &App, ui: &mut egui::Ui, width: f32, s: f32) {
 }
 
 /// The thirds, clickable: a click pins the slice there, a second click
-/// leaves it to the meter; Narrow keeps the link to the slice levels.
+/// leaves it to the meter; Narrow keeps the link to the slice levels, and
+/// 500 Hz makes the station a 500 Hz one.
 fn slice_row(app: &mut App, ui: &mut egui::Ui, band: [f32; 3]) {
     let (pick, hand, narrow, peer) = app.link.as_ref().map_or((None, false, false, false), |s| {
         (s.slice_pick, s.narrow_hand, s.narrow, s.peer_narrow)
     });
+    let bw500 = app.link.as_ref().is_some_and(|s| s.bw500);
     ui.horizontal(|ui| {
         let w = ui.available_width();
         let mut clicked = None;
@@ -240,13 +242,23 @@ fn slice_row(app: &mut App, ui: &mut egui::Ui, band: [f32; 3]) {
         if let Some(k) = clicked {
             app.set_slice(if pick == Some(k) { None } else { Some(k) });
         }
-        let label = RichText::new("Narrow").color(if narrow || peer { theme::TEXT } else { theme::MUTED });
-        if ui
-            .add_sized(vec2(84.0, 30.0), egui::Button::selectable(hand, label))
-            .clicked()
-        {
-            app.set_narrow(!hand);
-        }
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let label = RichText::new("Narrow").color(if narrow || peer { theme::TEXT } else { theme::MUTED });
+            if ui
+                .add_sized(vec2(84.0, 24.0), egui::Button::selectable(hand, label))
+                .clicked()
+            {
+                app.set_narrow(!hand);
+            }
+            let label = RichText::new("500 Hz").color(if bw500 { theme::TEXT } else { theme::MUTED });
+            if ui
+                .add_sized(vec2(84.0, 24.0), egui::Button::selectable(bw500, label))
+                .clicked()
+            {
+                app.set_bw500(!bw500);
+            }
+        });
     });
 }
 

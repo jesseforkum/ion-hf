@@ -131,6 +131,7 @@ pub fn family(l: usize) -> &'static str {
         Some(Wave::Mfsk(MfskMode::R0)) => "MFSK R0",
         Some(Wave::Mfsk(MfskMode::R1)) => "MFSK R1",
         Some(Wave::Ofdm(Guard::Slice)) => "SLICE",
+        Some(Wave::Ofdm(Guard::Narrow) | Wave::Mfsk500) => "500",
         Some(Wave::Ofdm(Guard::Long)) => "LONG",
         Some(Wave::Ofdm(Guard::Normal)) => "OFDM",
         Some(Wave::Lifeline) | None => "",
@@ -241,17 +242,23 @@ pub fn readout(ui: &mut egui::Ui, r: &Readout, width: f32, s: f32) {
 }
 
 fn ladder(p: &egui::Painter, rect: Rect, r: &Readout, color: Color32, s: f32) {
-    let n = LADDER.len();
+    // One ladder or the other: a 500 Hz link's levels, else the 2.45 kHz
+    // ladder's.
+    let (from, n) = match [r.level, r.ours, r.peer, r.ceiling].into_iter().flatten().next() {
+        Some(l) if ion::level::is_narrow(l) => (ion::level::NARROW_FLOOR, LADDER.len() - ion::level::NARROW_FLOOR),
+        _ => (0, ion::level::WIDE_LEVELS),
+    };
+    let groups = (1..n).filter(|&l| family(from + l) != family(from + l - 1)).count();
     let group_gap = 5.0 * s;
-    let groups = (1..n).filter(|&l| family(l) != family(l - 1)).count();
     let gap = 2.0 * s;
     let w = (rect.width() - groups as f32 * group_gap - (n - 1) as f32 * gap) / n as f32;
     let top = rect.min.y + 9.0 * s;
     let cell_h = 16.0 * s;
     let mut x = rect.min.x;
     let mut centers = Vec::with_capacity(n);
-    for l in 0..n {
-        if l > 0 && family(l) != family(l - 1) {
+    for k in 0..n {
+        let l = from + k;
+        if k > 0 && family(l) != family(l - 1) {
             x += group_gap;
         }
         let cell = Rect::from_min_size(pos2(x, top), vec2(w, cell_h));
@@ -267,11 +274,11 @@ fn ladder(p: &egui::Painter, rect: Rect, r: &Readout, color: Color32, s: f32) {
             Stroke::new(1.0, theme::LINE)
         };
         p.rect(cell, 1.0, fill, stroke, StrokeKind::Inside);
-        if l % 4 == 0 || l == n - 1 {
+        if k % 4 == 0 || k == n - 1 {
             p.text(
                 pos2(cell.center().x, cell.max.y + 9.0 * s),
                 Align2::CENTER_TOP,
-                l.to_string(),
+                k.to_string(),
                 FontId::monospace(10.0 * s),
                 theme::MUTED,
             );
@@ -287,14 +294,14 @@ fn ladder(p: &egui::Painter, rect: Rect, r: &Readout, color: Color32, s: f32) {
         };
         p.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
     };
-    if let Some(c) = r.ceiling.and_then(|l| centers.get(l)) {
+    if let Some(c) = r.ceiling.and_then(|l| centers.get(l.wrapping_sub(from))) {
         tri(pos2(*c, top - 2.0 * s), true, theme::TEXT);
     }
     let below = top + cell_h + 2.0 * s;
-    if let Some(c) = r.ours.and_then(|l| centers.get(l)) {
+    if let Some(c) = r.ours.and_then(|l| centers.get(l.wrapping_sub(from))) {
         tri(pos2(*c, below), false, theme::US);
     }
-    if let Some(c) = r.peer.and_then(|l| centers.get(l)) {
+    if let Some(c) = r.peer.and_then(|l| centers.get(l.wrapping_sub(from))) {
         tri(pos2(*c, below), false, theme::PEER);
     }
 }

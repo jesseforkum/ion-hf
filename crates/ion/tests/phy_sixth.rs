@@ -113,6 +113,7 @@ fn nums_from_env() -> Vec<Numerology> {
                 "half" => Some(Numerology::Half),
                 "sixth" => Some(Numerology::Sixth),
                 "slice" => Some(Numerology::Slice),
+                "narrow" => Some(Numerology::Narrow),
                 "normal" => Some(Numerology::Normal),
                 "long" => Some(Numerology::Long),
                 _ => None,

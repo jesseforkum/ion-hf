@@ -52,6 +52,12 @@
 //! for us, else `CANCELPENDING`: a scanning client stays on the frequency
 //! in between.
 //!
+//! `BW500` makes Ion a 500 Hz station until `BW2300` or `BW2750`, or
+//! until the client goes: calls go out and are answered in the narrow
+//! OFDM wave only, and every link is a 500 Hz one (`docs/link.md`, 500 Hz
+//! links). A link already up keeps its width. Nets and broadcasts are
+//! 2.45 kHz wide: `NET` and `BCAST OPEN` are `WRONG` meanwhile.
+//!
 //! `CLEANTXBUFFER` drops what has never been on air, as VARA's; what is
 //! on air unacknowledged (the limbo) still goes, and a VARA client's
 //! `BUFFER` leaves it out ([`ion::link::Clean`]).
@@ -392,6 +398,9 @@ struct Host {
     retries: Option<u32>,
     /// `PENDING` said, and neither `CONNECTED` nor `CANCELPENDING` since.
     pending: bool,
+    /// The client's `BW500`: a 500 Hz station (FCC §97.221(c) holds an
+    /// automatic station outside its sub-bands to 500 Hz).
+    narrow_only: bool,
     /// The command client's net: its KISS port, and whether we run it.
     net_port: Option<u8>,
     net_ncs: bool,
@@ -443,6 +452,7 @@ impl Host {
             bcast_client: false,
             data2g: false,
             retries: None,
+            narrow_only: false,
             pending: false,
             net_port: None,
             net_ncs: false,
@@ -518,6 +528,9 @@ impl Host {
         self.note("Host disconnected".into());
         self.bcast_client = false;
         self.data2g = false;
+        if std::mem::take(&mut self.narrow_only) {
+            let _ = self.ion.send(IonCmd::SetBw500(false));
+        }
         self.forget_net();
         self.line.clear();
         self.waiting = None;
@@ -743,7 +756,7 @@ impl Host {
             ["LISTEN", "ON"] => {
                 self.listen = true;
                 if self.connected.is_none() && self.calling.is_none() {
-                    let _ = self.ion.send(IonCmd::Listen);
+                    self.relisten();
                 }
                 self.say("OK");
             }
@@ -850,6 +863,7 @@ impl Host {
                 None => self.say("WRONG"),
             },
             ["VERSION"] => self.say(&format!("VERSION IonHF {}", env!("CARGO_PKG_VERSION"))),
+            ["BCAST", "OPEN", ..] | ["NET", ..] if self.narrow_only => self.say("WRONG"),
             ["BCAST", "OPEN", rest @ ..] => {
                 self.bcast_client = true;
                 let name: Vec<&str> = rest.iter().take_while(|w| **w != "FROM").copied().collect();
@@ -907,6 +921,15 @@ impl Host {
                 Some(c) => self.net_command(c),
                 None => self.say("WRONG"),
             },
+            ["BW500"] if self.net_up || self.net_port.is_some() => self.say("WRONG"),
+            [w @ ("BW500" | "BW2300" | "BW2750")] => {
+                let narrow = *w == "BW500";
+                if narrow != self.narrow_only {
+                    self.narrow_only = narrow;
+                    let _ = self.ion.send(IonCmd::SetBw500(narrow));
+                }
+                self.say("OK");
+            }
             [w, ..]
                 if w.starts_with("BW")
                     || matches!(
@@ -1125,7 +1148,8 @@ impl Host {
                         Some(dst) => (self.mycall.clone(), dst),
                         None => (s.peer.clone(), self.mycall.clone()),
                     };
-                    self.say(&format!("CONNECTED {} {} 2300", pair.0, pair.1));
+                    let width = if s.link500 { 500 } else { 2300 };
+                    self.say(&format!("CONNECTED {} {} {width}", pair.0, pair.1));
                     self.note(format!("Host: connected {} to {}", pair.0, pair.1));
                     self.connected = Some(pair);
                     self.last_buffer = None;
@@ -1702,6 +1726,8 @@ mod tests {
             holding: false,
             slice_pick: None,
             narrow_hand: false,
+            bw500: false,
+            link500: false,
             narrow: false,
             peer_narrow: false,
             end: None,
@@ -1749,6 +1775,36 @@ mod tests {
         h.client_gone();
         assert_eq!(sent_db(&rx), [-6.0, 0.0]);
         assert_eq!(lines(&mut h, &["DATA2G ON", "TXPOWER"]), ["OK", "TXPOWER 0.0"]);
+    }
+
+    /// BW500 makes Ion a 500 Hz station until a wide mode is asked for or
+    /// the client goes; nets and broadcasts are refused meanwhile.
+    #[test]
+    fn bw500_makes_a_500_hz_station() {
+        fn widths(rx: &Receiver<IonCmd>) -> Vec<bool> {
+            rx.try_iter()
+                .filter_map(|c| match c {
+                    IonCmd::SetBw500(on) => Some(on),
+                    _ => None,
+                })
+                .collect()
+        }
+        let (mut h, rx) = host();
+        assert_eq!(
+            lines(&mut h, &["MYCALL N0ABC", "BW2300", "BW500", "BW500", "LISTEN ON"]),
+            ["OK"; 5]
+        );
+        assert_eq!(widths(&rx), [true]);
+        assert_eq!(
+            lines(&mut h, &["NET OPEN TNARES", "BCAST OPEN RAGTIME", "CONNECT N0ABC LOOP"]),
+            ["WRONG", "WRONG", "OK"]
+        );
+        assert_eq!(lines(&mut h, &["ABORT", "BW2750", "BW500"]), ["OK"; 3]);
+        assert_eq!(widths(&rx), [false, true]);
+        h.client_gone();
+        assert_eq!(widths(&rx), [false]);
+        h.client_gone();
+        assert_eq!(widths(&rx), [false; 0]);
     }
 
     /// Data2G's RETRIES: the tries of a call after the first, 0 to 20, for
